@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenClaw Desktop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">OpenClaw Desktop</p>
+          <h1>Install and run OpenClaw without the setup maze.</h1>
+          <p class="subtitle">
+            Check your system, install the official OpenClaw CLI, start the daemon, and try an agent command from one desktop window.
+          </p>
+        </div>
+        <button id="refreshButton" class="icon-button" type="button" aria-label="Refresh status" title="Refresh status">↻</button>
+      </section>
+
+      <section class="status-grid" aria-label="Runtime status">
+        <article class="status-card">
+          <span>Node.js</span>
+          <strong id="nodeVersion">Checking</strong>
+          <small id="nodeHealth">Waiting</small>
+        </article>
+        <article class="status-card">
+          <span>npm</span>
+          <strong id="npmVersion">Checking</strong>
+          <small>Package installer</small>
+        </article>
+        <article class="status-card">
+          <span>OpenClaw</span>
+          <strong id="openclawVersion">Checking</strong>
+          <small>CLI package</small>
+        </article>
+      </section>
+
+      <section class="workspace">
+        <div class="actions" aria-label="OpenClaw actions">
+          <button id="installButton" type="button">
+            <span class="button-icon">↓</span>
+            Install or update
+          </button>
+          <button id="onboardButton" type="button">
+            <span class="button-icon">✓</span>
+            Finish setup
+          </button>
+          <button id="agentStatusButton" type="button">
+            <span class="button-icon">●</span>
+            Gateway status
+          </button>
+          <button id="doctorButton" type="button">
+            <span class="button-icon">+</span>
+            Doctor
+          </button>
+        </div>
+
+        <form id="messageForm" class="message-box">
+          <label for="messageInput">Try a message</label>
+          <div class="message-row">
+            <input id="messageInput" type="text" value="Ship checklist" autocomplete="off" />
+            <button type="submit">Send</button>
+          </div>
+        </form>
+
+        <section class="log-panel" aria-label="Activity log">
+          <div class="log-header">
+            <span>Activity</span>
+            <button id="clearLogButton" class="ghost-button" type="button">Clear</button>
+          </div>
+          <pre id="logOutput"></pre>
+        </section>
+      </section>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

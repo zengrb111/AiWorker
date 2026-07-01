@@ -1,0 +1,61 @@
+{
+  "name": "openclaw-desktop",
+  "version": "0.1.0",
+  "description": "A cross-platform desktop installer and launcher for OpenClaw.",
+  "main": "dist/main/main.js",
+  "author": "AiWorker",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "clean": "rimraf dist release",
+    "build": "tsc && node scripts/copy-renderer.mjs",
+    "dev": "npm run build && electron .",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.5.4"
+  },
+  "build": {
+    "appId": "com.aiworker.openclawdesktop",
+    "productName": "OpenClaw Desktop",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    }
+  }
+}
