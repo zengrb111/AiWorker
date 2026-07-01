@@ -66,3 +66,17 @@ export async function doctorOpenClaw(onData: LogSink): Promise<CommandResult> {
 export async function sendOpenClawAgentMessage(message: string, onData: LogSink): Promise<CommandResult> {
   return runCommand("openclaw", ["agent", "--message", message], onData);
 }
+
+export async function openProjectInVSCode(projectPath: string, onData: LogSink): Promise<CommandResult> {
+  const result = await runCommand("code", [projectPath], onData);
+  if (result.ok) {
+    return result;
+  }
+
+  return {
+    ...result,
+    stderr:
+      `${result.stderr.trim() ? `${result.stderr.trim()}\n\n` : ""}` +
+      "Could not find the VS Code command line tool. Install Visual Studio Code, then enable the 'code' command from the Command Palette."
+  };
+}

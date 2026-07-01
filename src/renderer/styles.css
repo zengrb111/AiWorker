@@ -71,10 +71,18 @@ h1 {
 }
 
 .icon-button,
+.secondary-button,
 .ghost-button,
 button {
   border: 0;
   cursor: pointer;
+}
+
+.hero-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
 }
 
 .icon-button {
@@ -86,6 +94,17 @@ button {
   box-shadow: var(--shadow);
   color: var(--accent);
   font-size: 22px;
+}
+
+.secondary-button {
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  color: var(--accent-dark);
+  font-weight: 800;
 }
 
 .status-grid {
@@ -148,6 +167,7 @@ button {
 
 .actions button:disabled,
 .message-row button:disabled,
+.secondary-button:disabled,
 .icon-button:disabled {
   cursor: progress;
   opacity: 0.62;
@@ -244,6 +264,10 @@ button {
 
   .hero {
     display: grid;
+  }
+
+  .hero-actions {
+    justify-content: start;
   }
 
   h1 {

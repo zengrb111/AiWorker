@@ -6,6 +6,7 @@ const elements = {
   npmVersion: document.querySelector("#npmVersion"),
   openclawVersion: document.querySelector("#openclawVersion"),
   refreshButton: document.querySelector("#refreshButton"),
+  openVSCodeButton: document.querySelector("#openVSCodeButton"),
   installButton: document.querySelector("#installButton"),
   onboardButton: document.querySelector("#onboardButton"),
   agentStatusButton: document.querySelector("#agentStatusButton"),
@@ -18,6 +19,7 @@ const elements = {
 
 const actionButtons = [
   elements.refreshButton,
+  elements.openVSCodeButton,
   elements.installButton,
   elements.onboardButton,
   elements.agentStatusButton,
@@ -78,6 +80,7 @@ async function runAction(label, action) {
 }
 
 elements.refreshButton.addEventListener("click", refreshStatus);
+elements.openVSCodeButton.addEventListener("click", () => runAction("Open in VS Code", api.openVSCode));
 elements.installButton.addEventListener("click", () => runAction("Install or update", api.install));
 elements.onboardButton.addEventListener("click", () => runAction("Finish setup", api.onboard));
 elements.agentStatusButton.addEventListener("click", () => runAction("Gateway status", api.agentStatus));

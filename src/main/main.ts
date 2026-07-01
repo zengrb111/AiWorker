@@ -5,6 +5,7 @@ import {
   getOpenClawStatus,
   getRuntimeStatus,
   installOpenClaw,
+  openProjectInVSCode,
   runOnboarding,
   sendOpenClawAgentMessage
 } from "./openclaw.js";
@@ -69,6 +70,11 @@ ipcMain.handle("openclaw:agent-status", async () => {
 ipcMain.handle("openclaw:doctor", async () => {
   sendLog("Running OpenClaw doctor...\n");
   return doctorOpenClaw(sendLog);
+});
+
+ipcMain.handle("openclaw:open-vscode", async () => {
+  sendLog("Opening this project in VS Code...\n");
+  return openProjectInVSCode(process.cwd(), sendLog);
 });
 
 ipcMain.handle("openclaw:message", async (_event, message: string) => {

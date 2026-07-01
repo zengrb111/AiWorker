@@ -7,6 +7,7 @@ export interface OpenClawApi {
   onboard: () => Promise<CommandResult>;
   agentStatus: () => Promise<CommandResult>;
   doctor: () => Promise<CommandResult>;
+  openVSCode: () => Promise<CommandResult>;
   message: (message: string) => Promise<CommandResult>;
   onLog: (callback: (message: string) => void) => () => void;
 }
@@ -17,6 +18,7 @@ const api: OpenClawApi = {
   onboard: () => ipcRenderer.invoke("openclaw:onboard"),
   agentStatus: () => ipcRenderer.invoke("openclaw:agent-status"),
   doctor: () => ipcRenderer.invoke("openclaw:doctor"),
+  openVSCode: () => ipcRenderer.invoke("openclaw:open-vscode"),
   message: (message: string) => ipcRenderer.invoke("openclaw:message", message),
   onLog: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, message: string): void => {
