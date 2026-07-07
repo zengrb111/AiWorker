@@ -1,7 +1,17 @@
 node_modules/
 dist/
+.next/
 release/
 *.log
+*.tsbuildinfo
+*.pid
 .DS_Store
 Thumbs.db
-.env
+.env*
+!.env.example
+
+# Local data and generated artifacts
+prisma/*.db
+prisma/*.db-journal
+src/generated/
+src/renderer/*.zip
