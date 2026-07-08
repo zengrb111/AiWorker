@@ -1,5 +1,8 @@
 import { createRequire } from "module";
 import { pathToFileURL } from "node:url";
+import { sign, createPublicKey } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import QRCode from "qrcode";
 
 export type OpenClawQr = {
@@ -53,6 +56,7 @@ type GatewayResponse = {
     details?: unknown;
   };
 };
+
 type WeixinLoginModule = {
   startWeixinLoginWithQr(opts: {
     force?: boolean;
@@ -107,6 +111,7 @@ function gatewayUrl(): string {
 function gatewayOrigin(): string {
   return process.env.OPENCLAW_GATEWAY_ORIGIN || requireBaseUrl();
 }
+
 async function loadWeixinLoginModule(): Promise<WeixinLoginModule> {
   const pluginPath =
     process.env.OPENCLAW_WEIXIN_LOGIN_MODULE ||
@@ -132,22 +137,6 @@ async function renderQrImageDataUrl(value: string): Promise<string> {
   });
 }
 
-function endpoint(defaultPath: string, envName: string): string {
-  return process.env[envName] || defaultPath;
-}
-
-function fillPath(path: string, params: Record<string, string>): string {
-  return Object.entries(params).reduce(
-    (nextPath, [key, value]) => nextPath.replace(`:${key}`, encodeURIComponent(value)),
-    path
-  );
-}
-
-function openClawAuth(): { token: string } | undefined {
-  const token = process.env.OPENCLAW_API_TOKEN?.trim();
-  return token ? { token } : undefined;
-}
-
 function gatewayErrorMessage(error: GatewayResponse["error"]): string {
   if (!error) {
     return "Gateway request failed.";
@@ -156,18 +145,131 @@ function gatewayErrorMessage(error: GatewayResponse["error"]): string {
   return `${error.message ?? error.code ?? "Gateway request failed."}${detail}`;
 }
 
-async function requestGateway<T>(method: string, params: Record<string, unknown> = {}, timeoutMs = 45000): Promise<T> {
-  return await new Promise<T>((resolve, reject) => {
+// ---------------------------------------------------------------------------
+// Device authentication (Ed25519 challenge-response)
+//
+// OpenClaw's gateway requires device-level authentication in addition to the
+// shared operator token. After the WebSocket opens, the server sends a
+// `connect.challenge` event containing a nonce. The client must sign
+//   "v2|<deviceId>|<clientId>|<clientMode>|<role>|<scopes>|<signedAt>|<token>|<nonce>"
+// with the device's Ed25519 private key and include the signature in the
+// `device` field of the `connect` request.
+// ---------------------------------------------------------------------------
+
+type DeviceCredentials = {
+  deviceId: string;
+  privateKeyPem: string;
+  publicKeyB64Url: string;
+  operatorToken: string;
+};
+
+let cachedDeviceCreds: DeviceCredentials | null = null;
+
+function loadDeviceCredentials(): DeviceCredentials {
+  if (cachedDeviceCreds) return cachedDeviceCreds;
+  const home = homedir();
+  const dev = JSON.parse(
+    readFileSync(`${home}/.openclaw/identity/device.json`, "utf8")
+  ) as {
+    deviceId: string;
+    publicKeyPem: string;
+    privateKeyPem: string;
+  };
+  const devAuth = JSON.parse(
+    readFileSync(`${home}/.openclaw/identity/device-auth.json`, "utf8")
+  ) as {
+    tokens: { operator: { token: string } };
+  };
+  const opToken = devAuth.tokens?.operator?.token;
+  if (!opToken) {
+    throw new Error("OpenClaw 设备认证文件中未找到 operator token。");
+  }
+
+  const pubObj = createPublicKey({
+    key: dev.publicKeyPem,
+    format: "pem",
+    type: "spki",
+  });
+  const pubDer = pubObj.export({ type: "spki", format: "der" });
+  const pubB64Url = pubDer.subarray(pubDer.length - 32).toString("base64url");
+
+  cachedDeviceCreds = {
+    deviceId: dev.deviceId,
+    privateKeyPem: dev.privateKeyPem,
+    publicKeyB64Url: pubB64Url,
+    operatorToken: opToken,
+  };
+  return cachedDeviceCreds;
+}
+
+function buildDeviceField(nonce: string) {
+  const creds = loadDeviceCredentials();
+  const signedAt = Date.now();
+  const scopes = ["operator.admin"];
+  const msg = [
+    "v2",
+    creds.deviceId,
+    "cli",
+    "cli",
+    "operator",
+    scopes.join(","),
+    String(signedAt),
+    creds.operatorToken,
+    nonce,
+  ].join("|");
+  const signature = sign(
+    null,
+    Buffer.from(msg, "utf8"),
+    { key: creds.privateKeyPem, format: "pem", type: "pkcs8" }
+  ).toString("base64url");
+  return {
+    id: creds.deviceId,
+    publicKey: creds.publicKeyB64Url,
+    signature,
+    signedAt,
+    nonce,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Gateway connection
+//
+// Opens a WebSocket, waits for the `connect.challenge` event, signs it with
+// the device private key, sends the `connect` request with device auth, and
+// returns a connection object that can be used to call gateway methods and
+// subscribe to events.
+// ---------------------------------------------------------------------------
+
+type GatewayConnection = {
+  request<T = unknown>(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number
+  ): Promise<T>;
+  onEvent(handler: (event: string, payload: unknown) => void): void;
+  close(): void;
+};
+
+async function connectGateway(connectTimeoutMs = 15000): Promise<GatewayConnection> {
+  return new Promise<GatewayConnection>((resolve, reject) => {
     const ws = new WebSocket(gatewayUrl(), { origin: gatewayOrigin() });
-    const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+    const pending = new Map<
+      string,
+      { resolve: (value: unknown) => void; reject: (error: Error) => void }
+    >();
     const timers = new Set<NodeJS.Timeout>();
+    const eventHandlers: Array<(event: string, payload: unknown) => void> = [];
+    let nonceResolve: ((value: string) => void) | null = null;
+    const noncePromise = new Promise<string>((resolveNonce) => {
+      nonceResolve = resolveNonce;
+    });
+    let settled = false;
 
     function cleanup() {
-      for (const timer of timers) {
-        clearTimeout(timer);
-      }
+      for (const timer of timers) clearTimeout(timer);
       timers.clear();
       pending.clear();
+      eventHandlers.length = 0;
       try {
         ws.close();
       } catch {
@@ -175,20 +277,19 @@ async function requestGateway<T>(method: string, params: Record<string, unknown>
       }
     }
 
-    function fail(error: Error) {
-      cleanup();
-      reject(error);
-    }
-
-    function send(requestMethod: string, requestParams: Record<string, unknown>, requestTimeoutMs: number) {
+    function sendRequest(
+      method: string,
+      params: Record<string, unknown>,
+      timeoutMs: number
+    ): Promise<unknown> {
       const id = crypto.randomUUID();
-      ws.send(JSON.stringify({ type: "req", id, method: requestMethod, params: requestParams }));
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        fail(new Error(`OpenClaw Gateway 调用超时：${requestMethod}`));
-      }, requestTimeoutMs);
-      timers.add(timer);
+      ws.send(JSON.stringify({ type: "req", id, method, params }));
       return new Promise<unknown>((requestResolve, requestReject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          requestReject(new Error(`OpenClaw Gateway 调用超时：${method}`));
+        }, timeoutMs);
+        timers.add(timer);
         pending.set(id, {
           resolve: (value) => {
             clearTimeout(timer);
@@ -199,121 +300,267 @@ async function requestGateway<T>(method: string, params: Record<string, unknown>
             clearTimeout(timer);
             timers.delete(timer);
             requestReject(error);
-          }
+          },
         });
       });
     }
 
-    ws.on("open", async () => {
-      try {
-        await send(
-          "connect",
-          {
-            minProtocol: 4,
-            maxProtocol: 4,
-            client: {
-              id: process.env.OPENCLAW_GATEWAY_CLIENT_ID || "gateway-client",
-              version: "chuangxingyun-0.1.0",
-              platform: "web",
-              mode: "backend"
-            },
-            role: "operator",
-            scopes: ["operator.admin", "operator.read", "operator.write", "operator.approvals", "operator.pairing"],
-            caps: ["tool-events"],
-            auth: openClawAuth(),
-            userAgent: "Chuangxingyun AI Worker",
-            locale: "zh-CN"
-          },
-          15000
-        );
-        const result = await send(method, params, timeoutMs);
-        cleanup();
-        resolve(result as T);
-      } catch (error) {
-        fail(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-
     ws.on("message", (data) => {
-      let message: GatewayResponse;
+      let message: {
+        type?: string;
+        id?: string;
+        ok?: boolean;
+        payload?: unknown;
+        error?: GatewayResponse["error"];
+        event?: string;
+      };
       try {
         message = JSON.parse(String(data));
       } catch {
         return;
       }
-      if (message.type !== "res" || !message.id) {
+
+      // Capture the connect.challenge nonce.
+      if (message.type === "event" && message.event === "connect.challenge") {
+        const payload = message.payload as { nonce?: string } | undefined;
+        if (nonceResolve) {
+          nonceResolve(payload?.nonce || "");
+          nonceResolve = null;
+        }
         return;
       }
-      const request = pending.get(message.id);
-      if (!request) {
+
+      // Route responses to pending requests.
+      if (message.type === "res" && message.id) {
+        const request = pending.get(message.id);
+        if (request) {
+          pending.delete(message.id);
+          if (message.ok) {
+            request.resolve(message.payload);
+          } else {
+            request.reject(new Error(gatewayErrorMessage(message.error)));
+          }
+        }
         return;
       }
-      pending.delete(message.id);
-      if (message.ok) {
-        request.resolve(message.payload);
-      } else {
-        request.reject(new Error(gatewayErrorMessage(message.error)));
+
+      // Forward other events to registered handlers.
+      if (message.type === "event" && message.event) {
+        for (const handler of eventHandlers) {
+          handler(message.event, message.payload);
+        }
       }
     });
 
     ws.on("error", (error) => {
-      fail(new Error(`OpenClaw Gateway 连接失败：${error.message}`));
+      if (nonceResolve) {
+        nonceResolve("");
+        nonceResolve = null;
+      }
+      for (const [, request] of pending) {
+        request.reject(
+          new Error(`OpenClaw Gateway 连接失败：${error.message}`)
+        );
+      }
+      pending.clear();
+      if (!settled) {
+        cleanup();
+        reject(new Error(`OpenClaw Gateway 连接失败：${error.message}`));
+      }
     });
 
     ws.on("close", (code, reason) => {
+      if (nonceResolve) {
+        nonceResolve("");
+        nonceResolve = null;
+      }
       if (pending.size > 0) {
-        fail(new Error(`OpenClaw Gateway 已关闭：${code} ${String(reason)}`.trim()));
+        const closeError = new Error(
+          `OpenClaw Gateway 已关闭：${code} ${String(reason)}`.trim()
+        );
+        for (const [, request] of pending) {
+          request.reject(closeError);
+        }
+        pending.clear();
+      }
+    });
+
+    ws.on("open", async () => {
+      try {
+        // Wait for the connect.challenge event (5 s timeout).
+        const timeoutId = setTimeout(() => {
+          if (nonceResolve) {
+            nonceResolve("");
+            nonceResolve = null;
+          }
+        }, 5000);
+        timers.add(timeoutId);
+
+        const nonce = await noncePromise;
+        clearTimeout(timeoutId);
+        timers.delete(timeoutId);
+
+        if (!nonce) {
+          throw new Error(
+            "OpenClaw Gateway 未发送 connect.challenge 质询。"
+          );
+        }
+
+        const device = buildDeviceField(nonce);
+        const creds = loadDeviceCredentials();
+
+        await sendRequest(
+          "connect",
+          {
+            minProtocol: 4,
+            maxProtocol: 4,
+            client: {
+              id: "cli",
+              version: "chuangxingyun-0.1.0",
+              platform: "win32",
+              mode: "cli",
+            },
+            role: "operator",
+            scopes: ["operator.admin"],
+            caps: ["tool-events"],
+            auth: { token: creds.operatorToken },
+            device,
+            userAgent: "Chuangxingyun AI Worker",
+            locale: "zh-CN",
+          },
+          connectTimeoutMs
+        );
+
+        settled = true;
+        resolve({
+          request<T = unknown>(
+            method: string,
+            params: Record<string, unknown>,
+            timeoutMs = 45000
+          ) {
+            return sendRequest(method, params, timeoutMs) as Promise<T>;
+          },
+          onEvent(handler: (event: string, payload: unknown) => void) {
+            eventHandlers.push(handler);
+          },
+          close: cleanup,
+        });
+      } catch (error) {
+        if (!settled) {
+          cleanup();
+          reject(
+            error instanceof Error ? error : new Error(String(error))
+          );
+        }
       }
     });
   });
 }
 
-async function requestOpenClaw<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  headers.set("Content-Type", "application/json");
-  const auth = openClawAuth();
-  if (auth) {
-    headers.set("Authorization", `Bearer ${auth.token}`);
-  }
+// ---------------------------------------------------------------------------
+// One-shot gateway call (connect → method → close)
+// ---------------------------------------------------------------------------
 
-  const url = `${requireBaseUrl()}${path}`;
-  const timeoutMs = Number(process.env.OPENCLAW_TIMEOUT_MS ?? 10000);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-  let response: Response;
+async function requestGateway<T>(
+  method: string,
+  params: Record<string, unknown> = {},
+  timeoutMs = 45000
+): Promise<T> {
+  const conn = await connectGateway();
   try {
-    response = await fetch(url, {
-      ...init,
-      signal: controller.signal,
-      headers,
-      cache: "no-store"
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`OpenClaw 服务不可用：无法连接 ${url}（${detail}）`);
+    return await conn.request<T>(method, params, timeoutMs);
   } finally {
-    clearTimeout(timeout);
+    conn.close();
   }
-
-  const text = await response.text();
-  let payload: Record<string, unknown> = {};
-  try {
-    payload = text ? JSON.parse(text) : {};
-  } catch {
-    throw new Error(`OpenClaw 调用失败：${url} 返回了非 JSON 内容。`);
-  }
-
-  if (!response.ok) {
-    const message = payload.error ?? payload.message ?? response.statusText;
-    const detail = typeof message === "string" ? message : JSON.stringify(message);
-    throw new Error(`OpenClaw 调用失败：${url} 返回 ${response.status}，${detail}`);
-  }
-
-  return payload as T;
 }
 
-function pickString(payload: Record<string, unknown>, keys: string[]): string | undefined {
+// ---------------------------------------------------------------------------
+// Chat via gateway
+//
+// Flow:
+//   1. Connect with device auth
+//   2. chat.startup({ sessionKey }) — initialise the chat session
+//   3. chat.send({ sessionKey, message, deliver: false, idempotencyKey })
+//      → returns { runId, status: "started" }
+//   4. Listen for `chat` events until payload.state === "final" and
+//      payload.runId === runId, then extract text from
+//      payload.message.content[].text
+// ---------------------------------------------------------------------------
+
+type ChatContentItem = { type: string; text: string };
+
+async function requestGatewayChat(
+  message: string,
+  timeoutMs?: number,
+  onDelta?: (deltaText: string) => void
+): Promise<{ runId: string; content: string; raw: unknown }> {
+  const effectiveTimeout =
+    timeoutMs ?? Number(process.env.OPENCLAW_CHAT_TIMEOUT_MS ?? 120000);
+  const conn = await connectGateway();
+  try {
+    const sessionKey = process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
+
+    // Initialise the chat session.
+    await conn.request("chat.startup", { sessionKey }, 15000);
+
+    // Send the user message — the response returns immediately with a runId.
+    const sendResult = await conn.request<{ runId: string; status: string }>(
+      "chat.send",
+      {
+        sessionKey,
+        message,
+        deliver: false,
+        idempotencyKey: `cx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      },
+      30000
+    );
+
+    const runId = sendResult.runId;
+    if (!runId) {
+      throw new Error("OpenClaw chat.send 未返回 runId。");
+    }
+
+    // Wait for the assistant's final reply via the event stream.
+    const content = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(
+          new Error(`OpenClaw 等待助手回复超时（${effectiveTimeout}ms）`)
+        );
+      }, effectiveTimeout);
+
+      conn.onEvent((event, payload) => {
+        if (event !== "chat") return;
+        const p = payload as {
+          state?: string;
+          runId?: string;
+          deltaText?: string;
+          message?: { content?: ChatContentItem[] };
+        };
+        if (p.state === "delta" && p.runId === runId && p.deltaText && onDelta) {
+          onDelta(p.deltaText);
+          return;
+        }
+        if (p.state === "final" && p.runId === runId) {
+          clearTimeout(timer);
+          const text = (p.message?.content || [])
+            .filter((c) => c.type === "text")
+            .map((c) => c.text)
+            .join("");
+          resolve(text);
+        }
+      });
+    });
+
+    return { runId, content, raw: sendResult };
+  } finally {
+    conn.close();
+  }
+}
+
+function pickString(
+  payload: Record<string, unknown>,
+  keys: string[]
+): string | undefined {
   for (const key of keys) {
     const value = payload[key];
     if (typeof value === "string" && value.trim()) {
@@ -365,31 +612,38 @@ export const openClawClient = {
 
   async sendTask(input: string | OpenClawTaskRequest): Promise<OpenClawTaskResult> {
     const request = typeof input === "string" ? { message: input } : input;
-    const payload = await requestOpenClaw<Record<string, unknown>>(endpoint("/agent/tasks", "OPENCLAW_TASK_PATH"), {
-      method: "POST",
-      body: JSON.stringify({
-        message: request.prompt ?? request.message,
-        originalMessage: request.message,
-        context: request.context,
-        conversationId: request.conversationId,
-        userId: request.userId
-      })
-    });
-    const content = pickString(payload, ["content", "message", "result", "text"]);
-    if (!content) {
+    const message = request.prompt ?? request.message;
+
+    const result = await requestGatewayChat(message);
+
+    if (!result.content) {
       throw new Error("OpenClaw 未返回任务内容。");
     }
-    const inlineImages = Array.isArray(payload.inlineImages)
-      ? payload.inlineImages.filter((item): item is string => typeof item === "string")
-      : [];
+
     return {
-      taskId: pickString(payload, ["taskId", "task_id", "id"]),
-      title: pickString(payload, ["title"]),
-      content,
-      coverImageUrl: pickString(payload, ["coverImageUrl", "cover_image_url"]),
-      inlineImages,
-      raw: payload
+      taskId: result.runId,
+      content: result.content,
+      raw: result.raw
+    };
+  },
+
+  async sendTaskStream(
+    input: string | OpenClawTaskRequest,
+    onDelta: (deltaText: string) => void
+  ): Promise<OpenClawTaskResult> {
+    const request = typeof input === "string" ? { message: input } : input;
+    const message = request.prompt ?? request.message;
+
+    const result = await requestGatewayChat(message, undefined, onDelta);
+
+    if (!result.content) {
+      throw new Error("OpenClaw 未返回任务内容。");
+    }
+
+    return {
+      taskId: result.runId,
+      content: result.content,
+      raw: result.raw
     };
   }
 };
-

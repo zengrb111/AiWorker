@@ -1,6 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { renderMarkdown } from "@/lib/markdown";
+import { escapeHtml, escapeAttr } from "@/lib/escape";
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: string };
 type AuthMode = "login" | "register";
@@ -113,10 +115,19 @@ export default function PlatformClient() {
   const [chatInput, setChatInput] = useState("");
   const [chatError, setChatError] = useState("");
   const [sending, setSending] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
+  const [streamingContent, setStreamingContent] = useState("");
+  const [toast, setToast] = useState<{ message: string; linkLabel?: string; linkSection?: Section } | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const [contentItems, setContentItems] = useState<ContentItem[]>([]);
   const [activeContent, setActiveContent] = useState<ContentItem | null>(null);
   const [copyHint, setCopyHint] = useState("");
+  const [editingContent, setEditingContent] = useState(false);
+  const [editingBody, setEditingBody] = useState("");
+  const [contentSaving, setContentSaving] = useState(false);
+  const [regeneratingImage, setRegeneratingImage] = useState<string | null>(null);
   const [wechatBinding, setWechatBinding] = useState<WechatBinding | null>(null);
   const [profileQr, setProfileQr] = useState<QrData | null>(null);
   const [profileError, setProfileError] = useState("");
@@ -167,6 +178,12 @@ export default function PlatformClient() {
     if (authMode !== "register" || !registerQr || registerBound || registerBinding || registerLoading) return;
     void checkRegisterBinding();
   }, [authMode, registerQr, registerBound, registerBinding]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   async function ensureRegisterQr() {
     if (registerQr || registerLoading) return;
@@ -250,29 +267,219 @@ export default function PlatformClient() {
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!activeConversation || !chatInput.trim() || sending) return;
+    if (!chatInput.trim() || sending) return;
     const content = chatInput;
+
+    // 没有对话时自动创建一个
+    let conversationId = activeConversation?.id;
+    if (!conversationId) {
+      try {
+        const data = await api<{ conversation: Conversation }>("/api/conversations", { method: "POST", body: "{}" });
+        setConversations((items) => [data.conversation, ...items]);
+        setActiveConversationId(data.conversation.id);
+        conversationId = data.conversation.id;
+      } catch (error) {
+        setChatError(error instanceof Error ? error.message : "创建对话失败。");
+        return;
+      }
+    }
+
     setChatInput("");
     setSending(true);
+    setIsThinking(true);
     setChatError("");
+    setStreamingContent("");
+
+    const tempUserMessage: Message = {
+      id: `temp-${Date.now()}`, role: "USER", content, createdAt: new Date().toISOString()
+    };
+    setConversations((prev) => prev.map((conv) =>
+      conv.id === conversationId
+        ? { ...conv, messages: [...conv.messages, tempUserMessage] }
+        : conv
+    ));
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    let localStreamContent = "";
+    let stoppedByUser = false;
+
     try {
-      await api<{ message: Message; taskId: string }>(`/api/conversations/${activeConversation.id}/messages`, {
+      const response = await fetch(`/api/conversations/${conversationId}/messages`, {
         method: "POST",
-        body: JSON.stringify({ content })
-      }, 120000);
-      await refreshConversations();
-      await refreshContent();
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({ error: "发送失败。" }));
+        throw new Error(errorPayload.error || "发送失败。");
+      }
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+
+        for (const eventBlock of events) {
+          const dataLine = eventBlock.split("\n").find((l) => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const data = JSON.parse(dataLine.slice(6));
+
+          if (data.type === "delta") {
+            setIsThinking(false);
+            localStreamContent += data.text;
+            setStreamingContent((prev) => prev + data.text);
+          } else if (data.type === "final") {
+            setStreamingContent("");
+            setIsThinking(false);
+            await refreshConversations();
+            if (data.contentSaved) {
+              setToast({ message: "已自动保存到内容库", linkLabel: "查看", linkSection: "library" });
+              await refreshContent();
+            }
+          } else if (data.type === "error") {
+            throw new Error(data.error);
+          }
+        }
+      }
     } catch (error) {
-      setChatError(error instanceof Error ? error.message : "OpenClaw 调用失败。");
+      // 优先用 controller.signal.aborted 判断，比 instanceof DOMException 更稳
+      if (controller.signal.aborted) {
+        stoppedByUser = true;
+        setIsThinking(false);
+        if (localStreamContent) {
+          const stoppedContent = `**已停止**\n\n${localStreamContent}`;
+          try {
+            await api(`/api/conversations/${conversationId}/messages/assistant`, {
+              method: "POST",
+              body: JSON.stringify({ content: stoppedContent })
+            });
+            await refreshConversations();
+          } catch {
+            // Ignore save errors
+          }
+        }
+      } else {
+        setChatError(error instanceof Error ? error.message : "OpenClaw 调用失败。");
+      }
     } finally {
+      if (!stoppedByUser) {
+        setStreamingContent("");
+      }
+      setIsThinking(false);
       setSending(false);
+      abortControllerRef.current = null;
     }
+  }
+
+  function stopGeneration() {
+    // 防止重入：若已经 abort，直接 return
+    if (!abortControllerRef.current || abortControllerRef.current.signal.aborted) return;
+    abortControllerRef.current.abort();
   }
 
   async function copyText(text: string, hint: string) {
     await navigator.clipboard.writeText(text);
     setCopyHint(hint);
     window.setTimeout(() => setCopyHint(""), 1600);
+  }
+
+  async function copyMessage(message: Message) {
+    await navigator.clipboard.writeText(message.content);
+    setCopiedMessageId(message.id);
+    window.setTimeout(() => setCopiedMessageId(null), 1600);
+  }
+
+  async function copyRichContent(item: ContentItem) {
+    const images = parseInlineImages(item.inlineImagesJson);
+    const allImages = [
+      item.coverImageUrl ?? fallbackImages[0],
+      ...images
+    ].filter(Boolean) as string[];
+
+    const htmlParts: string[] = [];
+    htmlParts.push(`<h1>${escapeHtml(item.title)}</h1>`);
+    for (const img of allImages) {
+      htmlParts.push(`<img src="${escapeAttr(img)}" alt="配图" />`);
+    }
+    htmlParts.push(renderMarkdown(item.body));
+    const html = htmlParts.join("\n");
+    const plain = `${item.title}\n\n${item.body}`;
+
+    try {
+      const htmlBlob = new Blob([html], { type: "text/html" });
+      const textBlob = new Blob([plain], { type: "text/plain" });
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": htmlBlob,
+          "text/plain": textBlob
+        })
+      ]);
+      setCopyHint("图文已复制");
+    } catch {
+      await navigator.clipboard.writeText(plain);
+      setCopyHint("已复制（纯文本）");
+    }
+    window.setTimeout(() => setCopyHint(""), 1600);
+  }
+
+  function startEditContent() {
+    if (!activeContent) return;
+    setEditingBody(activeContent.body);
+    setEditingContent(true);
+  }
+
+  function cancelEditContent() {
+    setEditingContent(false);
+    setEditingBody("");
+  }
+
+  async function saveContentEdit() {
+    if (!activeContent) return;
+    setContentSaving(true);
+    try {
+      const data = await api<{ contentItem: ContentItem }>(`/api/content/${activeContent.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ body: editingBody })
+      });
+      setActiveContent(data.contentItem);
+      setEditingContent(false);
+      await refreshContent();
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "保存失败。");
+    } finally {
+      setContentSaving(false);
+    }
+  }
+
+  async function regenerateImage(imageType: "cover" | "inline", imageIndex: number) {
+    if (!activeContent) return;
+    const key = `${imageType}-${imageIndex}`;
+    setRegeneratingImage(key);
+    try {
+      const data = await api<{ contentItem: ContentItem; imageUrl: string }>(
+        `/api/content/${activeContent.id}/regenerate-image`,
+        {
+          method: "POST",
+          body: JSON.stringify({ imageType, imageIndex })
+        }
+      );
+      setActiveContent(data.contentItem);
+      await refreshContent();
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "图片重新生成失败。");
+    } finally {
+      setRegeneratingImage(null);
+    }
   }
 
   async function ensureProfileQr() {
@@ -325,30 +532,74 @@ export default function PlatformClient() {
     return (
       <main className="auth-shell">
         <section className="auth-card">
-          <div className="brand-mark">创星云</div>
-          <h1>创星云-AI数字员工平台</h1>
-          <p>快速创建你的AI数字员工军团</p>
-          <div className="auth-tabs">
-            <button className={authMode === "login" ? "active" : ""} onClick={() => changeAuthMode("login")}>登录</button>
-            <button className={authMode === "register" ? "active" : ""} onClick={() => changeAuthMode("register")}>注册</button>
-          </div>
-          {authMode === "register" && (
-            <div className="qr-panel">
-              <h2>请先绑定微信通道</h2>
-              <p>扫码绑定后，即可在微信里指挥 AI 员工完成选题推荐、图文生成和内容改写。</p>
-              {renderQr(registerQr)}
-              <button type="button" onClick={checkRegisterBinding} disabled={registerLoading || !registerQr}>{registerLoading ? "检查中" : "检查绑定状态"}</button>
+          <div className="auth-promo">
+            <span className="eyebrow">AI Digital Workforce</span>
+            <h1>创星云-AI数字员工平台</h1>
+            <p className="sub">快速创建你的AI数字员工军团</p>
+
+            <div className="stats">
+              <div className="stat">
+                <span className="value">24/7</span>
+                <span className="label">随时响应</span>
+              </div>
+              <div className="stat">
+                <span className="value">12+</span>
+                <span className="label">岗位模板</span>
+              </div>
+              <div className="stat">
+                <span className="value">3min</span>
+                <span className="label">创建员工</span>
+              </div>
             </div>
-          )}
-          {(authMode === "login" || registerBound) && (
-            <form className="auth-form" onSubmit={handleAuth}>
-              <label>手机号<input value={phone} onChange={(event) => setPhone(event.target.value)} /></label>
-              <label>密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-              <button type="submit">{authMode === "login" ? "登录" : "注册并登录"}</button>
-            </form>
-          )}
-          <p className="hint">{authHint}</p>
-          {authError && <p className="error-text">{authError}</p>}
+
+            <div className="employee-list">
+              <div className="employee-card">
+                <div className="avatar">AI-01</div>
+                <div className="info">
+                  <span className="name">选题策略员</span>
+                  <span className="desc">正在生成明日公众号选题</span>
+                </div>
+              </div>
+              <div className="employee-card">
+                <div className="avatar">AI-02</div>
+                <div className="info">
+                  <span className="name">图文创作员</span>
+                  <span className="desc">已完成 4 篇内容草稿</span>
+                </div>
+              </div>
+              <div className="employee-card">
+                <div className="avatar">AI-03</div>
+                <div className="info">
+                  <span className="name">微信指挥中枢</span>
+                  <span className="desc">等待移动端任务调度</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="auth-panel">
+            <div className="auth-tabs">
+              <button className={authMode === "login" ? "active" : ""} onClick={() => changeAuthMode("login")}>登录</button>
+              <button className={authMode === "register" ? "active" : ""} onClick={() => changeAuthMode("register")}>注册</button>
+            </div>
+            {authMode === "register" && !registerBound && (
+              <div className="qr-panel">
+                <strong>请先绑定微信通道</strong>
+                <p>扫码绑定后，即可在微信里指挥 AI 员工完成选题推荐、图文生成和内容改写。</p>
+                {renderQr(registerQr)}
+                <button type="button" onClick={checkRegisterBinding} disabled={registerLoading || !registerQr}>{registerLoading ? "检查中" : "检查绑定状态"}</button>
+              </div>
+            )}
+            {(authMode === "login" || registerBound) && (
+              <form className="auth-form" onSubmit={handleAuth}>
+                <label>手机号<input value={phone} onChange={(event) => setPhone(event.target.value)} /></label>
+                <label>密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+                <button type="submit">{authMode === "login" ? "登录" : "注册并登录"}</button>
+              </form>
+            )}
+            <p className="hint">{authHint}</p>
+            {authError && <p className="error-text">{authError}</p>}
+          </div>
         </section>
       </main>
     );
@@ -357,7 +608,13 @@ export default function PlatformClient() {
   return (
     <main className="app-shell">
       <aside className="sidebar" aria-label="主菜单">
-        <div className="brand-mark">创星云</div>
+        <div className="sidebar-brand">
+          <div className="brand-avatar">AI</div>
+          <div className="brand-text">
+            <span className="brand-title">创星云</span>
+            <span className="brand-sub">AI数字员工平台</span>
+          </div>
+        </div>
         <nav>
           {([
             ["chat", "对话"],
@@ -372,30 +629,95 @@ export default function PlatformClient() {
 
       <section className="workspace">
         <header className="workspace-header">
-          <div><span>创星云</span><h2>{section === "chat" ? "对话" : section === "library" ? "内容库" : "个人中心"}</h2></div>
-          <strong>{user.phone}</strong>
+          <div className="workspace-header-left">
+            <span className="crumb">当前页面</span>
+            <h2>{section === "chat" ? "对话" : section === "library" ? "内容库" : "个人中心"}</h2>
+          </div>
+          <div className="user-chip">
+            <span>{user.phone}</span>
+            <button className="exit" onClick={logout}>退出</button>
+          </div>
         </header>
 
         {section === "chat" && (
           <div className="chat-layout">
             <aside className="history-panel">
-              <button onClick={createConversation}>新建对话</button>
+              <div className="history-panel-head">
+                <span className="title">历史列表</span>
+                <button className="new-button" onClick={createConversation}>＋ 新建</button>
+              </div>
               {conversations.map((conversation) => (
-                <button key={conversation.id} className={activeConversation?.id === conversation.id ? "active" : ""} onClick={() => setActiveConversationId(conversation.id)}>
-                  <strong>{conversation.title}</strong><span>{formatDate(conversation.updatedAt)}</span>
+                <button
+                  key={conversation.id}
+                  className={`history-item ${activeConversation?.id === conversation.id ? "active" : ""}`}
+                  onClick={() => setActiveConversationId(conversation.id)}
+                >
+                  <strong>{conversation.title}</strong>
+                  <span className="preview">{conversation.messages.at(-1)?.content ?? "尚未发送消息"}</span>
+                  <span className="meta">{formatDate(conversation.updatedAt)}</span>
                 </button>
               ))}
             </aside>
             <section className="chat-panel">
+              <div className="chat-head">
+                <div className="left">
+                  <h3>{activeConversation?.title ?? "请新建对话"}</h3>
+                  <span className="date">{activeConversation ? formatDate(activeConversation.updatedAt) : "—"}</span>
+                </div>
+                {activeConversation && (
+                  <div className="right">
+                    <span className="continue-pill">● 可继续对话</span>
+                  </div>
+                )}
+              </div>
               <div className="message-list">
                 {(activeConversation?.messages ?? []).map((message) => (
-                  <article key={message.id} className={`message ${message.role === "USER" ? "user" : "assistant"}`}>{message.content}</article>
+                  <article key={message.id} className={`message ${message.role === "USER" ? "user" : "assistant"}`}>
+                    {message.role === "ASSISTANT" ? (
+                      <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }} />
+                    ) : (
+                      message.content
+                    )}
+                    {message.role === "ASSISTANT" && (
+                      <div className="message-actions">
+                        <button
+                          className={`message-copy-button ${copiedMessageId === message.id ? "copied" : ""}`}
+                          onClick={() => copyMessage(message)}
+                        >
+                          {copiedMessageId === message.id ? "已复制" : "复制"}
+                        </button>
+                      </div>
+                    )}
+                  </article>
                 ))}
-                {!activeConversation && <p className="hint">新建一个对话，开始调遣 AI 员工。</p>}
+                {sending && (isThinking || streamingContent) && (
+                  <article className="message assistant streaming">
+                    {isThinking && !streamingContent ? (
+                      <span className="thinking-indicator">
+                        <span className="thinking-dots">
+                          <span className="thinking-dot" />
+                          <span className="thinking-dot" />
+                          <span className="thinking-dot" />
+                        </span>
+                        思考中...
+                      </span>
+                    ) : (
+                      <>
+                        <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(streamingContent) }} />
+                        <span className="streaming-cursor" />
+                      </>
+                    )}
+                  </article>
+                )}
+                {!activeConversation && <p className="hint">你可以直接发送你的问题即可</p>}
               </div>
               <form className="chat-input" onSubmit={sendMessage}>
-                <textarea rows={3} value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="输入多行任务，例如：帮我推荐明天公众号选题..." />
-                <button disabled={sending || !activeConversation}>{sending ? "生成中" : "发送"}</button>
+                <textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="你可以直接发送你的问题即可" />
+                {sending ? (
+                  <button type="button" className="stop-button" onClick={stopGeneration}>停止</button>
+                ) : (
+                  <button type="submit" disabled={!chatInput.trim()}>发送</button>
+                )}
               </form>
               {chatError && <p className="error-text">{chatError}</p>}
             </section>
@@ -405,13 +727,62 @@ export default function PlatformClient() {
         {section === "library" && (
           activeContent ? (
             <section className="content-detail">
-              <button className="ghost-button" onClick={() => setActiveContent(null)}>返回内容库</button>
-              <div className="detail-title-row"><h1>{activeContent.title}</h1><button onClick={() => copyText(activeContent.title, "标题已复制")}>复制标题</button></div>
+              <button className="ghost-button" onClick={() => { setActiveContent(null); setEditingContent(false); }}>返回内容库</button>
+              <div className="detail-title-row">
+                <h1>{activeContent.title}</h1>
+                <button onClick={() => copyText(activeContent.title, "标题已复制")}>复制标题</button>
+              </div>
               <span>{formatDate(activeContent.createdAt)}</span>
-              <img className="detail-cover" src={activeContent.coverImageUrl ?? fallbackImages[0]} alt="内容配图" />
-              {parseInlineImages(activeContent.inlineImagesJson).map((image) => <img key={image} className="detail-cover" src={image} alt="正文配图" />)}
-              <div className="detail-body-row"><h2>正文</h2><button onClick={() => copyText(activeContent.body, "正文已复制")}>复制正文</button></div>
-              <article className="article-body">{activeContent.body}</article>
+
+              <div className="detail-image-block">
+                <img className="detail-cover" src={activeContent.coverImageUrl ?? fallbackImages[0]} alt="内容配图" />
+                <button
+                  className="regen-image-button"
+                  disabled={regeneratingImage === "cover-0"}
+                  onClick={() => regenerateImage("cover", 0)}
+                >
+                  {regeneratingImage === "cover-0" ? "生成中..." : "重新生成"}
+                </button>
+              </div>
+
+              {parseInlineImages(activeContent.inlineImagesJson).map((image, index) => (
+                <div key={image} className="detail-image-block">
+                  <img className="detail-cover" src={image} alt={`正文配图 ${index + 1}`} />
+                  <button
+                    className="regen-image-button"
+                    disabled={regeneratingImage === `inline-${index}`}
+                    onClick={() => regenerateImage("inline", index)}
+                  >
+                    {regeneratingImage === `inline-${index}` ? "生成中..." : "重新生成"}
+                  </button>
+                </div>
+              ))}
+
+              <div className="detail-body-row">
+                <h2>正文</h2>
+                <div className="detail-body-actions">
+                  {editingContent ? (
+                    <>
+                      <button onClick={saveContentEdit} disabled={contentSaving}>{contentSaving ? "保存中..." : "保存"}</button>
+                      <button className="ghost-button" onClick={cancelEditContent}>取消</button>
+                    </>
+                  ) : (
+                    <>
+                      <button onClick={() => copyRichContent(activeContent)}>复制图文</button>
+                      <button onClick={startEditContent}>编辑</button>
+                    </>
+                  )}
+                </div>
+              </div>
+              {editingContent ? (
+                <textarea
+                  className="content-edit-area"
+                  value={editingBody}
+                  onChange={(event) => setEditingBody(event.target.value)}
+                />
+              ) : (
+                <article className="article-body markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(activeContent.body) }} />
+              )}
               {copyHint && <p className="hint">{copyHint}</p>}
             </section>
           ) : (
@@ -419,7 +790,9 @@ export default function PlatformClient() {
               {contentItems.map((item, index) => (
                 <article key={item.id} className="content-card" onClick={() => setActiveContent(item)}>
                   <img src={item.coverImageUrl ?? fallbackImages[index % fallbackImages.length]} alt="内容封面" />
-                  <span>{formatDate(item.createdAt)}</span><h3>{item.title}</h3><p>{item.body}</p>
+                  <span>{formatDate(item.createdAt)}</span>
+                  <h3>{item.title}</h3>
+                  <p className="content-preview">{item.body.replace(/[*#`>_~]/g, "").trim().slice(0, 20)}{item.body.length > 20 ? "..." : ""}</p>
                 </article>
               ))}
               {!contentItems.length && <p className="hint">暂无生成内容。先在对话里让 AI 员工生成一篇图文。</p>}
@@ -461,6 +834,16 @@ export default function PlatformClient() {
           </section>
         )}
       </section>
+      {toast && (
+        <div className="toast">
+          <span>{toast.message}</span>
+          {toast.linkLabel && toast.linkSection && (
+            <button className="toast-link" onClick={() => { setSection(toast.linkSection!); setToast(null); }}>
+              {toast.linkLabel}
+            </button>
+          )}
+        </div>
+      )}
     </main>
   );
 }

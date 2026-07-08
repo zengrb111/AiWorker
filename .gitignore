@@ -15,3 +15,4 @@ prisma/*.db
 prisma/*.db-journal
 src/generated/
 src/renderer/*.zip
+.workbuddy/

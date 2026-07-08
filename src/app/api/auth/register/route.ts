@@ -85,15 +85,24 @@ export async function POST(request: Request) {
     if (error instanceof BindingConflictError) {
       return jsonError(error.message, 409);
     }
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-      const target = Array.isArray(error.meta?.target) ? error.meta.target : [];
+    // 优先用 instanceof，fallback 用 duck-type 检查 code（事务内 error 可能被包装）
+    const prismaErr = error as { code?: string; meta?: { target?: string[] } };
+    const isP2002 = (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002")
+      || prismaErr.code === "P2002";
+    if (isP2002) {
+      const target = Array.isArray(prismaErr.meta?.target) ? prismaErr.meta!.target! : [];
       if (target.includes("phone")) {
-        return jsonError("该手机号已注册。", 409);
+        return jsonError("该手机号已注册，请直接登录或更换手机号。", 409);
       }
       if (target.includes("ticketId")) {
         return jsonError("该微信通道已被使用，请重新扫码注册。", 409);
       }
     }
-    return jsonError(error instanceof Error ? error.message : "注册失败。", 500);
+    // 最终兜底：error message 含 phone unique constraint 也归为手机号重复
+    const errMsg = error instanceof Error ? error.message : "";
+    if (errMsg.includes("Unique constraint failed") && errMsg.includes("phone")) {
+      return jsonError("该手机号已注册，请直接登录或更换手机号。", 409);
+    }
+    return jsonError("注册失败，请稍后重试。", 500);
   }
 }

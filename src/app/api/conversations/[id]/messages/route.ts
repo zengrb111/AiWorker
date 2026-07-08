@@ -1,7 +1,8 @@
-import { jsonError, jsonOk, readJson } from "@/lib/http";
+import { jsonError, readJson } from "@/lib/http";
 import { openClawClient } from "@/lib/openclaw";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
+import { generateImageUrls } from "@/lib/image-gen";
 
 type MessageBody = {
   content?: string;
@@ -15,6 +16,8 @@ type ConversationMessage = {
 
 const maxContextMessages = 20;
 const maxContextCharacters = 12000;
+
+const ARTICLE_KEYWORDS = ["文章", "公众号", "小红书", "写作", "图文", "推文", "帖子", "blog"];
 
 function titleFrom(content: string): string {
   return content.length > 18 ? `${content.slice(0, 18)}...` : content || "新的对话";
@@ -53,6 +56,30 @@ function buildTaskPrompt(contextText: string, content: string): string {
     "当前用户任务：",
     content
   ].join("\n");
+}
+
+function shouldAutoSave(userMessage: string, conversationContext: string, assistantContent: string): boolean {
+  if (assistantContent.length <= 300) return false;
+  const combined = `${userMessage} ${conversationContext}`.toLowerCase();
+  return ARTICLE_KEYWORDS.some((kw) => combined.includes(kw.toLowerCase()));
+}
+
+function generateArticleTitle(content: string): string {
+  const lines = content.split("\n").map((l) => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    if (line.startsWith("#")) {
+      const title = line.replace(/^#+\s*/, "").trim();
+      if (title) return title.slice(0, 50);
+    }
+  }
+  const firstLine = lines[0] || "";
+  const sentenceMatch = firstLine.match(/^[^。！？.!?]+[。！？.!?]?/);
+  const title = (sentenceMatch?.[0] || firstLine).trim();
+  return title.slice(0, 50) || "无标题内容";
+}
+
+function sseEncode(data: unknown): Uint8Array {
+  return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 export async function POST(request: Request, context: { params: { id: string } }) {
@@ -99,59 +126,88 @@ export async function POST(request: Request, context: { params: { id: string } }
     }
   });
 
-  try {
-    const result = await openClawClient.sendTask({
-      message: content,
-      context: conversationContext,
-      prompt,
-      conversationId: conversation.id,
-      userId: user.id
-    });
-    const assistantMessage = await prisma.message.create({
-      data: {
-        conversationId: conversation.id,
-        role: "ASSISTANT",
-        content: result.content
-      }
-    });
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        const result = await openClawClient.sendTaskStream(
+          { message: content, context: conversationContext, prompt, conversationId: conversation.id, userId: user.id },
+          (deltaText) => controller.enqueue(sseEncode({ type: "delta", text: deltaText }))
+        );
 
-    await prisma.openClawTask.update({
-      where: { id: task.id },
-      data: {
-        status: "SUCCEEDED",
-        resultJson: JSON.stringify(result.raw ?? null)
-      }
-    });
+        const assistantMessage = await prisma.message.create({
+          data: {
+            conversationId: conversation.id,
+            role: "ASSISTANT",
+            content: result.content
+          }
+        });
 
-    await prisma.conversation.update({
-      where: { id: conversation.id },
-      data: {
-        title: conversation.title === "新的对话" ? titleFrom(content) : conversation.title
-      }
-    });
+        await prisma.openClawTask.update({
+          where: { id: task.id },
+          data: {
+            status: "SUCCEEDED",
+            resultJson: JSON.stringify(result.raw ?? null)
+          }
+        });
 
-    if (result.title || result.coverImageUrl || result.inlineImages?.length) {
-      await prisma.contentItem.create({
-        data: {
-          userId: user.id,
-          title: result.title ?? titleFrom(content),
-          body: result.content,
-          coverImageUrl: result.coverImageUrl,
-          inlineImagesJson: JSON.stringify(result.inlineImages ?? []),
-          sourceConversationId: conversation.id
+        await prisma.conversation.update({
+          where: { id: conversation.id },
+          data: {
+            title: conversation.title === "新的对话" ? titleFrom(content) : conversation.title
+          }
+        });
+
+        let contentSaved = false;
+        if (shouldAutoSave(content, conversationContext, result.content)) {
+          const articleTitle = generateArticleTitle(result.content);
+          const images = generateImageUrls(articleTitle, result.content);
+          await prisma.contentItem.create({
+            data: {
+              userId: user.id,
+              title: articleTitle,
+              body: result.content,
+              coverImageUrl: images.coverImageUrl,
+              inlineImagesJson: JSON.stringify(images.inlineImages),
+              sourceConversationId: conversation.id
+            }
+          });
+          contentSaved = true;
         }
-      });
-    }
 
-    return jsonOk({ message: assistantMessage, taskId: task.id });
-  } catch (error) {
-    await prisma.openClawTask.update({
-      where: { id: task.id },
-      data: {
-        status: "FAILED",
-        error: error instanceof Error ? error.message : "OpenClaw 调用失败。"
+        controller.enqueue(sseEncode({
+          type: "final",
+          message: {
+            id: assistantMessage.id,
+            role: "ASSISTANT",
+            content: assistantMessage.content,
+            createdAt: assistantMessage.createdAt.toISOString()
+          },
+          contentSaved
+        }));
+      } catch (error) {
+        await prisma.openClawTask.update({
+          where: { id: task.id },
+          data: {
+            status: "FAILED",
+            error: error instanceof Error ? error.message : "OpenClaw 调用失败。"
+          }
+        });
+        controller.enqueue(sseEncode({
+          type: "error",
+          error: error instanceof Error ? error.message : "OpenClaw 调用失败。"
+        }));
+      } finally {
+        controller.close();
       }
-    });
-    return jsonError(error instanceof Error ? error.message : "OpenClaw 调用失败。", 502);
-  }
+    }
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no"
+    }
+  });
 }
