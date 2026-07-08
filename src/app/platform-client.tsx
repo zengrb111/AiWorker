@@ -432,6 +432,21 @@ export default function PlatformClient() {
     window.setTimeout(() => setCopyHint(""), 1600);
   }
 
+  async function copyImage(url: string) {
+    try {
+      const response = await fetch(url, { mode: "cors" });
+      if (!response.ok) throw new Error("image fetch failed");
+      const blob = await response.blob();
+      const type = blob.type && blob.type.startsWith("image/") ? blob.type : "image/png";
+      const item = new ClipboardItem({ [type]: blob });
+      await navigator.clipboard.write([item]);
+      setCopyHint("图片已复制");
+    } catch {
+      setCopyHint("复制失败，请重试");
+    }
+    window.setTimeout(() => setCopyHint(""), 1600);
+  }
+
   function startEditContent() {
     if (!activeContent) return;
     setEditingBody(activeContent.body);
@@ -736,25 +751,31 @@ export default function PlatformClient() {
 
               <div className="detail-image-block">
                 <img className="detail-cover" src={activeContent.coverImageUrl ?? fallbackImages[0]} alt="内容配图" />
-                <button
-                  className="regen-image-button"
-                  disabled={regeneratingImage === "cover-0"}
-                  onClick={() => regenerateImage("cover", 0)}
-                >
-                  {regeneratingImage === "cover-0" ? "生成中..." : "重新生成"}
-                </button>
+                <div className="detail-image-actions">
+                  <button onClick={() => copyImage(activeContent.coverImageUrl ?? fallbackImages[0])}>复制图片</button>
+                  <button
+                    className="regen-image-button"
+                    disabled={regeneratingImage === "cover-0"}
+                    onClick={() => regenerateImage("cover", 0)}
+                  >
+                    {regeneratingImage === "cover-0" ? "生成中..." : "重新生成"}
+                  </button>
+                </div>
               </div>
 
               {parseInlineImages(activeContent.inlineImagesJson).map((image, index) => (
                 <div key={image} className="detail-image-block">
                   <img className="detail-cover" src={image} alt={`正文配图 ${index + 1}`} />
-                  <button
-                    className="regen-image-button"
-                    disabled={regeneratingImage === `inline-${index}`}
-                    onClick={() => regenerateImage("inline", index)}
-                  >
-                    {regeneratingImage === `inline-${index}` ? "生成中..." : "重新生成"}
-                  </button>
+                  <div className="detail-image-actions">
+                    <button onClick={() => copyImage(image)}>复制图片</button>
+                    <button
+                      className="regen-image-button"
+                      disabled={regeneratingImage === `inline-${index}`}
+                      onClick={() => regenerateImage("inline", index)}
+                    >
+                      {regeneratingImage === `inline-${index}` ? "生成中..." : "重新生成"}
+                    </button>
+                  </div>
                 </div>
               ))}
 
@@ -768,7 +789,7 @@ export default function PlatformClient() {
                     </>
                   ) : (
                     <>
-                      <button onClick={() => copyRichContent(activeContent)}>复制图文</button>
+                      <button onClick={() => copyText(activeContent.body, "正文已复制")}>复制正文</button>
                       <button onClick={startEditContent}>编辑</button>
                     </>
                   )}

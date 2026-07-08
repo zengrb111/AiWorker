@@ -877,6 +877,25 @@ textarea:focus {
   transition: all 120ms ease;
 }
 
+.detail-image-actions > button {
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid var(--line);
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.detail-image-actions > button:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
 .regen-image-button:hover:not(:disabled) {
   background: var(--accent);
   color: #fff;
@@ -1039,7 +1058,8 @@ textarea:focus {
 /* ===== Library / content ===== */
 .library-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  align-items: start;
   gap: 14px;
 }
 
@@ -1090,6 +1110,7 @@ textarea:focus {
   display: grid;
   gap: 16px;
   padding: 18px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
 }
 
 .detail-title-row,
@@ -1100,16 +1121,42 @@ textarea:focus {
   gap: 14px;
 }
 
+.detail-title-row,
+.detail-body-row,
+.content-detail > span,
+.content-detail > .article-body,
+.content-detail > .content-edit-area,
+.content-detail > .ghost-button,
+.content-detail > .hint {
+  grid-column: 1 / -1;
+}
+
 .detail-title-row h1,
 .detail-body-row h2 {
   margin: 0;
   min-width: 0;
 }
 
+.detail-image-block {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.detail-image-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .detail-cover {
   display: block;
-  width: 100%;
-  max-height: 320px;
+  width: 220px;
+  height: 220px;
   border-radius: 8px;
   object-fit: cover;
 }
