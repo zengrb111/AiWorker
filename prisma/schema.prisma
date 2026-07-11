@@ -61,7 +61,9 @@ model ContentItem {
   user                 User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   title                String
   body                 String
+  category             String?
   coverImageUrl        String?
+  videoUrl             String?
   inlineImagesJson     String?
   sourceConversationId String?
   sourceConversation   Conversation? @relation(fields: [sourceConversationId], references: [id], onDelete: SetNull)

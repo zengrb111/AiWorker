@@ -19,7 +19,6 @@ function buildImageUrl(prompt: string, width: number, height: number, seed: numb
 
 export type GeneratedImages = {
   coverImageUrl: string;
-  inlineImages: string[];
 };
 
 export function generateImageUrls(
@@ -30,21 +29,7 @@ export function generateImageUrls(
   const coverPrompt = buildPromptFromContent(title, body);
   const coverSeed = Date.now() + existingCount;
   const coverImageUrl = buildImageUrl(coverPrompt, 1200, 630, coverSeed);
-
-  // Generate 1-2 inline images from different parts of the content
-  const inlineImages: string[] = [];
-  const paragraphs = body.split("\n").filter((l) => l.trim() && !l.startsWith("#"));
-  const maxInline = Math.min(2, Math.max(1, Math.floor(paragraphs.length / 3)));
-
-  for (let i = 0; i < maxInline; i++) {
-    const paraIdx = Math.floor((paragraphs.length / maxInline) * (i + 1));
-    const para = paragraphs[Math.min(paraIdx, paragraphs.length - 1)] || title;
-    const inlinePrompt = para.replace(/[*#`>_~]/g, "").trim().slice(0, 120);
-    const seed = Date.now() + existingCount + i + 1;
-    inlineImages.push(buildImageUrl(`${inlinePrompt}, illustration, digital art`, 1200, 800, seed));
-  }
-
-  return { coverImageUrl, inlineImages };
+  return { coverImageUrl };
 }
 
 /** Regenerate a single image URL with a new seed. */

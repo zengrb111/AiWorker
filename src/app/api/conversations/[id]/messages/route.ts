@@ -17,7 +17,15 @@ type ConversationMessage = {
 const maxContextMessages = 20;
 const maxContextCharacters = 12000;
 
-const ARTICLE_KEYWORDS = ["文章", "公众号", "小红书", "写作", "图文", "推文", "帖子", "blog"];
+const ARTICLE_KEYWORDS = [
+  // 文章类型
+  "文章", "公众号", "小红书", "写作", "图文", "推文", "帖子", "blog", "笔记", "文案",
+  // 选题/话题
+  "选题", "话题",
+  // 生成/创作指令
+  "开工", "继续生成", "继续写", "继续创作", "生成内容", "创作",
+  "来一篇", "写一篇", "帮我写", "帮我生成", "帮我创作", "开始写"
+];
 
 function titleFrom(content: string): string {
   return content.length > 18 ? `${content.slice(0, 18)}...` : content || "新的对话";
@@ -61,17 +69,76 @@ function buildTaskPrompt(contextText: string, content: string): string {
 function shouldAutoSave(userMessage: string, conversationContext: string, assistantContent: string): boolean {
   if (assistantContent.length <= 300) return false;
   const combined = `${userMessage} ${conversationContext}`.toLowerCase();
-  return ARTICLE_KEYWORDS.some((kw) => combined.includes(kw.toLowerCase()));
+  const hasKeyword = ARTICLE_KEYWORDS.some((kw) => combined.includes(kw.toLowerCase()));
+  if (!hasKeyword) return false;
+
+  // 进一步过滤：必须是真正的"图文/文章"内容（含有结构化特征），不能是纯推荐/对话回复
+  // 结构特征：markdown 标题、列表项、引号标题、Markdown 链接/加粗
+  const hasStructure =
+    assistantContent.includes("##") ||                                    // markdown 标题
+    assistantContent.includes("\n- ") || assistantContent.includes("\n* ") || // 列表
+    /^\d+[.、．)）]\s*\S+/m.test(assistantContent) ||                     // 数字列表
+    /[「『"'""''].{2,40}[」』""'']/.test(assistantContent) ||             // 引号标题
+    /\*\*[^*\n]{2,30}\*\*/.test(assistantContent);                        // 加粗短语
+  if (!hasStructure) return false;
+
+  // 排除明显的"推荐/查询"回复：开头就是"以下是"、"根据"、"结合"等引导词，且内容里没有"选题/标题"等明确文章词
+  const isRecommendation = /^(结合|根据|以下|参考|看到|听说|你好|感谢)/.test(assistantContent.trim());
+  const hasExplicitArticle = /标题[：:]|选题|写作|生成一?篇|正文[：:]|封面[：:]/i.test(assistantContent);
+  if (isRecommendation && !hasExplicitArticle) return false;
+
+  return true;
+}
+
+/**
+ * 根据用户消息判断文章分类标签。
+ * 默认 "公众号文章"；提到小红书相关关键词时改为 "小红书"。
+ */
+function detectCategory(userMessage: string, conversationContext: string): string {
+  const XHS_KEYWORDS = ["小红书", "小红薯", "种草", "xhs", "xhongshu"];
+  const combined = `${userMessage} ${conversationContext}`.toLowerCase();
+  if (XHS_KEYWORDS.some((kw) => combined.includes(kw.toLowerCase()))) {
+    return "小红书";
+  }
+  return "公众号文章";
 }
 
 function generateArticleTitle(content: string): string {
   const lines = content.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  // 1. 优先用 markdown 标题
   for (const line of lines) {
     if (line.startsWith("#")) {
       const title = line.replace(/^#+\s*/, "").trim();
       if (title) return title.slice(0, 50);
     }
   }
+
+  // 2. 尝试从列表项里找第一个有标题感的
+  //    - 数字列表： 1. xxx / 1）xxx / 1、xxx
+  //    - 中文列表： 一、二、 或 「」 内的内容
+  for (const line of lines) {
+    // 数字列表
+    const numMatch = line.match(/^\d+[.、．)）]\s*(.+)$/);
+    if (numMatch) {
+      const t = numMatch[1].replace(/^[「『"'""'']+|[」』""'']+$/g, "").trim();
+      if (t.length >= 4) return t.slice(0, 50);
+    }
+    // 中文列表（"一、xxx"）
+    const cnMatch = line.match(/^[一二三四五六七八九十]+[、.]\s*(.+)$/);
+    if (cnMatch) {
+      const t = cnMatch[1].replace(/^[「『"'""'']+|[」』""'']+$/g, "").trim();
+      if (t.length >= 4) return t.slice(0, 50);
+    }
+    // 全行就是引号内容：「xxx」「xxx」
+    const quoteMatch = line.match(/^[「『"'""''](.+)[」』""'']$/);
+    if (quoteMatch) {
+      const t = quoteMatch[1].trim();
+      if (t.length >= 4 && t.length <= 50) return t;
+    }
+  }
+
+  // 3. 兜底：首句截断
   const firstLine = lines[0] || "";
   const sentenceMatch = firstLine.match(/^[^。！？.!?]+[。！？.!?]?/);
   const title = (sentenceMatch?.[0] || firstLine).trim();
@@ -157,21 +224,22 @@ export async function POST(request: Request, context: { params: { id: string } }
           }
         });
 
-        let contentSaved = false;
+        let contentSaved = null;
         if (shouldAutoSave(content, conversationContext, result.content)) {
           const articleTitle = generateArticleTitle(result.content);
           const images = generateImageUrls(articleTitle, result.content);
-          await prisma.contentItem.create({
+          const category = detectCategory(content, conversationContext);
+          const saved = await prisma.contentItem.create({
             data: {
               userId: user.id,
               title: articleTitle,
               body: result.content,
+              category,
               coverImageUrl: images.coverImageUrl,
-              inlineImagesJson: JSON.stringify(images.inlineImages),
               sourceConversationId: conversation.id
             }
           });
-          contentSaved = true;
+          contentSaved = { id: saved.id, title: saved.title, category: saved.category };
         }
 
         controller.enqueue(sseEncode({

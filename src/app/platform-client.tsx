@@ -29,7 +29,9 @@ type ContentItem = {
   id: string;
   title: string;
   body: string;
+  category?: string | null;
   coverImageUrl?: string | null;
+  videoUrl?: string | null;
   inlineImagesJson?: unknown;
   createdAt: string;
 };
@@ -118,14 +120,25 @@ export default function PlatformClient() {
   const [isThinking, setIsThinking] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
   const [toast, setToast] = useState<{ message: string; linkLabel?: string; linkSection?: Section } | null>(null);
+  const [lastSavedContent, setLastSavedContent] = useState<ContentItem | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [humanizingMessageId, setHumanizingMessageId] = useState<string | null>(null);
+  const [videoMode, setVideoMode] = useState(false);
+  const [lastVideoUrl, setLastVideoUrl] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
+  const isPinnedRef = useRef(true); // 用户是否在底部附近（用于自动滚动判断）
+  const [activeTurnIndex, setActiveTurnIndex] = useState(-1);
+  const [tocCollapsed, setTocCollapsed] = useState(true);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
 
   const [contentItems, setContentItems] = useState<ContentItem[]>([]);
   const [activeContent, setActiveContent] = useState<ContentItem | null>(null);
   const [copyHint, setCopyHint] = useState("");
+  const [copiedButton, setCopiedButton] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState(false);
   const [editingBody, setEditingBody] = useState("");
+  const [editingTitle, setEditingTitle] = useState("");
   const [contentSaving, setContentSaving] = useState(false);
   const [regeneratingImage, setRegeneratingImage] = useState<string | null>(null);
   const [wechatBinding, setWechatBinding] = useState<WechatBinding | null>(null);
@@ -139,6 +152,20 @@ export default function PlatformClient() {
     () => conversations.find((conversation) => conversation.id === activeConversationId) ?? conversations[0],
     [activeConversationId, conversations]
   );
+
+  const userMessages = useMemo(
+    () => (activeConversation?.messages ?? []).filter((message) => message.role === "USER"),
+    [activeConversation]
+  );
+
+  function scrollToMessage(messageId: string) {
+    const container = messageListRef.current;
+    const el = document.getElementById(`message-${messageId}`);
+    if (!el || !container) return;
+    const containerTop = container.getBoundingClientRect().top;
+    const elTop = el.getBoundingClientRect().top;
+    container.scrollTo({ top: container.scrollTop + (elTop - containerTop - 12), behavior: "smooth" });
+  }
 
   async function refreshMe() {
     try {
@@ -161,6 +188,7 @@ export default function PlatformClient() {
   async function refreshContent() {
     const data = await api<{ contentItems: ContentItem[] }>("/api/content");
     setContentItems(data.contentItems);
+    return data.contentItems;
   }
 
   useEffect(() => {
@@ -184,6 +212,69 @@ export default function PlatformClient() {
     const timer = window.setTimeout(() => setToast(null), 4000);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  // 切换对话时滚动到底部并重置高亮
+  useEffect(() => {
+    const container = messageListRef.current;
+    if (container) {
+      // 使用 requestAnimationFrame 等待 DOM 渲染完成后再滚动
+      requestAnimationFrame(() => {
+        if (container) container.scrollTop = container.scrollHeight;
+      });
+    }
+    isPinnedRef.current = true;
+    setShowScrollBottom(false);
+    setActiveTurnIndex(userMessages.length > 0 ? 0 : -1);
+    // 只在 activeConversationId 变化时触发，避免发送消息时频繁重置
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConversationId]);
+
+  // 滚动时更新当前高亮的目录项
+  useEffect(() => {
+    const container = messageListRef.current;
+    if (!container || userMessages.length === 0) {
+      return;
+    }
+
+    function handleScroll() {
+      if (!container) return;
+      const containerTop = container.getBoundingClientRect().top;
+      const activeLine = containerTop + 80;
+
+      let activeIdx = -1;
+      for (let i = 0; i < userMessages.length; i++) {
+        const el = document.getElementById(`message-${userMessages[i].id}`);
+        if (!el) continue;
+        if (el.getBoundingClientRect().top <= activeLine) {
+          activeIdx = i;
+        } else {
+          break;
+        }
+      }
+      if (activeIdx !== -1) setActiveTurnIndex(activeIdx);
+
+      // 检测是否在底部附近（80px 容差）
+      const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+      isPinnedRef.current = isNearBottom;
+      setShowScrollBottom(!isNearBottom);
+    }
+
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    handleScroll();
+
+    return () => container.removeEventListener("scroll", handleScroll);
+  }, [userMessages]);
+
+  // 流式输出时自动滚动到底部（仅在用户未上滑时跟随）
+  useEffect(() => {
+    const container = messageListRef.current;
+    if (!container) return;
+    if (isPinnedRef.current) {
+      requestAnimationFrame(() => {
+        if (container) container.scrollTop = container.scrollHeight;
+      });
+    }
+  }, [streamingContent, isThinking, sending, activeConversation?.messages.length]);
 
   async function ensureRegisterQr() {
     if (registerQr || registerLoading) return;
@@ -269,6 +360,7 @@ export default function PlatformClient() {
     event.preventDefault();
     if (!chatInput.trim() || sending) return;
     const content = chatInput;
+    const isVideoMode = videoMode;
 
     // 没有对话时自动创建一个
     let conversationId = activeConversation?.id;
@@ -285,13 +377,14 @@ export default function PlatformClient() {
     }
 
     setChatInput("");
+    setVideoMode(false);
     setSending(true);
     setIsThinking(true);
     setChatError("");
     setStreamingContent("");
 
     const tempUserMessage: Message = {
-      id: `temp-${Date.now()}`, role: "USER", content, createdAt: new Date().toISOString()
+      id: `temp-${Date.now()}`, role: "USER", content: isVideoMode ? `[视频制作] ${content}` : content, createdAt: new Date().toISOString()
     };
     setConversations((prev) => prev.map((conv) =>
       conv.id === conversationId
@@ -305,7 +398,10 @@ export default function PlatformClient() {
     let stoppedByUser = false;
 
     try {
-      const response = await fetch(`/api/conversations/${conversationId}/messages`, {
+      const endpoint = isVideoMode
+        ? `/api/conversations/${conversationId}/video`
+        : `/api/conversations/${conversationId}/messages`;
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content }),
@@ -313,8 +409,8 @@ export default function PlatformClient() {
       });
 
       if (!response.ok) {
-        const errorPayload = await response.json().catch(() => ({ error: "发送失败。" }));
-        throw new Error(errorPayload.error || "发送失败。");
+        const errorPayload = await response.json().catch(() => ({ error: isVideoMode ? "视频制作请求失败。" : "发送失败。" }));
+        throw new Error(errorPayload.error || (isVideoMode ? "视频制作请求失败。" : "发送失败。"));
       }
 
       const reader = response.body!.getReader();
@@ -341,10 +437,12 @@ export default function PlatformClient() {
           } else if (data.type === "final") {
             setStreamingContent("");
             setIsThinking(false);
+            setLastVideoUrl(data.videoUrl || null);
             await refreshConversations();
             if (data.contentSaved) {
-              setToast({ message: "已自动保存到内容库", linkLabel: "查看", linkSection: "library" });
-              await refreshContent();
+              const all = await refreshContent();
+              const saved = all.find((c) => c.id === data.contentSaved.id);
+              if (saved) setLastSavedContent(saved);
             }
           } else if (data.type === "error") {
             throw new Error(data.error);
@@ -387,16 +485,129 @@ export default function PlatformClient() {
     abortControllerRef.current.abort();
   }
 
-  async function copyText(text: string, hint: string) {
-    await navigator.clipboard.writeText(text);
-    setCopyHint(hint);
-    window.setTimeout(() => setCopyHint(""), 1600);
+  async function copyText(text: string, buttonKey: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedButton(buttonKey);
+      setCopyHint("已复制");
+    } catch {
+      setCopyHint("复制失败，请重试");
+    }
   }
 
   async function copyMessage(message: Message) {
     await navigator.clipboard.writeText(message.content);
     setCopiedMessageId(message.id);
     window.setTimeout(() => setCopiedMessageId(null), 1600);
+  }
+
+  async function humanizeMessage(message: Message) {
+    const conversationId = activeConversation?.id;
+    if (!conversationId) return;
+
+    setHumanizingMessageId(message.id);
+    setSending(true);
+    setIsThinking(true);
+    setChatError("");
+    setStreamingContent("");
+
+    const tempUserMessage: Message = {
+      id: `temp-humanize-${Date.now()}`,
+      role: "USER",
+      content: "对以上内容进行去 AI 味处理",
+      createdAt: new Date().toISOString()
+    };
+    setConversations((prev) => prev.map((conv) =>
+      conv.id === conversationId
+        ? { ...conv, messages: [...conv.messages, tempUserMessage] }
+        : conv
+    ));
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    let localStreamContent = "";
+    let stoppedByUser = false;
+
+    try {
+      const response = await fetch(`/api/conversations/${conversationId}/humanize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messageId: message.id,
+          title: lastSavedContent?.title ?? null,
+          category: lastSavedContent?.category ?? null
+        }),
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({ error: "去 AI 味处理失败。" }));
+        throw new Error(errorPayload.error || "去 AI 味处理失败。");
+      }
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+
+        for (const eventBlock of events) {
+          const dataLine = eventBlock.split("\n").find((l) => l.startsWith("data: "));
+          if (!dataLine) continue;
+          const data = JSON.parse(dataLine.slice(6));
+
+          if (data.type === "delta") {
+            setIsThinking(false);
+            localStreamContent += data.text;
+            setStreamingContent((prev) => prev + data.text);
+          } else if (data.type === "final") {
+            setStreamingContent("");
+            setIsThinking(false);
+            await refreshConversations();
+            if (data.contentSaved) {
+              const all = await refreshContent();
+              const saved = all.find((c) => c.id === data.contentSaved.id);
+              if (saved) setLastSavedContent(saved);
+            }
+          } else if (data.type === "error") {
+            throw new Error(data.error);
+          }
+        }
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        stoppedByUser = true;
+        setIsThinking(false);
+        if (localStreamContent) {
+          const stoppedContent = `**已停止**\n\n${localStreamContent}`;
+          try {
+            await api(`/api/conversations/${conversationId}/messages/assistant`, {
+              method: "POST",
+              body: JSON.stringify({ content: stoppedContent })
+            });
+            await refreshConversations();
+          } catch {
+            // Ignore save errors
+          }
+        }
+      } else {
+        setChatError(error instanceof Error ? error.message : "去 AI 味处理失败。");
+      }
+    } finally {
+      if (!stoppedByUser) {
+        setStreamingContent("");
+      }
+      setIsThinking(false);
+      setSending(false);
+      setHumanizingMessageId(null);
+      abortControllerRef.current = null;
+    }
   }
 
   async function copyRichContent(item: ContentItem) {
@@ -432,39 +643,47 @@ export default function PlatformClient() {
     window.setTimeout(() => setCopyHint(""), 1600);
   }
 
-  async function copyImage(url: string) {
+  async function copyImage(contentId: string, buttonKey: string) {
     try {
-      const response = await fetch(url, { mode: "cors" });
-      if (!response.ok) throw new Error("image fetch failed");
+      const response = await fetch(`/api/content/${contentId}/image`);
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: "获取图片失败" }));
+        throw new Error(error.error || "获取图片失败");
+      }
       const blob = await response.blob();
       const type = blob.type && blob.type.startsWith("image/") ? blob.type : "image/png";
       const item = new ClipboardItem({ [type]: blob });
       await navigator.clipboard.write([item]);
+      setCopiedButton(buttonKey);
       setCopyHint("图片已复制");
-    } catch {
-      setCopyHint("复制失败，请重试");
+    } catch (err) {
+      setCopiedButton(null);
+      setCopyHint(err instanceof Error ? err.message : "复制失败，请重试");
     }
-    window.setTimeout(() => setCopyHint(""), 1600);
   }
 
   function startEditContent() {
     if (!activeContent) return;
     setEditingBody(activeContent.body);
+    setEditingTitle(activeContent.title);
     setEditingContent(true);
   }
 
   function cancelEditContent() {
     setEditingContent(false);
     setEditingBody("");
+    setEditingTitle("");
   }
 
   async function saveContentEdit() {
     if (!activeContent) return;
     setContentSaving(true);
+    setCopiedButton(null);
+    setCopyHint("");
     try {
       const data = await api<{ contentItem: ContentItem }>(`/api/content/${activeContent.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ body: editingBody })
+        body: JSON.stringify({ title: editingTitle, body: editingBody })
       });
       setActiveContent(data.contentItem);
       setEditingContent(false);
@@ -480,6 +699,8 @@ export default function PlatformClient() {
     if (!activeContent) return;
     const key = `${imageType}-${imageIndex}`;
     setRegeneratingImage(key);
+    setCopiedButton(null);
+    setCopyHint("");
     try {
       const data = await api<{ contentItem: ContentItem; imageUrl: string }>(
         `/api/content/${activeContent.id}/regenerate-image`,
@@ -665,7 +886,7 @@ export default function PlatformClient() {
                 <button
                   key={conversation.id}
                   className={`history-item ${activeConversation?.id === conversation.id ? "active" : ""}`}
-                  onClick={() => setActiveConversationId(conversation.id)}
+                  onClick={() => { setActiveConversationId(conversation.id); setLastSavedContent(null); setLastVideoUrl(null); }}
                 >
                   <strong>{conversation.title}</strong>
                   <span className="preview">{conversation.messages.at(-1)?.content ?? "尚未发送消息"}</span>
@@ -685,56 +906,157 @@ export default function PlatformClient() {
                   </div>
                 )}
               </div>
-              <div className="message-list">
-                {(activeConversation?.messages ?? []).map((message) => (
-                  <article key={message.id} className={`message ${message.role === "USER" ? "user" : "assistant"}`}>
-                    {message.role === "ASSISTANT" ? (
-                      <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }} />
-                    ) : (
-                      message.content
+              <div className="chat-body">
+                <div className="chat-stream">
+                  <div className="message-list" ref={messageListRef}>
+                    {(() => {
+                      const messages = activeConversation?.messages ?? [];
+                      const lastAssistantId = messages.filter((m) => m.role === "ASSISTANT").slice(-1)[0]?.id;
+                      return messages.map((message) => (
+                        <article key={message.id} id={`message-${message.id}`} className={`message ${message.role === "USER" ? "user" : "assistant"}`}>
+                          {message.role === "ASSISTANT" ? (
+                            <>
+                              <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }} />
+                              {lastVideoUrl && message.id === lastAssistantId && (
+                                <div className="video-player-wrap">
+                                  <video controls src={lastVideoUrl} className="inline-video-player" />
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            message.content
+                          )}
+                          {message.role === "ASSISTANT" && (
+                            <div className="message-actions">
+                              {lastSavedContent && message.id === lastAssistantId && (
+                                <>
+                                  <button
+                                    className="message-saved-link"
+                                    onClick={() => { setActiveContent(lastSavedContent); setSection("library"); }}
+                                  >
+                                    ✓ 已保存到内容库 · 查看
+                                  </button>
+                                  <button
+                                    className="message-copy-button humanize-button"
+                                    disabled={humanizingMessageId === message.id}
+                                    onClick={() => humanizeMessage(message)}
+                                  >
+                                    {humanizingMessageId === message.id ? "去AI味中..." : "一键去AI味"}
+                                  </button>
+                                </>
+                              )}
+                              <button
+                                className={`message-copy-button ${copiedMessageId === message.id ? "copied" : ""}`}
+                                onClick={() => copyMessage(message)}
+                              >
+                                {copiedMessageId === message.id ? "已复制" : "复制"}
+                              </button>
+                            </div>
+                          )}
+                        </article>
+                      ));
+                    })()}
+                    {sending && (isThinking || streamingContent) && (
+                      <article className="message assistant streaming">
+                        {isThinking && !streamingContent ? (
+                          <span className="thinking-indicator">
+                            <span className="thinking-dots">
+                              <span className="thinking-dot" />
+                              <span className="thinking-dot" />
+                              <span className="thinking-dot" />
+                            </span>
+                            思考中...
+                          </span>
+                        ) : (
+                          <>
+                            <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(streamingContent) }} />
+                            <span className="streaming-cursor" />
+                          </>
+                        )}
+                      </article>
                     )}
-                    {message.role === "ASSISTANT" && (
-                      <div className="message-actions">
-                        <button
-                          className={`message-copy-button ${copiedMessageId === message.id ? "copied" : ""}`}
-                          onClick={() => copyMessage(message)}
-                        >
-                          {copiedMessageId === message.id ? "已复制" : "复制"}
-                        </button>
-                      </div>
-                    )}
-                  </article>
-                ))}
-                {sending && (isThinking || streamingContent) && (
-                  <article className="message assistant streaming">
-                    {isThinking && !streamingContent ? (
-                      <span className="thinking-indicator">
-                        <span className="thinking-dots">
-                          <span className="thinking-dot" />
-                          <span className="thinking-dot" />
-                          <span className="thinking-dot" />
+                    {!activeConversation && <p className="hint">你可以直接发送你的问题即可</p>}
+                  </div>
+                  {showScrollBottom && (
+                    <button
+                      className="scroll-bottom-btn"
+                      onClick={() => {
+                        const container = messageListRef.current;
+                        if (container) {
+                          container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+                        }
+                      }}
+                      aria-label="滚动到底部"
+                      title="滚动到底部"
+                    >
+                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                        <path d="M10 4v10m0 0l4-4m-4 4l-4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+                  )}
+                  <form className="chat-input" onSubmit={sendMessage}>
+                    {chatError && <p className="error-text chat-error-inline">{chatError}</p>}
+                    <div className="chat-input-topbar">
+                      <button
+                        type="button"
+                        className={`quick-action-btn ${videoMode ? "active" : ""}`}
+                        onClick={() => setVideoMode((v) => !v)}
+                      >
+                        做视频
+                      </button>
+                    </div>
+                    <div className="chat-input-wrap">
+                      {videoMode && (
+                        <span className="mode-chip mode-chip-video">
+                          做视频
+                          <button type="button" className="mode-chip-x" onClick={() => setVideoMode(false)}>×</button>
                         </span>
-                        思考中...
-                      </span>
+                      )}
+                      <textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder={videoMode ? "描述你想制作的视频内容..." : "你可以直接发送你的问题即可"} />
+                    </div>
+                    {sending ? (
+                      <button type="button" className="stop-button" onClick={stopGeneration}>停止</button>
                     ) : (
-                      <>
-                        <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(streamingContent) }} />
-                        <span className="streaming-cursor" />
-                      </>
+                      <button type="submit" disabled={!chatInput.trim()}>发送</button>
                     )}
-                  </article>
+                  </form>
+                </div>
+
+                {userMessages.length > 0 && (
+                  <aside className={`turn-toc ${tocCollapsed ? "collapsed" : ""}`}>
+                    <div className="turn-toc-head">
+                      {!tocCollapsed && <span className="turn-toc-title">对话目录</span>}
+                      <button
+                        className="turn-toc-toggle"
+                        onClick={() => setTocCollapsed((v) => !v)}
+                        aria-label={tocCollapsed ? "展开目录" : "收起目录"}
+                        title={tocCollapsed ? "展开目录" : "收起目录"}
+                      >
+                        {tocCollapsed ? "◀" : "▶"}
+                      </button>
+                    </div>
+                    {!tocCollapsed && (
+                      <nav className="turn-toc-list">
+                        {userMessages.map((msg, idx) => {
+                          const raw = msg.content.replace(/\n/g, " ").trim();
+                          const title = raw.length > 28 ? `${raw.slice(0, 28)}…` : raw;
+                          return (
+                            <button
+                              key={msg.id}
+                              className={`turn-toc-item ${activeTurnIndex === idx ? "active" : ""}`}
+                              onClick={() => scrollToMessage(msg.id)}
+                              title={raw}
+                            >
+                              <span className="turn-toc-num">{idx + 1}</span>
+                              <span className="turn-toc-text">{title}</span>
+                            </button>
+                          );
+                        })}
+                      </nav>
+                    )}
+                  </aside>
                 )}
-                {!activeConversation && <p className="hint">你可以直接发送你的问题即可</p>}
               </div>
-              <form className="chat-input" onSubmit={sendMessage}>
-                <textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder="你可以直接发送你的问题即可" />
-                {sending ? (
-                  <button type="button" className="stop-button" onClick={stopGeneration}>停止</button>
-                ) : (
-                  <button type="submit" disabled={!chatInput.trim()}>发送</button>
-                )}
-              </form>
-              {chatError && <p className="error-text">{chatError}</p>}
             </section>
           </div>
         )}
@@ -744,15 +1066,57 @@ export default function PlatformClient() {
             <section className="content-detail">
               <button className="ghost-button" onClick={() => { setActiveContent(null); setEditingContent(false); }}>返回内容库</button>
               <div className="detail-title-row">
-                <h1>{activeContent.title}</h1>
-                <button onClick={() => copyText(activeContent.title, "标题已复制")}>复制标题</button>
+                {editingContent ? (
+                  <input
+                    className="title-edit-input"
+                    value={editingTitle}
+                    onChange={(e) => setEditingTitle(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        if (!contentSaving) saveContentEdit();
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        cancelEditContent();
+                      }
+                    }}
+                    autoFocus
+                  />
+                ) : (
+                  <h1
+                    className="editable-title"
+                    title="点击编辑标题"
+                    onClick={() => startEditContent()}
+                  >
+                    {activeContent.title}
+                  </h1>
+                )}
+                <button
+                  className={copiedButton === "title" ? "copied-button" : ""}
+                  onClick={() => copyText(activeContent.title, "title")}
+                >
+                  {copiedButton === "title" ? "已复制" : "复制标题"}
+                </button>
               </div>
               <span>{formatDate(activeContent.createdAt)}</span>
 
+              {activeContent.videoUrl ? (
+                /* 视频内容：只展示标题和视频 */
+                <div className="detail-video-block">
+                  <video controls src={activeContent.videoUrl} className="detail-video-player" />
+                </div>
+              ) : (
+                <>
               <div className="detail-image-block">
+                <span className="detail-image-label">推荐标题图</span>
                 <img className="detail-cover" src={activeContent.coverImageUrl ?? fallbackImages[0]} alt="内容配图" />
                 <div className="detail-image-actions">
-                  <button onClick={() => copyImage(activeContent.coverImageUrl ?? fallbackImages[0])}>复制图片</button>
+                  <button
+                    className={copiedButton === "image" ? "copied-button" : ""}
+                    onClick={() => copyImage(activeContent.id, "image")}
+                  >
+                    {copiedButton === "image" ? "已复制" : "复制图片"}
+                  </button>
                   <button
                     className="regen-image-button"
                     disabled={regeneratingImage === "cover-0"}
@@ -761,23 +1125,10 @@ export default function PlatformClient() {
                     {regeneratingImage === "cover-0" ? "生成中..." : "重新生成"}
                   </button>
                 </div>
+                {regeneratingImage === "cover-0" && (
+                  <p className="detail-image-progress">正在生成新图，完成后自动替换...</p>
+                )}
               </div>
-
-              {parseInlineImages(activeContent.inlineImagesJson).map((image, index) => (
-                <div key={image} className="detail-image-block">
-                  <img className="detail-cover" src={image} alt={`正文配图 ${index + 1}`} />
-                  <div className="detail-image-actions">
-                    <button onClick={() => copyImage(image)}>复制图片</button>
-                    <button
-                      className="regen-image-button"
-                      disabled={regeneratingImage === `inline-${index}`}
-                      onClick={() => regenerateImage("inline", index)}
-                    >
-                      {regeneratingImage === `inline-${index}` ? "生成中..." : "重新生成"}
-                    </button>
-                  </div>
-                </div>
-              ))}
 
               <div className="detail-body-row">
                 <h2>正文</h2>
@@ -789,7 +1140,12 @@ export default function PlatformClient() {
                     </>
                   ) : (
                     <>
-                      <button onClick={() => copyText(activeContent.body, "正文已复制")}>复制正文</button>
+                      <button
+                        className={copiedButton === "body" ? "copied-button" : ""}
+                        onClick={() => copyText(activeContent.body, "body")}
+                      >
+                        {copiedButton === "body" ? "已复制" : "复制正文"}
+                      </button>
                       <button onClick={startEditContent}>编辑</button>
                     </>
                   )}
@@ -804,6 +1160,8 @@ export default function PlatformClient() {
               ) : (
                 <article className="article-body markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(activeContent.body) }} />
               )}
+                </>
+              )}
               {copyHint && <p className="hint">{copyHint}</p>}
             </section>
           ) : (
@@ -811,9 +1169,18 @@ export default function PlatformClient() {
               {contentItems.map((item, index) => (
                 <article key={item.id} className="content-card" onClick={() => setActiveContent(item)}>
                   <img src={item.coverImageUrl ?? fallbackImages[index % fallbackImages.length]} alt="内容封面" />
-                  <span>{formatDate(item.createdAt)}</span>
+                  <div className="content-card-head">
+                    <span className={`category-tag ${
+                      item.category === "小红书" ? "tag-xhs" :
+                      item.category === "视频" ? "tag-video" :
+                      "tag-wechat"
+                    }`}>
+                      {item.category || "公众号文章"}
+                    </span>
+                    <span className="content-date">{formatDate(item.createdAt)}</span>
+                  </div>
                   <h3>{item.title}</h3>
-                  <p className="content-preview">{item.body.replace(/[*#`>_~]/g, "").trim().slice(0, 20)}{item.body.length > 20 ? "..." : ""}</p>
+                  <p className="content-preview">{item.videoUrl ? "▶ 视频作品" : (item.body.replace(/[*#`>_~]/g, "").trim().slice(0, 20) || "暂无预览")}{!item.videoUrl && item.body.length > 20 ? "..." : ""}</p>
                 </article>
               ))}
               {!contentItems.length && <p className="hint">暂无生成内容。先在对话里让 AI 员工生成一篇图文。</p>}
