@@ -13,5 +13,11 @@ Thumbs.db
 # Local data and generated artifacts
 prisma/*.db
 prisma/*.db-journal
+prisma/*.db.bak*
 src/generated/
 src/renderer/*.zip
+.workbuddy/
+
+# Large local media / uploads (do not version)
+public/uploads/
+public/videos/

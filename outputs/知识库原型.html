@@ -1,0 +1,1708 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>创星云 · 知识库原型</title>
+<style>
+  :root{
+    --bg:#eef3f7; --bg-page:#eaf3ff; --bg-page-2:#f4f8ff;
+    --panel:#ffffff; --panel-soft:#f6f9fc;
+    --ink:#151a24; --muted:#687482; --muted-2:#8c9aa9;
+    --line:#d9e3ec; --line-soft:#e6eef5;
+    --accent:#2b7cff; --accent-dark:#155bd4; --accent-cyan:#17d5ff;
+    --success:#16a34a; --success-bg:#e7f6ec;
+    --warning:#9a6816; --warning-bg:#fdf4e3;
+    --danger:#b0443e; --danger-bg:#fbeeed;
+    --shadow:0 24px 70px rgba(21,32,54,.18);
+    --sidebar-width:256px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;height:100vh;overflow:hidden;color:var(--ink);
+    font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+    background:
+      radial-gradient(circle at 18% 6%, rgba(120,188,255,.22), transparent 36%),
+      radial-gradient(circle at 92% 8%, rgba(180,220,255,.28), transparent 40%),
+      linear-gradient(180deg,var(--bg-page) 0%,var(--bg-page-2) 60%,var(--bg) 100%);
+    background-attachment:fixed;
+  }
+  button,input,textarea,select{font:inherit;}
+  button{border:0;cursor:pointer;background:none;color:inherit;}
+  h1,h2,h3,p{margin:0;}
+  .hidden{display:none !important;}
+
+  /* ============ Shell ============ */
+  .app-shell{display:grid;height:100vh;overflow:hidden;grid-template-columns:var(--sidebar-width) 1fr;}
+
+  /* ============ Sidebar ============ */
+  .sidebar{display:grid;grid-template-rows:auto 1fr auto;gap:18px;padding:22px 14px;}
+  .sidebar-brand{display:flex;align-items:center;gap:12px;padding:6px 10px 4px;}
+  .brand-avatar{display:grid;width:40px;height:40px;place-items:center;border-radius:12px;
+    background:linear-gradient(135deg,#4f9bff,#1d4ed8);color:#fff;font-weight:900;font-size:16px;
+    box-shadow:0 8px 20px rgba(43,124,255,.28);letter-spacing:.5px;}
+  .brand-text{display:grid;gap:2px;}
+  .brand-title{font-size:16px;font-weight:800;}
+  .brand-sub{font-size:12px;color:var(--muted-2);}
+  .sidebar nav{display:grid;align-content:start;gap:6px;padding:4px 0;}
+  .sidebar nav button{display:flex;align-items:center;gap:12px;text-align:left;min-height:40px;
+    padding:0 14px;font-weight:700;border-radius:12px;color:var(--ink);transition:.15s;}
+  .nav-icon{display:inline-grid;width:18px;place-items:center;}
+  .nav-icon svg{width:17px;height:17px;display:block;}
+  .sidebar nav button:hover{background:rgba(43,124,255,.08);color:var(--accent-dark);}
+  .sidebar nav button.active{background:var(--accent);color:#fff;box-shadow:0 8px 18px rgba(43,124,255,.28);}
+  .sidebar-foot{padding:0 6px;display:grid;gap:10px;}
+  .storage-box{border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--panel);}
+  .storage-box .row{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);font-weight:700;margin-bottom:8px;}
+  .bar{height:6px;border-radius:99px;background:var(--line-soft);overflow:hidden;}
+  .bar>i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent-cyan));}
+  .storage-box .tip{font-size:11px;color:var(--muted-2);margin-top:8px;}
+
+  /* ============ Workspace ============ */
+  .workspace{display:grid;grid-template-rows:auto 1fr;gap:18px;min-width:0;min-height:0;height:100%;overflow:hidden;padding:22px 24px 24px;}
+  .workspace-header{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding:8px 4px 0;}
+  .crumb{color:var(--accent);font-size:13px;font-weight:800;}
+  .workspace-header h2{margin:0;font-size:30px;font-weight:800;letter-spacing:.5px;}
+  .user-chip{display:inline-flex;align-items:center;gap:14px;border:1px solid var(--line);border-radius:12px;
+    padding:8px 12px 8px 16px;background:var(--panel);font-weight:700;box-shadow:0 6px 18px rgba(31,64,109,.06);}
+  .user-chip .exit{border-radius:8px;padding:4px 12px;background:var(--panel-soft);color:var(--accent-dark);font-size:13px;font-weight:800;}
+  .workspace-body{min-height:0;overflow-y:auto;padding:2px 4px 24px;}
+
+  /* ============ Buttons ============ */
+  .btn{display:inline-flex;align-items:center;gap:8px;border-radius:10px;padding:9px 16px;font-size:13px;font-weight:800;transition:.15s;}
+  .btn-primary{background:var(--accent);color:#fff;box-shadow:0 8px 18px rgba(43,124,255,.28);}
+  .btn-primary:hover{background:var(--accent-dark);}
+  .btn-ghost{background:var(--panel);border:1px solid var(--line);color:var(--muted);}
+  .btn-ghost:hover{color:var(--accent-dark);border-color:var(--accent);}
+  .btn-danger{background:var(--danger-bg);color:var(--danger);}
+  .btn-danger:hover{background:#f6dedc;}
+  .btn-soft{background:var(--panel-soft);color:var(--accent-dark);border:1px solid var(--line);}
+  .btn[disabled]{opacity:.55;cursor:not-allowed;box-shadow:none;}
+  .btn svg{width:15px;height:15px;}
+
+  /* ============ Toolbar ============ */
+  .toolbar{display:flex;align-items:center;gap:12px;margin:2px 0 18px;}
+  .search{flex:1;max-width:380px;position:relative;}
+  .search svg{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--muted-2);}
+  .search input{width:100%;height:42px;border:1px solid var(--line);border-radius:12px;background:var(--panel);
+    padding:0 14px 0 36px;font-size:13px;color:var(--ink);outline:none;box-shadow:0 4px 14px rgba(31,64,109,.05);}
+  .search input:focus{border-color:var(--accent);}
+  .toolbar .spacer{flex:1;}
+  .seg{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:3px;gap:2px;}
+  .seg button{padding:6px 12px;border-radius:9px;font-size:12px;font-weight:800;color:var(--muted);}
+  .seg button.on{background:var(--accent);color:#fff;}
+
+  /* ============ Stat cards ============ */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px;}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;
+    box-shadow:0 6px 18px rgba(31,64,109,.05);}
+  .stat .k{font-size:12px;color:var(--muted);font-weight:800;}
+  .stat .v{font-size:26px;font-weight:900;margin-top:6px;letter-spacing:.5px;}
+  .stat .v small{font-size:13px;color:var(--muted-2);font-weight:700;margin-left:4px;}
+
+  /* ============ KB grid ============ */
+  .kb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;}
+  .kb-card{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    padding:18px;cursor:pointer;transition:.16s;box-shadow:0 6px 18px rgba(31,64,109,.05);}
+  .kb-card:hover{transform:translateY(-2px);border-color:rgba(43,124,255,.5);box-shadow:0 16px 34px rgba(31,64,109,.13);}
+  .kb-card-top{display:flex;align-items:flex-start;gap:12px;}
+  .kb-ico{display:grid;width:44px;height:44px;place-items:center;border-radius:13px;flex:0 0 auto;color:#fff;
+    background:linear-gradient(135deg,#4f9bff,#1d4ed8);box-shadow:0 8px 18px rgba(43,124,255,.26);}
+  .kb-ico.alt{background:linear-gradient(135deg,#22d3ee,#0ea5e9);box-shadow:0 8px 18px rgba(14,165,233,.26);}
+  .kb-ico.alt2{background:linear-gradient(135deg,#7c8cff,#5b3df5);box-shadow:0 8px 18px rgba(91,61,245,.24);}
+  .kb-ico svg{width:22px;height:22px;}
+  .kb-name{font-size:16px;font-weight:900;line-height:1.3;}
+  .kb-desc{font-size:12.5px;color:var(--muted);margin-top:5px;line-height:1.55;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:38px;}
+  .kb-actions{position:absolute;top:14px;right:14px;display:flex;gap:6px;opacity:0;transition:.15s;}
+  .kb-card:hover .kb-actions{opacity:1;}
+  .icon-btn{display:grid;width:30px;height:30px;place-items:center;border-radius:9px;background:var(--panel-soft);
+    border:1px solid var(--line);color:var(--muted);}
+  .icon-btn:hover{color:var(--accent-dark);border-color:var(--accent);background:#fff;}
+  .icon-btn.danger:hover{color:var(--danger);border-color:var(--danger);}
+  .icon-btn svg{width:15px;height:15px;}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:14px;}
+  .chip{font-size:11px;font-weight:800;padding:4px 9px;border-radius:99px;background:var(--panel-soft);
+    border:1px solid var(--line);color:var(--muted);}
+  .chip.blue{background:#eaf3ff;border-color:#cfe2ff;color:var(--accent-dark);}
+  .chip.cyan{background:#e6fbff;border-color:#c6f1fb;color:#0e7490;}
+  .kb-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:14px;
+    padding-top:13px;border-top:1px solid var(--line-soft);}
+  .kb-meta{font-size:12px;color:var(--muted);font-weight:700;}
+  .pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:900;padding:4px 10px;border-radius:99px;}
+  .pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;}
+  .pill.ok{background:var(--success-bg);color:var(--success);}
+  .pill.warn{background:var(--warning-bg);color:var(--warning);}
+  .pill.run{background:#eaf3ff;color:var(--accent-dark);}
+  .pill.run::before{animation:blink 1s infinite;}
+  @keyframes blink{50%{opacity:.25;}}
+
+  /* ============ Detail ============ */
+  .back-btn{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:800;color:var(--muted);
+    padding:6px 12px;border-radius:10px;border:1px solid var(--line);background:var(--panel);margin-bottom:16px;}
+  .back-btn:hover{color:var(--accent-dark);border-color:var(--accent);}
+  .detail-head{display:flex;align-items:flex-start;gap:14px;margin-bottom:20px;flex-wrap:wrap;}
+  .detail-head .kb-ico{width:52px;height:52px;border-radius:15px;}
+  .detail-title{font-size:22px;font-weight:900;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .detail-sub{font-size:12.5px;color:var(--muted);margin-top:6px;line-height:1.6;max-width:720px;}
+  .detail-head .right{margin-left:auto;display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+
+  /* Stepper */
+  .steps{display:flex;align-items:center;gap:0;background:var(--panel);border:1px solid var(--line);
+    border-radius:16px;padding:16px 22px;margin-bottom:18px;box-shadow:0 6px 18px rgba(31,64,109,.05);}
+  .step{display:flex;align-items:center;gap:11px;cursor:pointer;}
+  .step .no{display:grid;width:32px;height:32px;place-items:center;border-radius:50%;font-size:13px;font-weight:900;
+    background:var(--panel-soft);color:var(--muted);border:1.5px solid var(--line);transition:.15s;flex:0 0 auto;}
+  .step .t{display:grid;gap:2px;}
+  .step .t b{font-size:13.5px;font-weight:900;color:var(--muted);}
+  .step .t span{font-size:11px;color:var(--muted-2);}
+  .step.active .no{background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:0 6px 14px rgba(43,124,255,.3);}
+  .step.active .t b{color:var(--ink);}
+  .step.done .no{background:var(--success-bg);border-color:#bfe6cc;color:var(--success);}
+  .step.done .t b{color:var(--ink);}
+  .step-line{flex:1;height:2px;background:var(--line);margin:0 16px;border-radius:2px;position:relative;overflow:hidden;}
+  .step-line>i{position:absolute;inset:0;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-cyan));transition:width .35s;}
+
+  /* Panels */
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px;
+    box-shadow:0 6px 18px rgba(31,64,109,.05);}
+  .panel + .panel{margin-top:16px;}
+  .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px;}
+  .panel-head h3{font-size:15px;font-weight:900;}
+  .panel-head p{font-size:12px;color:var(--muted);margin-top:4px;}
+
+  .dropzone{border:1.6px dashed var(--line);border-radius:14px;background:var(--panel-soft);
+    padding:34px 20px;text-align:center;transition:.15s;cursor:pointer;}
+  .dropzone:hover,.dropzone.over{border-color:var(--accent);background:#eef5ff;}
+  .dropzone .up{display:grid;width:54px;height:54px;place-items:center;margin:0 auto 12px;border-radius:16px;
+    background:#eaf3ff;color:var(--accent);}
+  .dropzone .up svg{width:26px;height:26px;}
+  .dropzone h4{font-size:14.5px;font-weight:900;}
+  .dropzone p{font-size:12px;color:var(--muted);margin-top:6px;}
+  .types{display:flex;justify-content:center;flex-wrap:wrap;gap:7px;margin-top:14px;}
+  .type-chip{font-size:11px;font-weight:800;padding:4px 10px;border-radius:8px;background:#fff;border:1px solid var(--line);color:var(--muted);}
+  .type-chip b{color:var(--accent-dark);}
+
+  .file-list{margin-top:16px;display:grid;gap:10px;}
+  .file-row{display:flex;align-items:center;gap:13px;border:1px solid var(--line);border-radius:13px;padding:12px 14px;background:#fff;}
+  .file-ico{display:grid;width:38px;height:38px;place-items:center;border-radius:11px;flex:0 0 auto;font-size:11px;font-weight:900;color:#fff;}
+  .file-ico.txt{background:linear-gradient(135deg,#4f9bff,#1d4ed8);}
+  .file-ico.img{background:linear-gradient(135deg,#22d3ee,#0ea5e9);}
+  .file-ico.mix{background:linear-gradient(135deg,#7c8cff,#5b3df5);}
+  .file-ico svg{width:18px;height:18px;}
+  .file-main{flex:1;min-width:0;}
+  .file-main .n{font-size:13px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .file-main .m{font-size:11.5px;color:var(--muted);margin-top:3px;}
+  .file-main .bar{margin-top:7px;max-width:220px;}
+  .file-pct{font-size:11.5px;font-weight:800;color:var(--accent-dark);min-width:38px;text-align:right;}
+
+  .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .field{display:grid;gap:7px;}
+  .field.full{grid-column:1/-1;}
+  .field label{font-size:12.5px;font-weight:800;color:var(--ink);}
+  .field label span{color:var(--muted-2);font-weight:700;}
+  .field input,.field select,.field textarea{height:42px;border:1px solid var(--line);border-radius:11px;background:#fff;
+    padding:0 13px;font-size:13px;color:var(--ink);outline:none;}
+  .field textarea{height:84px;padding:11px 13px;resize:vertical;line-height:1.6;}
+  .field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent);}
+  .field .hint{font-size:11px;color:var(--muted-2);}
+  .radio-row{display:flex;gap:10px;flex-wrap:wrap;}
+  .radio{flex:1;min-width:130px;border:1.4px solid var(--line);border-radius:12px;padding:12px;cursor:pointer;background:#fff;transition:.15s;}
+  .radio:hover{border-color:#bcd6ff;}
+  .radio.on{border-color:var(--accent);background:#eef5ff;box-shadow:0 0 0 3px rgba(43,124,255,.1);}
+  .radio b{font-size:13px;font-weight:900;display:block;}
+  .radio span{font-size:11px;color:var(--muted);display:block;margin-top:4px;line-height:1.5;}
+  .slider-row{display:flex;align-items:center;gap:14px;}
+  input[type=range]{flex:1;accent-color:var(--accent);height:4px;}
+  .slider-val{font-size:13px;font-weight:900;color:var(--accent-dark);min-width:64px;text-align:right;}
+
+  .chunk-wrap{display:grid;grid-template-columns:minmax(280px,340px) 1fr;gap:16px;align-items:start;}
+  .chunk-list{display:grid;gap:10px;max-height:560px;overflow-y:auto;padding-right:4px;}
+  .chunk{border:1px solid var(--line);border-radius:13px;padding:13px 14px;background:#fff;}
+  .chunk.off{opacity:.5;}
+  .chunk-top{display:flex;align-items:center;gap:9px;margin-bottom:8px;}
+  .chunk-no{font-size:11px;font-weight:900;padding:3px 9px;border-radius:99px;background:#eaf3ff;color:var(--accent-dark);}
+  .chunk-len{font-size:11px;color:var(--muted-2);font-weight:800;}
+  .chunk-top .sw{margin-left:auto;}
+  .chunk p{font-size:12.5px;color:var(--muted);line-height:1.65;}
+  .sw{position:relative;width:38px;height:21px;border-radius:99px;background:var(--line);transition:.16s;flex:0 0 auto;}
+  .sw::after{content:"";position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;background:#fff;transition:.16s;box-shadow:0 1px 3px rgba(0,0,0,.2);}
+  .sw.on{background:var(--accent);}
+  .sw.on::after{left:19px;}
+
+  .train-state{display:grid;gap:16px;}
+  .progress-big{height:10px;border-radius:99px;background:var(--line-soft);overflow:hidden;}
+  .progress-big>i{display:block;height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent-cyan));transition:width .4s;}
+  .train-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;}
+  .train-stat{background:var(--panel-soft);border:1px solid var(--line-soft);border-radius:12px;padding:13px;}
+  .train-stat .k{font-size:11.5px;color:var(--muted);font-weight:800;}
+  .train-stat .v{font-size:19px;font-weight:900;margin-top:5px;}
+  .log{background:#0f1a2b;border-radius:13px;padding:14px 16px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:12px;line-height:1.85;color:#a9c4e8;max-height:220px;overflow-y:auto;}
+  .log .ok{color:#4ade80;}
+  .log .in{color:#7dd3fc;}
+
+  .step-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:18px;}
+  .step-foot .left{font-size:12px;color:var(--muted);font-weight:700;}
+
+  /* ============ Modal ============ */
+  .backdrop{position:fixed;inset:0;background:rgba(15,26,43,.42);backdrop-filter:blur(3px);display:grid;place-items:center;z-index:60;padding:24px;}
+  .modal{width:min(620px,100%);background:#fff;border-radius:18px;box-shadow:var(--shadow);overflow:hidden;animation:pop .18s ease-out;}
+  @keyframes pop{from{transform:translateY(10px) scale(.98);opacity:0;}}
+  .modal-head{display:flex;align-items:center;justify-content:space-between;padding:20px 22px 0;}
+  .modal-head h3{font-size:17px;font-weight:900;}
+  .modal-head .x{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;color:var(--muted);background:var(--panel-soft);}
+  .modal-head .x:hover{color:var(--danger);}
+  .modal-body{padding:18px 22px;}
+  .modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:16px 22px 20px;background:var(--panel-soft);border-top:1px solid var(--line-soft);}
+  .modal.sm{width:min(400px,100%);text-align:center;}
+  .modal.sm .modal-body{padding:26px 24px 18px;}
+  .warn-ico{display:grid;width:52px;height:52px;place-items:center;margin:0 auto 14px;border-radius:50%;background:var(--danger-bg);color:var(--danger);font-size:24px;font-weight:900;}
+
+  /* Toast */
+  .toast{position:fixed;bottom:28px;left:50%;transform:translateX(-50%) translateY(20px);opacity:0;pointer-events:none;
+    background:#0f1a2b;color:#fff;padding:12px 20px;border-radius:12px;font-size:13px;font-weight:800;
+    box-shadow:var(--shadow);transition:.25s;z-index:80;display:flex;align-items:center;gap:9px;}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+  .toast .dot{width:7px;height:7px;border-radius:50%;background:#4ade80;}
+
+  /* ============ 检索测试 ============ */
+  .search-layout{display:grid;grid-template-columns:minmax(300px,352px) 1fr;gap:16px;align-items:start;}
+  .query-box{display:grid;gap:14px;}
+  .query-ta{width:100%;min-height:94px;border:1px solid var(--line);border-radius:12px;background:#fff;
+    padding:12px 13px;font-size:13.5px;line-height:1.65;resize:vertical;outline:none;color:var(--ink);}
+  .query-ta:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(43,124,255,.1);}
+  .q-examples{display:flex;flex-wrap:wrap;gap:7px;}
+  .q-ex{font-size:11.5px;font-weight:800;padding:5px 10px;border-radius:8px;background:var(--panel-soft);
+    border:1px solid var(--line);color:var(--muted);cursor:pointer;transition:.15s;}
+  .q-ex:hover{color:var(--accent-dark);border-color:var(--accent);background:#fff;}
+  .check{display:flex;align-items:center;gap:10px;font-size:12.5px;font-weight:800;cursor:pointer;color:var(--ink);}
+  .result-sum{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;
+    padding:12px 15px;background:var(--panel-soft);border:1px solid var(--line-soft);border-radius:12px;}
+  .result-sum .big{font-size:14.5px;font-weight:900;}
+  .result-sum .ms{font-size:12px;color:var(--muted);font-weight:700;}
+  .result-sum .ms b{color:var(--accent-dark);}
+  .res-card{border:1px solid var(--line);border-radius:14px;padding:15px 16px;background:#fff;
+    margin-bottom:11px;transition:.15s;}
+  .res-card:hover{border-color:rgba(43,124,255,.45);box-shadow:0 10px 26px rgba(31,64,109,.09);}
+  .res-card.faded{opacity:.62;}
+  .res-top{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;}
+  .rank{display:grid;width:25px;height:25px;place-items:center;border-radius:8px;font-size:11.5px;font-weight:900;
+    background:#eaf3ff;color:var(--accent-dark);flex:0 0 auto;}
+  .rank.top{background:var(--accent);color:#fff;box-shadow:0 4px 10px rgba(43,124,255,.3);}
+  .src{font-size:12.5px;font-weight:800;display:inline-flex;align-items:center;gap:7px;min-width:0;}
+  .src .loc{color:var(--muted);font-weight:700;}
+  .kb-tag{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:900;flex:0 0 auto;
+    padding:4px 10px;border-radius:99px;background:#eef5ff;color:var(--accent-dark);border:1px solid #cfe2ff;}
+  .kb-tag::before{content:"";width:6px;height:6px;border-radius:50%;
+    background:linear-gradient(135deg,var(--accent),var(--accent-cyan));}
+  .res-top .grow{flex:1;min-width:12px;}
+  .score-wrap{display:flex;align-items:center;gap:9px;width:168px;flex:0 0 auto;}
+  .score-bar{flex:1;height:6px;border-radius:99px;background:var(--line-soft);overflow:hidden;}
+  .score-bar>i{display:block;height:100%;width:0;border-radius:99px;
+    background:linear-gradient(90deg,var(--accent),var(--accent-cyan));transition:width .55s cubic-bezier(.2,.8,.3,1);}
+  .score-val{font-size:12.5px;font-weight:900;color:var(--accent-dark);width:44px;text-align:right;
+    font-variant-numeric:tabular-nums;}
+  .res-body{font-size:13px;color:#2c3746;line-height:1.78;}
+  .hl{background:#fff3bf;border-radius:4px;padding:0 2px;font-weight:800;color:#8a5a00;box-shadow:inset 0 -2px 0 #ffe08a;}
+  .res-foot{display:flex;align-items:center;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid var(--line-soft);}
+  .res-foot .tags{display:flex;gap:6px;flex-wrap:wrap;flex:1;}
+  .empty{display:grid;place-items:center;gap:13px;padding:60px 20px;text-align:center;color:var(--muted);}
+  .empty .ic{display:grid;width:62px;height:62px;place-items:center;border-radius:18px;background:var(--panel-soft);color:var(--muted-2);}
+  .empty .ic svg{width:28px;height:28px;}
+
+  /* ============ 账号管理 ============ */
+  .acct-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(318px,1fr));gap:16px;}
+  .acct-card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px;
+    box-shadow:0 6px 18px rgba(31,64,109,.05);transition:.15s;}
+  .acct-card:hover{transform:translateY(-2px);border-color:rgba(43,124,255,.42);box-shadow:0 16px 32px rgba(31,64,109,.12);}
+  .acct-card.off{background:linear-gradient(180deg,#fcfdff,#f5f8fc);border-style:dashed;}
+  .acct-top{display:flex;align-items:center;gap:12px;}
+  .plat-ico{display:grid;width:42px;height:42px;place-items:center;border-radius:13px;flex:0 0 auto;
+    color:#fff;font-weight:900;font-size:15px;box-shadow:0 6px 14px rgba(31,64,109,.16);}
+  .plat-xhs{background:linear-gradient(135deg,#ff4d67,#d9163a);}
+  .plat-wechat{background:linear-gradient(135deg,#33bd72,#12964b);}
+  .plat-finder{background:linear-gradient(135deg,#ffb057,#f2691e);}
+  .plat-douyin{background:linear-gradient(135deg,#4b5563,#111827);}
+  .plat-kuaishou{background:linear-gradient(135deg,#ff8a3d,#e34a00);}
+  .plat-bili{background:linear-gradient(135deg,#3cc3f0,#0d95c9);}
+  .acct-plat{font-size:15px;font-weight:900;}
+  .acct-uid{font-size:12px;color:var(--muted);margin-top:3px;word-break:break-all;}
+  .acct-top .pill{margin-left:auto;flex:0 0 auto;}
+  .acct-rows{display:grid;gap:9px;margin-top:15px;padding-top:14px;border-top:1px solid var(--line-soft);}
+  .acct-rows .r{display:flex;align-items:center;justify-content:space-between;font-size:12.5px;gap:10px;}
+  .acct-rows .r span{color:var(--muted);font-weight:700;}
+  .acct-rows .r b{font-weight:800;text-align:right;}
+  .acct-foot{display:flex;gap:10px;margin-top:16px;}
+  .acct-foot .btn{flex:1;justify-content:center;}
+
+  /* ============ 系统配置 ============ */
+  .tabs{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:4px;gap:3px;margin-bottom:16px;}
+  .tabs button{padding:8px 16px;border-radius:9px;font-size:13px;font-weight:800;color:var(--muted);transition:.15s;}
+  .tabs button:hover{color:var(--accent-dark);}
+  .tabs button.on{background:var(--accent);color:#fff;box-shadow:0 6px 14px rgba(43,124,255,.26);}
+  .svc-list{display:grid;gap:11px;}
+  .svc-card{display:flex;align-items:center;gap:16px;flex-wrap:wrap;border:1px solid var(--line);
+    border-radius:14px;padding:15px 16px;background:#fff;}
+  .svc-card.off{border-style:dashed;background:linear-gradient(180deg,#fcfdff,#f5f8fc);}
+  .svc-ico{display:grid;width:42px;height:42px;place-items:center;border-radius:12px;color:#fff;font-weight:900;
+    font-size:13px;flex:0 0 auto;background:linear-gradient(135deg,#4f9bff,#1d4ed8);box-shadow:0 6px 14px rgba(43,124,255,.24);}
+  .svc-ico.g{background:linear-gradient(135deg,#34d399,#059669);box-shadow:0 6px 14px rgba(5,150,105,.22);}
+  .svc-ico.p{background:linear-gradient(135deg,#a78bfa,#6d28d9);box-shadow:0 6px 14px rgba(109,40,217,.22);}
+  .svc-ico.o{background:linear-gradient(135deg,#fbbf24,#d97706);box-shadow:0 6px 14px rgba(217,119,6,.22);}
+  .svc-info{flex:1;min-width:190px;}
+  .svc-name{font-size:14px;font-weight:900;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+  .svc-meta{font-size:12px;color:var(--muted);margin-top:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+  .svc-key{display:flex;align-items:center;gap:8px;flex:0 0 auto;}
+  .svc-key .kl{font-size:11.5px;color:var(--muted-2);font-weight:800;}
+  .svc-key code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--panel-soft);
+    border:1px solid var(--line);border-radius:8px;padding:6px 10px;color:var(--ink);}
+  .svc-actions{display:flex;gap:8px;flex:0 0 auto;}
+  .svc-actions .btn{padding:7px 13px;font-size:12.5px;}
+
+  .k-table{border:1px solid var(--line);border-radius:13px;overflow:hidden;background:#fff;}
+  .k-cols{display:grid;grid-template-columns:1.05fr 1.7fr .85fr 1fr .95fr 108px;gap:12px;align-items:center;}
+  .k-head{padding:11px 15px;background:var(--panel-soft);font-size:11.5px;font-weight:900;color:var(--muted);}
+  .k-row{padding:13px 15px;font-size:12.5px;border-top:1px solid var(--line-soft);}
+  .k-row code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:var(--panel-soft);
+    border:1px solid var(--line);border-radius:7px;padding:3px 8px;}
+  .k-row .nm{font-weight:900;}
+  .k-row .mo{color:var(--muted);font-weight:700;}
+  .k-ops{display:flex;gap:6px;justify-content:flex-end;}
+
+  /* ============ 账号管理（用户） ============ */
+  .u-table{border:1px solid var(--line);border-radius:13px;overflow:hidden;background:#fff;}
+  .u-cols{display:grid;grid-template-columns:1.7fr .9fr 1.1fr 1.3fr 1.9fr;gap:12px;align-items:center;}
+  .u-head{padding:12px 18px;background:linear-gradient(180deg,#f7fafe,#f1f6fd);font-size:11.5px;font-weight:900;color:var(--muted);
+    border-bottom:1px solid var(--line);}
+  .u-row{padding:14px 18px;font-size:13.5px;transition:.12s;}
+  .u-row + .u-row{border-top:1px solid var(--line-soft);}
+  .u-row:hover{background:#f9fbff;}
+  .u-name{display:flex;align-items:center;gap:10px;font-weight:900;min-width:0;}
+  .u-avatar{display:grid;width:34px;height:34px;place-items:center;border-radius:11px;flex:0 0 auto;
+    background:linear-gradient(135deg,#eaf3ff,#dbe9ff);color:var(--accent);font-weight:900;font-size:14px;}
+  .u-sub{font-size:11.5px;color:var(--muted);font-weight:700;margin-top:2px;}
+  .u-muted{color:var(--muted);font-weight:700;font-size:12.5px;}
+  .u-ops{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap;}
+  .u-ops .btn{padding:5px 11px;font-size:12px;}
+
+  .qr-box{display:grid;place-items:center;gap:8px;width:170px;height:170px;margin:0 auto;
+    border:1.6px dashed var(--line);border-radius:14px;background:var(--panel-soft);color:var(--muted-2);
+    font-size:12px;font-weight:800;text-align:center;cursor:pointer;}
+  .qr-box:hover{border-color:var(--accent);color:var(--accent-dark);background:#eef5ff;}
+  .qr-box svg{width:34px;height:34px;}
+
+  .proto-tag{position:fixed;right:16px;bottom:16px;z-index:50;font-size:11px;font-weight:900;color:var(--muted-2);
+    background:rgba(255,255,255,.8);border:1px solid var(--line);border-radius:99px;padding:6px 13px;}
+</style>
+</head>
+<body>
+
+<main class="app-shell">
+  <!-- ================= Sidebar ================= -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-avatar">AI</div>
+      <div class="brand-text">
+        <span class="brand-title">创星云</span>
+        <span class="brand-sub">AI数字员工平台</span>
+      </div>
+    </div>
+
+    <nav>
+      <button data-sec="chat" onclick="switchSection('chat')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span><span class="nav-label">对话</span></button>
+      <button data-sec="library" onclick="switchSection('library')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span><span class="nav-label">内容库</span></button>
+      <button class="active" data-sec="kb" onclick="switchSection('kb')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span><span class="nav-label">知识库</span></button>
+      <button data-sec="accounts" onclick="switchSection('accounts')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5 4.5 5.4V11c0 5 3.2 8.4 7.5 10.5C16.3 19.4 19.5 16 19.5 11V5.4z"/><path d="m9.2 11.6 2 2 3.6-3.8"/></svg></span><span class="nav-label">平台授权管理</span></button>
+      <button data-sec="settings" onclick="switchSection('settings')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 7.2l1.9 1.1M17.9 15.7l1.9 1.1M4.2 16.8l1.9-1.1M17.9 8.3l1.9-1.1"/></svg></span><span class="nav-label">系统配置</span></button>
+      <button data-sec="users" onclick="switchSection('users')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span><span class="nav-label">账号管理</span></button>
+      <button data-sec="profile" onclick="switchSection('profile')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg></span><span class="nav-label">个人中心</span></button>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="storage-box">
+        <div class="row"><span>向量存储</span><span>18.4 / 50 GB</span></div>
+        <div class="bar"><i style="width:37%"></i></div>
+        <div class="tip">已用切片 12,480 条</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ================= Workspace ================= -->
+  <section class="workspace">
+    <header class="workspace-header">
+      <div class="workspace-header-left">
+        <span class="crumb" id="crumb">当前页面</span>
+        <h2 id="pageTitle">知识库</h2>
+      </div>
+      <div class="user-chip">
+        <span>133****8307</span>
+        <button class="exit">退出</button>
+      </div>
+    </header>
+
+    <div class="workspace-body">
+
+      <!-- ---------- View: 列表 ---------- -->
+      <div id="viewList">
+        <div class="toolbar">
+          <div class="search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+            <input placeholder="搜索知识库名称 / 描述…" />
+          </div>
+          <div class="seg">
+            <button class="on">全部</button>
+            <button>已就绪</button>
+            <button>需处理</button>
+          </div>
+          <div class="spacer"></div>
+          <button class="btn btn-ghost" onclick="openSearch()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+            检索测试
+          </button>
+          <button class="btn btn-primary" onclick="openKbModal()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            新建知识库
+          </button>
+        </div>
+
+        <div class="stats">
+          <div class="stat"><div class="k">知识库总数</div><div class="v" id="statKb">4<small>个</small></div></div>
+          <div class="stat"><div class="k">文档总数</div><div class="v">168<small>份</small></div></div>
+          <div class="stat"><div class="k">已训练切片</div><div class="v">12,480<small>条</small></div></div>
+          <div class="stat"><div class="k">待处理</div><div class="v" style="color:var(--warning)">1<small>个库</small></div></div>
+        </div>
+
+        <div class="kb-grid" id="kbGrid">
+          <!-- 卡片由 JS 渲染 -->
+        </div>
+      </div>
+
+      <!-- ---------- View: 详情（向导） ---------- -->
+      <div id="viewDetail" class="hidden">
+        <button class="back-btn" onclick="backToList()">← 返回知识库</button>
+
+        <div class="detail-head">
+          <div class="kb-ico alt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></div>
+          <div>
+            <div class="detail-title"><span id="dName">银发内容素材库</span><span class="pill run" id="dStatus">进行中</span></div>
+            <div class="detail-sub" id="dDesc">收纳银发赛道爆款笔记、竞品账号拆解与平台规则文档，供 AI 员工写作时检索引用。</div>
+          </div>
+          <div class="right">
+            <button class="btn btn-ghost" onclick="openKbModal(true)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
+              编辑信息
+            </button>
+            <button class="btn btn-soft" onclick="toast('已重新开始解析流程')">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+              重新处理
+            </button>
+          </div>
+        </div>
+
+        <!-- Stepper -->
+        <div class="steps">
+          <div class="step active" data-step="1" onclick="goStep(1)">
+            <div class="no">1</div><div class="t"><b>上传文件</b><span>文本 / 图片 / 图文</span></div>
+          </div>
+          <div class="step-line"><i id="line1"></i></div>
+          <div class="step" data-step="2" onclick="goStep(2)">
+            <div class="no">2</div><div class="t"><b>切片</b><span>分块与预览</span></div>
+          </div>
+          <div class="step-line"><i id="line2"></i></div>
+          <div class="step" data-step="3" onclick="goStep(3)">
+            <div class="no">3</div><div class="t"><b>训练</b><span>向量化入库</span></div>
+          </div>
+        </div>
+
+        <!-- ===== Step 1：上传 ===== -->
+        <div id="step1">
+          <div class="panel">
+            <div class="panel-head">
+              <div><h3>上传知识文件</h3><p>支持拖拽或点击上传，单文件 ≤ 50MB，可批量选择</p></div>
+              <span class="chip blue" id="fileCount">已上传 3 个文件</span>
+            </div>
+
+            <div class="dropzone" id="dropzone" onclick="addFakeFile()">
+              <div class="up"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0 4 4m-4-4-4 4"/><path d="M4 16v2.5A2.5 2.5 0 0 0 6.5 21h11A2.5 2.5 0 0 0 20 18.5V16"/></svg></div>
+              <h4>点击或拖拽文件到这里上传</h4>
+              <p>上传后自动解析内容，进入下一步切片</p>
+              <div class="types">
+                <span class="type-chip">文本 <b>.txt .md .docx .pdf</b></span>
+                <span class="type-chip">图片 <b>.png .jpg .jpeg .webp</b></span>
+                <span class="type-chip">图文 <b>.docx（含图）/ .zip</b></span>
+              </div>
+            </div>
+
+            <div class="file-list" id="fileList">
+              <div class="file-row">
+                <div class="file-ico txt"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6.5A1.5 1.5 0 0 0 5 3.5v17A1.5 1.5 0 0 0 6.5 22h11a1.5 1.5 0 0 0 1.5-1.5V7z"/><path d="M14 2v5h5"/></svg></div>
+                <div class="file-main">
+                  <div class="n">银发赛道爆款笔记合集.md</div>
+                  <div class="m">文本 · 128 KB · 已解析 24,180 字</div>
+                </div>
+                <span class="pill ok">解析完成</span>
+                <button class="icon-btn" onclick="removeFile(this)" title="移除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+              </div>
+
+              <div class="file-row">
+                <div class="file-ico img"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="m4 17 5-4.5 4 3.5 3-2.5 4 3.5"/></svg></div>
+                <div class="file-main">
+                  <div class="n">竞品账号主页截图_康康和爷爷.png</div>
+                  <div class="m">图片 · 1.8 MB · OCR 识别中…</div>
+                  <div class="bar"><i style="width:62%"></i></div>
+                </div>
+                <span class="file-pct">62%</span>
+                <button class="icon-btn" onclick="removeFile(this)" title="移除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+              </div>
+
+              <div class="file-row">
+                <div class="file-ico mix"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6.5A1.5 1.5 0 0 0 5 3.5v17A1.5 1.5 0 0 0 6.5 22h11a1.5 1.5 0 0 0 1.5-1.5V7z"/><path d="M14 2v5h5"/><rect x="8.5" y="13" width="7" height="5" rx="1"/></svg></div>
+                <div class="file-main">
+                  <div class="n">小红书运营SOP（图文版）.docx</div>
+                  <div class="m">图文 · 3.2 MB · 待解析</div>
+                </div>
+                <span class="pill warn">排队中</span>
+                <button class="icon-btn" onclick="removeFile(this)" title="移除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+              </div>
+            </div>
+
+            <div class="step-foot">
+              <div class="left">合计 3 个文件 · 约 5.1 MB</div>
+              <div>
+                <button class="btn btn-ghost" onclick="toast('已保存为草稿')">保存草稿</button>
+                <button class="btn btn-primary" onclick="goStep(2)">下一步：切片 →</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== Step 2：切片 ===== -->
+        <div id="step2" class="hidden">
+          <div class="chunk-wrap">
+            <div class="panel">
+              <div class="panel-head"><div><h3>切片方式</h3><p>决定文本如何被切分成检索单元</p></div></div>
+              <div class="form-grid" style="grid-template-columns:1fr;">
+                <div class="radio-row">
+                  <div class="radio on" onclick="pickRadio(this)"><b>智能语义切片</b><span>按段落与语义边界切分，推荐</span></div>
+                  <div class="radio" onclick="pickRadio(this)"><b>固定长度</b><span>按字符数硬切分</span></div>
+                </div>
+                <div class="field">
+                  <label>切片长度 <span>（字符）</span></label>
+                  <div class="slider-row">
+                    <input type="range" min="200" max="1500" step="50" value="600" oninput="document.getElementById('sv1').textContent=this.value+' 字'" />
+                    <span class="slider-val" id="sv1">600 字</span>
+                  </div>
+                </div>
+                <div class="field">
+                  <label>重叠长度 <span>（避免语义断裂）</span></label>
+                  <div class="slider-row">
+                    <input type="range" min="0" max="300" step="10" value="80" oninput="document.getElementById('sv2').textContent=this.value+' 字'" />
+                    <span class="slider-val" id="sv2">80 字</span>
+                  </div>
+                </div>
+                <div class="field">
+                  <label>图片处理</label>
+                  <select><option>OCR 提取文字后一并切分（推荐）</option><option>仅保留图片描述</option><option>忽略图片内容</option></select>
+                  <span class="hint">图文类文件会先分离文字与图片，图片走 OCR 后再合并切分</span>
+                </div>
+              </div>
+              <div class="step-foot">
+                <div class="left">预计生成 386 条切片</div>
+                <div>
+                  <button class="btn btn-ghost" onclick="goStep(1)">← 上一步</button>
+                  <button class="btn btn-soft" onclick="toast('已按当前配置重新切片')">重新切片</button>
+                  <button class="btn btn-primary" onclick="goStep(3)">下一步：训练 →</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head">
+                <div><h3>切片预览</h3><p>共 386 条，可逐条查看并临时停用</p></div>
+                <span class="chip blue">386 条</span>
+              </div>
+              <div class="chunk-list">
+                <div class="chunk">
+                  <div class="chunk-top"><span class="chunk-no">#001</span><span class="chunk-len">588 字</span><div class="sw on" onclick="this.classList.toggle('on')"></div></div>
+                  <p>【银发赛道爆款笔记合集】梅英阿嬷两个月涨粉 18 万，核心是人设真实 + 固定发布时间。第一人称口吻、日常琐碎细节、固定片头片尾，让用户形成追更习惯……</p>
+                </div>
+                <div class="chunk">
+                  <div class="chunk-top"><span class="chunk-no">#002</span><span class="chunk-len">612 字</span><div class="sw on" onclick="this.classList.toggle('on')"></div></div>
+                  <p>标题公式：数字 + 身份 + 反差情绪。例如「72 岁奶奶第一次用手机拍视频，孙子看哭了」。前 3 秒必须给出冲突或悬念，避免铺垫过长……</p>
+                </div>
+                <div class="chunk">
+                  <div class="chunk-top"><span class="chunk-no">#003</span><span class="chunk-len">540 字</span><div class="sw on" onclick="this.classList.toggle('on')"></div></div>
+                  <p>竞品账号拆解（康康和爷爷）：更新频率每周 4 更，评论区高频词「像我爸」「看哭了」。选题集中在「父母与子女的错过」「老一辈的遗憾」，情绪落点统一……</p>
+                </div>
+                <div class="chunk">
+                  <div class="chunk-top"><span class="chunk-no">#004</span><span class="chunk-len">623 字</span><div class="sw on" onclick="this.classList.toggle('on')"></div></div>
+                  <p>平台合规注意：避免使用变体词规避审核，真实截图需打码；不支持引导性互动话术（如「点赞过百就更新」）；医疗、金融类表述需谨慎……</p>
+                </div>
+                <div class="chunk">
+                  <div class="chunk-top"><span class="chunk-no">#005</span><span class="chunk-len">498 字</span><div class="sw on" onclick="this.classList.toggle('on')"></div></div>
+                  <p>发布节奏建议：晚间 20:00–21:00；单条图文配 7 张图，封面用人物特写 + 大字标题；正文控制在 800–1000 字，首段给出情绪钩子……</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== Step 3：训练 ===== -->
+        <div id="step3" class="hidden">
+          <div class="panel">
+            <div class="panel-head"><div><h3>训练配置</h3><p>向量化后写入索引，完成后即可被 AI 员工检索</p></div></div>
+            <div class="form-grid">
+              <div class="field">
+                <label>向量模型</label>
+                <select id="embModel"><option>text-embedding-3-large（推荐）</option><option>text-embedding-3-small</option><option>bge-large-zh-v1.5（本地）</option></select>
+              </div>
+              <div class="field">
+                <label>检索方式</label>
+                <select><option>向量检索 + 关键词混合（推荐）</option><option>纯向量检索</option></select>
+              </div>
+              <div class="field">
+                <label>召回条数 TopK</label>
+                <input value="5" />
+              </div>
+              <div class="field">
+                <label>更新策略</label>
+                <select><option>增量更新（保留已有向量）</option><option>全量重建索引</option></select>
+              </div>
+            </div>
+
+            <div class="step-foot">
+              <div class="left" id="trainHint">配置完成后点击「开始训练」，预计 2–4 分钟</div>
+              <div>
+                <button class="btn btn-ghost" onclick="goStep(2)" id="btnBack3">← 上一步</button>
+                <button class="btn btn-primary" id="btnTrain" onclick="startTraining()">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9z"/></svg>
+                  开始训练
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel" id="trainPanel" style="margin-top:16px;">
+            <div class="panel-head">
+              <div><h3>训练进度</h3><p id="trainStatus">尚未开始</p></div>
+              <span class="pill" id="trainPill" style="background:var(--panel-soft);color:var(--muted);">待训练</span>
+            </div>
+            <div class="train-state">
+              <div class="progress-big"><i id="progBar"></i></div>
+              <div class="train-stats">
+                <div class="train-stat"><div class="k">已处理切片</div><div class="v" id="tsChunk">0 / 386</div></div>
+                <div class="train-stat"><div class="k">生成向量</div><div class="v" id="tsVec">0</div></div>
+                <div class="train-stat"><div class="k">耗时</div><div class="v" id="tsTime">0s</div></div>
+                <div class="train-stat"><div class="k">索引状态</div><div class="v" id="tsIdx" style="font-size:15px;color:var(--muted);">—</div></div>
+              </div>
+              <div class="log" id="trainLog"><span class="in">› 等待开始训练…</span></div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /viewDetail -->
+
+      <!-- ---------- View: 检索测试 ---------- -->
+      <div id="viewSearch" class="hidden">
+        <button class="back-btn" onclick="backToList()">← 返回知识库</button>
+
+        <div class="detail-head">
+          <div class="kb-ico alt2"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg></div>
+          <div>
+            <div class="detail-title">知识库检索测试</div>
+            <div class="detail-sub">对当前账号下<b>全部知识库</b>做一次召回测试：输入真实问题，跨库检索并按相似度排序，看看 AI 员工实际会引用哪些内容、来自哪个库。</div>
+          </div>
+        </div>
+
+        <div class="search-layout">
+          <!-- 左：检索条件 -->
+          <div class="panel">
+            <div class="panel-head"><div><h3>检索条件</h3><p>模拟一次召回</p></div></div>
+            <div class="query-box">
+              <div class="field">
+                <label>问题 / 关键词</label>
+                <textarea class="query-ta" id="qInput">银发账号怎么写标题才能提高点击率？</textarea>
+              </div>
+              <div class="q-examples">
+                <span class="q-ex" onclick="setQ(this)">爆款标题公式</span>
+                <span class="q-ex" onclick="setQ(this)">发布时间建议</span>
+                <span class="q-ex" onclick="setQ(this)">合规违禁词</span>
+                <span class="q-ex" onclick="setQ(this)">父母故事选题</span>
+              </div>
+              <div class="field">
+                <label>检索方式</label>
+                <select>
+                  <option>向量 + 关键词混合（推荐）</option>
+                  <option>纯向量检索</option>
+                  <option>纯关键词 BM25</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>召回条数 TopK</label>
+                <div class="slider-row">
+                  <input type="range" id="rngK" min="1" max="10" value="5" oninput="document.getElementById('svK').textContent=this.value+' 条'" />
+                  <span class="slider-val" id="svK">5 条</span>
+                </div>
+              </div>
+              <div class="field">
+                <label>相似度阈值 <span>（低于该值不返回）</span></label>
+                <div class="slider-row">
+                  <input type="range" id="rngT" min="0" max="90" step="5" value="40" oninput="document.getElementById('svT').textContent=(this.value/100).toFixed(2)" />
+                  <span class="slider-val" id="svT">0.40</span>
+                </div>
+              </div>
+              <div class="field">
+                <label>检索范围</label>
+                <select id="scopeSel">
+                  <option value="all">全部知识库（4 个）</option>
+                  <option>银发内容素材库</option>
+                  <option>品牌与产品知识</option>
+                  <option>平台规则与合规</option>
+                  <option>客户访谈与素材</option>
+                </select>
+                <span class="hint">默认跨全部知识库召回，也可聚焦单个库验证质量</span>
+              </div>
+              <button class="btn btn-primary" style="justify-content:center;" onclick="runSearch()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+                开始检索
+              </button>
+              <p style="font-size:11.5px;color:var(--muted-2);line-height:1.6;">提示：这里的结果就是 AI 员工写作时实际会引用的内容，可直接用来验收知识库质量。</p>
+            </div>
+          </div>
+
+          <!-- 右：召回结果 -->
+          <div class="panel">
+            <div class="panel-head">
+              <div><h3>召回结果</h3><p id="resSub">尚未检索</p></div>
+              <span class="chip" id="resCount" style="background:var(--panel-soft);border-color:var(--line);color:var(--muted);">—</span>
+            </div>
+            <div class="result-sum hidden" id="resSum">
+              <span class="big" id="resBig">命中 5 条</span>
+              <span class="ms" id="resMs"></span>
+            </div>
+            <div id="resList">
+              <div class="empty">
+                <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg></div>
+                <div>
+                  <b style="font-size:14px;color:var(--ink);">输入问题后点击「开始检索」</b>
+                  <div style="font-size:12px;margin-top:6px;">这里会按相似度从高到低展示召回的切片片段</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div><!-- /viewSearch -->
+
+      <!-- ---------- View: 平台授权管理 ---------- -->
+      <div id="viewAccounts" class="hidden">
+        <div class="stats">
+          <div class="stat"><div class="k">已开通账号</div><div class="v" id="statAcct">3<small>个</small></div></div>
+          <div class="stat"><div class="k">可对接平台</div><div class="v">6<small>个</small></div></div>
+          <div class="stat"><div class="k">即将到期</div><div class="v" style="color:var(--warning)">1<small>个</small></div></div>
+          <div class="stat"><div class="k">异常 / 掉线</div><div class="v" style="color:var(--success)">0<small>个</small></div></div>
+        </div>
+
+        <div class="toolbar">
+          <div class="search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+            <input placeholder="搜索平台 / 账号名称…" />
+          </div>
+          <div class="seg">
+            <button class="on">全部</button>
+            <button>已开通</button>
+            <button>未开通</button>
+          </div>
+          <div class="spacer"></div>
+          <button class="btn btn-primary" onclick="openAcctModal('bind')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            开通平台账号
+          </button>
+        </div>
+
+        <div class="acct-grid" id="acctGrid"></div>
+      </div><!-- /viewAccounts -->
+
+      <!-- ---------- View: 系统配置 ---------- -->
+      <div id="viewSettings" class="hidden">
+        <div class="panel">
+          <div class="panel-head">
+            <div><h3>模型配置</h3><p>添加并管理可调用的模型服务，添加时选择模型并填写该模型对应的 API Key</p></div>
+            <button class="btn btn-primary" onclick="openModelModal()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+              添加模型
+            </button>
+          </div>
+          <div class="svc-list" id="svcList"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><div><h3>默认模型分配</h3><p>不同任务各自使用哪个模型，改完即时生效</p></div></div>
+          <div class="form-grid">
+            <div class="field">
+              <label>对话 / 写作</label>
+              <select><option>gpt-4o（OpenAI）</option><option>claude-sonnet-4（Anthropic）</option><option>qwen-max（通义千问）</option></select>
+            </div>
+            <div class="field">
+              <label>图文生成</label>
+              <select><option>gpt-4o（OpenAI）</option><option>deepseek-chat（DeepSeek）</option></select>
+            </div>
+            <div class="field">
+              <label>向量化（RAG）</label>
+              <select><option>text-embedding-3-large（OpenAI）</option><option>bge-large-zh-v1.5（本地）</option></select>
+            </div>
+            <div class="field">
+              <label>图片生成</label>
+              <select><option>flux（pollinations）</option><option>dall-e-3（OpenAI）</option></select>
+            </div>
+          </div>
+          <div class="step-foot">
+            <div class="left">建议图文生成与对话使用同一模型，风格更统一</div>
+            <button class="btn btn-primary" onclick="toast('默认模型配置已保存')">保存配置</button>
+          </div>
+        </div>
+      </div><!-- /viewSettings -->
+
+      <!-- ---------- View: 账号管理 ---------- -->
+      <div id="viewUsers" class="hidden">
+        <div class="stats">
+          <div class="stat"><div class="k">账号总数</div><div class="v" id="statUser">5<small>个</small></div></div>
+          <div class="stat"><div class="k">正常</div><div class="v" style="color:var(--success)">4<small>个</small></div></div>
+          <div class="stat"><div class="k">已停用</div><div class="v" style="color:var(--warning)">1<small>个</small></div></div>
+          <div class="stat"><div class="k">本月新增</div><div class="v">2<small>个</small></div></div>
+        </div>
+
+        <div class="toolbar">
+          <div class="search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+            <input placeholder="搜索账号名称 / 创建人…" />
+          </div>
+          <div class="seg">
+            <button class="on">全部</button>
+            <button>正常</button>
+            <button>已停用</button>
+          </div>
+          <div class="spacer"></div>
+          <button class="btn btn-primary" onclick="openUserModal('new')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            新建账号
+          </button>
+        </div>
+
+        <div class="u-table">
+          <div class="u-head u-cols">
+            <span>账号名称</span><span>状态</span><span>创建人</span><span>创建时间</span><span style="text-align:right;">操作</span>
+          </div>
+          <div id="uList"></div>
+        </div>
+      </div><!-- /viewUsers -->
+
+      <!-- ---------- View: 占位（其他已上线模块） ---------- -->
+      <div id="viewPlaceholder" class="hidden">
+        <div class="panel" style="padding:64px 24px;">
+          <div class="empty" style="padding:0;">
+            <div class="ic" id="phIco"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3h.01"/></svg></div>
+            <div>
+              <b id="phTitle" style="font-size:16px;color:var(--ink);">模块</b>
+              <div id="phDesc" style="font-size:12.5px;margin-top:8px;max-width:440px;line-height:1.7;">
+                该模块已在平台上线。本原型聚焦「知识库 · 平台授权管理 · 系统配置 · 账号管理」等模块的交互设计。
+              </div>
+            </div>
+          </div>
+        </div>
+      </div><!-- /viewPlaceholder -->
+    </div>
+  </section>
+</main>
+
+<!-- ================= Modal：新建 / 编辑 ================= -->
+<div class="backdrop hidden" id="kbModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="kbModalTitle">新建知识库</h3>
+      <button class="x" onclick="closeKbModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="field full">
+          <label>知识库名称 <span>*</span></label>
+          <input id="fName" placeholder="如：银发内容素材库" value="银发内容素材库" />
+        </div>
+        <div class="field full">
+          <label>描述 <span>（选填，帮助 AI 判断何时引用）</span></label>
+          <textarea placeholder="简单说明这个知识库收录什么内容…">收纳银发赛道爆款笔记、竞品账号拆解与平台规则文档，供 AI 员工写作时检索引用。</textarea>
+        </div>
+        <div class="field">
+          <label>向量模型</label>
+          <select><option>text-embedding-3-large（推荐）</option><option>text-embedding-3-small</option><option>bge-large-zh-v1.5（本地）</option></select>
+        </div>
+        <div class="field">
+          <label>切片策略</label>
+          <select><option>智能语义切片（推荐）</option><option>固定长度</option></select>
+        </div>
+        <div class="field">
+          <label>可见范围</label>
+          <select><option>仅自己可见</option><option>团队共享</option></select>
+        </div>
+        <div class="field">
+          <label>召回条数 TopK</label>
+          <input value="5" />
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeKbModal()">取消</button>
+      <button class="btn btn-primary" onclick="saveKb()">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= Modal：删除确认 ================= -->
+<div class="backdrop hidden" id="delModal">
+  <div class="modal sm">
+    <div class="modal-body">
+      <div class="warn-ico">!</div>
+      <h3 style="font-size:17px;font-weight:900;">删除知识库？</h3>
+      <p style="font-size:13px;color:var(--muted);margin-top:10px;line-height:1.7;">
+        将删除「<b id="delName" style="color:var(--ink)">银发内容素材库</b>」及其下全部文件、切片与向量索引，操作不可恢复。
+      </p>
+    </div>
+    <div class="modal-foot" style="justify-content:center;">
+      <button class="btn btn-ghost" onclick="closeDelModal()">取消</button>
+      <button class="btn btn-danger" onclick="confirmDelete()">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= Modal：平台账号开通 / 查看 ================= -->
+<div class="backdrop hidden" id="acctModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="acctModalTitle">开通平台账号</h3>
+      <button class="x" onclick="closeAcctModal()">✕</button>
+    </div>
+    <div class="modal-body" id="acctModalBody"></div>
+    <div class="modal-foot" id="acctModalFoot"></div>
+  </div>
+</div>
+
+<!-- ================= Modal：添加模型 ================= -->
+<div class="backdrop hidden" id="modelModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>添加模型</h3>
+      <button class="x" onclick="closeModelModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="field full">
+          <label>选择模型 <span>*</span></label>
+          <select id="mSel">
+            <optgroup label="OpenAI">
+              <option>gpt-4o</option><option>gpt-4o-mini</option><option>o3-mini</option>
+            </optgroup>
+            <optgroup label="Anthropic">
+              <option>claude-sonnet-4</option><option>claude-opus-4</option>
+            </optgroup>
+            <optgroup label="通义千问">
+              <option>qwen-max</option><option>qwen-plus</option>
+            </optgroup>
+            <optgroup label="DeepSeek">
+              <option>deepseek-chat</option><option>deepseek-reasoner</option>
+            </optgroup>
+            <optgroup label="向量 / 图片">
+              <option>text-embedding-3-large</option><option>dall-e-3</option><option>flux</option>
+            </optgroup>
+          </select>
+        </div>
+        <div class="field full">
+          <label>API Key <span>*</span></label>
+          <input id="mKey" placeholder="粘贴该模型服务商提供的 API Key，如 sk-…" />
+        </div>
+        <div class="field full">
+          <label>接口地址 Base URL <span>（选填，留空使用默认地址）</span></label>
+          <input id="mUrl" placeholder="https://api.openai.com/v1" />
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeModelModal()">取消</button>
+      <button class="btn btn-primary" onclick="saveModel()">确认添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= Modal：账号新建 / 编辑 / 重置密码 ================= -->
+<div class="backdrop hidden" id="userModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="userModalTitle">新建账号</h3>
+      <button class="x" onclick="closeUserModal()">✕</button>
+    </div>
+    <div class="modal-body" id="userModalBody"></div>
+    <div class="modal-foot" id="userModalFoot"></div>
+  </div>
+</div>
+
+<!-- ================= Modal：删除账号确认 ================= -->
+<div class="backdrop hidden" id="uDelModal">
+  <div class="modal sm">
+    <div class="modal-body">
+      <div class="warn-ico">!</div>
+      <h3 style="font-size:17px;font-weight:900;">删除账号？</h3>
+      <p style="font-size:13px;color:var(--muted);margin-top:10px;line-height:1.7;">
+        将删除账号「<b id="uDelName" style="color:var(--ink)">—</b>」，该账号将无法再登录平台，操作不可恢复。
+      </p>
+    </div>
+    <div class="modal-foot" style="justify-content:center;">
+      <button class="btn btn-ghost" onclick="closeUDelModal()">取消</button>
+      <button class="btn btn-danger" onclick="confirmUserDel()">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"><span class="dot"></span><span id="toastText">已完成</span></div>
+<div class="proto-tag">知识库 · 平台授权管理 · 系统配置 · 账号管理 · 交互原型</div>
+
+<script>
+  /* ---------- 数据 ---------- */
+  let KB = [
+    { id:1, name:"银发内容素材库", desc:"收纳银发赛道爆款笔记、竞品账号拆解与平台规则文档，供 AI 员工写作时检索引用。", ico:"alt",
+      tags:["text-embedding-3-large","智能语义切片"], docs:86, chunks:3120, time:"2 小时前", status:"run", statusText:"训练中" },
+    { id:2, name:"品牌与产品知识", desc:"AIMemory 产品介绍、常见问答、价格与隐私说明，保证对外口径一致。", ico:"",
+      tags:["text-embedding-3-small","固定长度"], docs:32, chunks:1840, time:"昨天", status:"ok", statusText:"已就绪" },
+    { id:3, name:"平台规则与合规", desc:"小红书 / 公众号发布规范、违禁词与限流案例，写作前自动检索规避。", ico:"alt2",
+      tags:["bge-large-zh-v1.5","智能语义切片"], docs:24, chunks:960, time:"3 天前", status:"ok", statusText:"已就绪" },
+    { id:4, name:"客户访谈与素材", desc:"真实用户访谈记录、家庭故事素材与授权说明（图片为主）。", ico:"alt",
+      tags:["text-embedding-3-large","OCR 合并切分"], docs:26, chunks:0, time:"5 天前", status:"warn", statusText:"待训练" }
+  ];
+
+  const kbIco = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>`;
+  const editIco = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>`;
+  const delIco = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg>`;
+
+  const grid = document.getElementById('kbGrid');
+
+  function renderList(){
+    grid.innerHTML = '';
+    KB.forEach(k=>{
+      const el = document.createElement('article');
+      el.className = 'kb-card';
+      el.innerHTML = `
+        <div class="kb-actions">
+          <button class="icon-btn" title="编辑" onclick="event.stopPropagation();openKbModal(true,'${k.name}')">${editIco}</button>
+          <button class="icon-btn danger" title="删除" onclick="event.stopPropagation();askDelete('${k.name}')">${delIco}</button>
+        </div>
+        <div class="kb-card-top">
+          <div class="kb-ico ${k.ico}">${kbIco}</div>
+          <div style="min-width:0;">
+            <div class="kb-name">${k.name}</div>
+            <div class="kb-desc">${k.desc}</div>
+          </div>
+        </div>
+        <div class="chips">${k.tags.map((t,i)=>`<span class="chip ${i===0?'blue':'cyan'}">${t}</span>`).join('')}</div>
+        <div class="kb-foot">
+          <span class="kb-meta">📄 ${k.docs} 份 · 🧩 ${k.chunks.toLocaleString()} 切片 · ${k.time}</span>
+          <span class="pill ${k.status}">${k.statusText}</span>
+        </div>`;
+      el.onclick = () => openDetail(k);
+      grid.appendChild(el);
+    });
+    document.getElementById('statKb').innerHTML = KB.length + '<small>个</small>';
+  }
+  renderList();
+
+  /* ---------- 导航分区切换 ---------- */
+  const SEC_TITLE = { chat:"对话", library:"内容库", kb:"知识库", accounts:"平台授权管理", settings:"系统配置", users:"账号管理", profile:"个人中心" };
+  const ALL_VIEWS = ['viewList','viewDetail','viewSearch','viewAccounts','viewSettings','viewUsers','viewPlaceholder'];
+  function setNav(sec){
+    document.querySelectorAll('.sidebar nav button').forEach(b => b.classList.toggle('active', b.dataset.sec === sec));
+  }
+  function hideAllViews(){
+    ALL_VIEWS.forEach(id => document.getElementById(id).classList.add('hidden'));
+  }
+  function switchSection(sec){
+    setNav(sec);
+    hideAllViews();
+    document.getElementById('crumb').textContent = '当前页面';
+    document.getElementById('pageTitle').textContent = SEC_TITLE[sec] || '知识库';
+    if(sec === 'kb') document.getElementById('viewList').classList.remove('hidden');
+    else if(sec === 'accounts') document.getElementById('viewAccounts').classList.remove('hidden');
+    else if(sec === 'settings') document.getElementById('viewSettings').classList.remove('hidden');
+    else if(sec === 'users') document.getElementById('viewUsers').classList.remove('hidden');
+    else {
+      document.getElementById('phTitle').textContent = SEC_TITLE[sec] || '模块';
+      document.getElementById('viewPlaceholder').classList.remove('hidden');
+    }
+    document.querySelector('.workspace-body').scrollTop = 0;
+  }
+
+  /* ---------- 列表 / 详情切换 ---------- */
+  function openDetail(k){
+    setNav('kb');
+    hideAllViews();
+    document.getElementById('viewDetail').classList.remove('hidden');
+    document.getElementById('crumb').textContent = '知识库 / 详情';
+    document.getElementById('pageTitle').textContent = '知识库详情';
+    document.getElementById('dName').textContent = k.name;
+    document.getElementById('dDesc').textContent = k.desc;
+    const st = document.getElementById('dStatus');
+    st.className = 'pill ' + k.status;
+    st.textContent = k.status==='ok' ? '已就绪' : k.status==='run' ? '训练中' : '待训练';
+    goStep(1);
+    document.querySelector('.workspace-body').scrollTop = 0;
+  }
+  function backToList(){
+    setNav('kb');
+    hideAllViews();
+    document.getElementById('viewList').classList.remove('hidden');
+    document.getElementById('crumb').textContent = '当前页面';
+    document.getElementById('pageTitle').textContent = '知识库';
+  }
+
+  /* ---------- 向导步骤 ---------- */
+  function goStep(n){
+    [1,2,3].forEach(i=>{
+      document.getElementById('step'+i).classList.toggle('hidden', i!==n);
+    });
+    document.querySelectorAll('.step').forEach(s=>{
+      const i = +s.dataset.step;
+      s.classList.toggle('active', i===n);
+      s.classList.toggle('done', i<n);
+      s.querySelector('.no').textContent = i<n ? '✓' : i;
+    });
+    document.getElementById('line1').style.width = n>1 ? '100%' : '0';
+    document.getElementById('line2').style.width = n>2 ? '100%' : '0';
+    document.querySelector('.workspace-body').scrollTop = 0;
+  }
+
+  /* ---------- 上传交互 ---------- */
+  const FILE_TPL = [
+    { c:'img', n:'爆款封面参考_9图.png', m:'图片 · 2.4 MB · OCR 识别中…' },
+    { c:'txt', n:'公众号选题池.txt', m:'文本 · 46 KB · 待解析' },
+    { c:'mix', n:'家庭访谈记录（图文）.docx', m:'图文 · 4.1 MB · 待解析' }
+  ];
+  let uploadIdx = 0;
+  function addFakeFile(){
+    const t = FILE_TPL[uploadIdx % FILE_TPL.length]; uploadIdx++;
+    const list = document.getElementById('fileList');
+    const row = document.createElement('div');
+    row.className = 'file-row';
+    const icons = {
+      txt:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6.5A1.5 1.5 0 0 0 5 3.5v17A1.5 1.5 0 0 0 6.5 22h11a1.5 1.5 0 0 0 1.5-1.5V7z"/><path d="M14 2v5h5"/></svg>',
+      img:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="m4 17 5-4.5 4 3.5 3-2.5 4 3.5"/></svg>',
+      mix:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6.5A1.5 1.5 0 0 0 5 3.5v17A1.5 1.5 0 0 0 6.5 22h11a1.5 1.5 0 0 0 1.5-1.5V7z"/><path d="M14 2v5h5"/><rect x="8.5" y="13" width="7" height="5" rx="1"/></svg>'
+    };
+    row.innerHTML = `
+      <div class="file-ico ${t.c}">${icons[t.c]}</div>
+      <div class="file-main">
+        <div class="n">${t.n}</div>
+        <div class="m">${t.m}</div>
+      </div>
+      <span class="pill warn">排队中</span>
+      <button class="icon-btn" onclick="removeFile(this)" title="移除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>`;
+    list.appendChild(row);
+    updateFileCount();
+    toast('已加入上传队列：' + t.n);
+    // 模拟解析
+    const pill = row.querySelector('.pill');
+    const meta = row.querySelector('.m');
+    setTimeout(()=>{ pill.className='pill run'; pill.textContent='解析中'; meta.textContent = t.m.replace(/待解析|OCR 识别中…/,'已解析 '+Math.floor(300+Math.random()*9000)+' 字'); }, 900);
+    setTimeout(()=>{ pill.className='pill ok'; pill.textContent='解析完成'; }, 2400);
+  }
+  function removeFile(btn){
+    btn.closest('.file-row').remove();
+    updateFileCount();
+  }
+  function updateFileCount(){
+    const n = document.querySelectorAll('#fileList .file-row').length;
+    document.getElementById('fileCount').textContent = '已上传 ' + n + ' 个文件';
+  }
+  function pickRadio(el){
+    el.parentElement.querySelectorAll('.radio').forEach(r=>r.classList.remove('on'));
+    el.classList.add('on');
+  }
+
+  /* ---------- 训练模拟 ---------- */
+  let training = false;
+  function startTraining(){
+    if(training) return;
+    training = true;
+    const bar = document.getElementById('progBar');
+    const log = document.getElementById('trainLog');
+    const pill = document.getElementById('trainPill');
+    const status = document.getElementById('trainStatus');
+    const btn = document.getElementById('btnTrain');
+    bar.style.width='0'; log.innerHTML=''; 
+    pill.className='pill run'; pill.textContent='训练中';
+    status.textContent='正在向量化并写入索引…';
+    btn.disabled = true; btn.textContent='训练中…';
+    document.getElementById('btnBack3').disabled = true;
+
+    const total = 386;
+    const lines = [
+      ['in','› 加载切片 386 条…'],
+      ['','› 向量模型 text-embedding-3-large 已就绪'],
+      ['in','› 开始批量向量化（batch=64）…'],
+      ['ok','✓ 向量化完成，生成 386 个向量，维度 3072'],
+      ['in','› 写入向量索引与关键词倒排表…'],
+      ['ok','✓ 索引写入成功'],
+      ['ok','✓ 训练完成！该知识库已可被 AI 员工检索引用']
+    ];
+    let i = 0, pct = 0, sec = 0;
+    const li = setInterval(()=>{
+      if(i < lines.length){
+        const [cls,txt] = lines[i];
+        const s = document.createElement('div'); if(cls) s.className = cls;
+        s.textContent = txt; log.appendChild(s); log.scrollTop = log.scrollHeight; i++;
+      }
+    }, 900);
+    const tick = setInterval(()=>{
+      sec++;
+      pct = Math.min(100, pct + 100/26);
+      bar.style.width = pct + '%';
+      const done = Math.round(total * pct/100);
+      document.getElementById('tsChunk').textContent = done + ' / ' + total;
+      document.getElementById('tsVec').textContent = done;
+      document.getElementById('tsTime').textContent = sec + 's';
+      document.getElementById('tsIdx').textContent = pct>=100 ? '已就绪' : '写入中';
+      if(pct>=100){
+        clearInterval(tick); clearInterval(li);
+        pill.className='pill ok'; pill.textContent='已就绪';
+        status.textContent='训练完成，知识库已可用于检索';
+        btn.disabled=false; btn.innerHTML='重新训练';
+        document.getElementById('btnBack3').disabled=false;
+        document.getElementById('trainHint').textContent='训练完成 · 386 条切片 / 386 个向量 · 耗时 '+sec+'s';
+        const st = document.getElementById('dStatus'); st.className='pill ok'; st.textContent='已就绪';
+        toast('训练完成，知识库已就绪');
+        training = false;
+      }
+    }, 500);
+  }
+
+  /* ---------- 检索测试（全库） ---------- */
+  const CHUNK_POOL = [
+    { kb:"银发内容素材库", f:"银发赛道爆款笔记合集.md", loc:"#012", score:0.913, tag:["标题","点击率"],
+      t:"【银发赛道爆款笔记合集】<hl>标题公式</hl>：<hl>数字</hl> + <hl>身份</hl> + <hl>反差情绪</hl>。例如「72 岁奶奶第一次用手机拍视频，孙子看哭了」。前 3 秒必须给出冲突或悬念，避免铺垫过长导致划走——<hl>点击率</hl>的高低，八成由标题和前 3 秒决定。" },
+    { kb:"银发内容素材库", f:"银发赛道爆款笔记合集.md", loc:"#018", score:0.877, tag:["封面","首图"],
+      t:"封面规则：人物特写 + 大字<hl>标题</hl>，字号占画面高度 1/4 以上；避免纯色底无信息量。<hl>标题</hl>文字控制在 9 个字以内，手机端一眼能读完。实测封面带人脸的<hl>点击率</hl>高于纯文字封面 40% 以上。" },
+    { kb:"品牌与产品知识", f:"小红书运营SOP（图文版）.docx", loc:"#041", score:0.843, tag:["发布时间","节奏"],
+      t:"发布节奏建议：晚间 20:00–21:00 发布，单条图文配 7 张图，正文 800–1000 字。首段给出情绪钩子，中段展开故事，末段轻互动。<hl>标题</hl>改好后不要频繁更换，避免影响系统对账号标签的识别。" },
+    { kb:"平台规则与合规", f:"平台规则与合规.md", loc:"#007", score:0.796, tag:["合规","审核"],
+      t:"平台合规注意：避免使用变体词规避审核（如用同音字替换敏感词），真实截图需打码处理；不支持引导性互动话术（如「点赞过百就更新」）。医疗、金融类表述需谨慎，涉及疗效、收益一律不得出现。<hl>标题</hl>中同样受此约束。" },
+    { kb:"银发内容素材库", f:"银发赛道爆款笔记合集.md", loc:"#026", score:0.744, tag:["选题","情绪"],
+      t:"选题集中在「父母与子女的错过」「老一辈的遗憾」——情绪落点统一，用户容易代入。<hl>标题</hl>示例：「我妈的微信里，存着我爸最后一条语音」。这类<hl>标题</hl>的完读率通常高于平均值。" },
+    { kb:"银发内容素材库", f:"竞品账号拆解_康康和爷爷.md", loc:"#033", score:0.689, tag:["竞品","账号"],
+      t:"竞品账号拆解（康康和爷爷）：更新频率每周 4 更，评论区高频词「像我爸」「看哭了」。其<hl>标题</hl>偏爱时间跨度词（「十年」「那天」），制造叙事期待感。" },
+    { kb:"品牌与产品知识", f:"小红书运营SOP（图文版）.docx", loc:"#052", score:0.612, tag:["排版","字体"],
+      t:"排版规范：正文段落不超过 3 行，关键句单独成段并加粗。字体统一，避免混用多种字号。<hl>标题</hl>号建议 15–16px，过大在小屏上会挤占首屏信息。" },
+    { kb:"客户访谈与素材", f:"数据复盘记录.md", loc:"#009", score:0.523, tag:["复盘","数据"],
+      t:"数据复盘：笔记 3 因使用变体词 + 真实公众号截图被判违规限流，曝光仅 14。<hl>标题</hl>本身无问题，问题出在正文与配图。后续同类型选题需先过合规清单再发布。" }
+  ];
+
+  function openSearch(){
+    setNav('kb');
+    hideAllViews();
+    document.getElementById('viewSearch').classList.remove('hidden');
+    document.getElementById('crumb').textContent = '知识库 / 检索测试';
+    document.getElementById('pageTitle').textContent = '检索测试';
+    document.querySelector('.workspace-body').scrollTop = 0;
+  }
+  function setQ(el){
+    document.getElementById('qInput').value = el.textContent;
+    runSearch();
+  }
+  function runSearch(){
+    const q = document.getElementById('qInput').value.trim();
+    if(!q){ toast('请先输入问题'); return; }
+    const topK = +document.getElementById('rngK').value;
+    const thr  = +document.getElementById('rngT').value / 100;
+    const scope = document.getElementById('scopeSel').value;
+    let hits = CHUNK_POOL.filter(c => c.score >= thr);
+    if(scope !== 'all') hits = hits.filter(c => c.kb === scope);
+    hits = hits.slice(0, topK);
+    const ms = 40 + Math.round(Math.random() * 70) + hits.length * 8;
+
+    document.getElementById('resSub').textContent = '问题：' + (q.length > 24 ? q.slice(0, 24) + '…' : q);
+    const cnt = document.getElementById('resCount');
+    const sum = document.getElementById('resSum');
+    const list = document.getElementById('resList');
+
+    if(!hits.length){
+      cnt.textContent = '0 条';
+      cnt.className = 'chip';
+      cnt.style.cssText = 'background:var(--danger-bg);border-color:#f0cfcd;color:var(--danger);';
+      sum.classList.add('hidden');
+      list.innerHTML = `<div class="empty">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg></div>
+        <div><b style="font-size:14px;color:var(--ink);">没有召回任何片段</b>
+        <div style="font-size:12px;margin-top:6px;">当前阈值 ${thr.toFixed(2)} 偏高或检索范围过窄，可下调阈值、扩大范围，或回对应知识库补充文档</div></div></div>`;
+      toast('无命中，试试下调相似度阈值');
+      return;
+    }
+
+    cnt.textContent = hits.length + ' 条';
+    cnt.className = 'chip blue';
+    cnt.style.cssText = '';
+    sum.classList.remove('hidden');
+    const avg = hits.reduce((a, c) => a + c.score, 0) / hits.length;
+    const kbs = [...new Set(hits.map(c => c.kb))];
+    document.getElementById('resBig').textContent = '命中 ' + hits.length + ' 条';
+    document.getElementById('resMs').innerHTML =
+      `耗时 <b>${ms} ms</b> · 最高 <b>${hits[0].score.toFixed(2)}</b> · 平均 <b>${avg.toFixed(2)}</b>` +
+      ` · 来自 <b>${kbs.length}</b> 个知识库` +
+      (hits.length === topK ? ` · 已达 TopK 上限` : '');
+
+    list.innerHTML = hits.map((c, i) => `
+      <div class="res-card">
+        <div class="res-top">
+          <span class="rank ${i === 0 ? 'top' : ''}">${i + 1}</span>
+          <span class="kb-tag">${c.kb}</span>
+          <span class="src">📄 ${c.f} <span class="loc">· 切片 ${c.loc}</span></span>
+          <span class="grow"></span>
+          <span class="score-wrap">
+            <span class="score-bar"><i data-w="${(c.score * 100).toFixed(1)}"></i></span>
+            <span class="score-val">${c.score.toFixed(2)}</span>
+          </span>
+        </div>
+        <div class="res-body">${c.t.replace(/<hl>/g, '<span class="hl">').replace(/<\/hl>/g, '</span>')}</div>
+        <div class="res-foot">
+          <div class="tags">${c.tag.map(t => `<span class="chip">${t}</span>`).join('')}</div>
+          <button class="btn btn-ghost" style="padding:6px 12px;font-size:12px;"
+            onclick="toast('已复制该切片原文')">复制原文</button>
+        </div>
+      </div>`).join('');
+
+    requestAnimationFrame(() => {
+      list.querySelectorAll('.score-bar > i').forEach(el => { el.style.width = el.dataset.w + '%'; });
+    });
+  }
+
+  /* ---------- 账号管理 ---------- */
+  let ACCOUNTS = [
+    { id:1, plat:"小红书", c:"xhs", letter:"书", sub:"金润瀚宇", uid:"XHS_88231024",
+      status:"ok", stText:"已开通", bind:"2026-07-02", expire:"2027-07-02", data:"粉丝 1,284" },
+    { id:2, plat:"微信公众号", c:"wechat", letter:"微", sub:"金润瀚宇", uid:"gh_9f3c2a71b8d4",
+      status:"ok", stText:"已开通", bind:"2026-06-18", expire:"长期有效", data:"关注 362" },
+    { id:3, plat:"微信视频号", c:"finder", letter:"视", sub:"金润瀚宇", uid:"Finder_77210394",
+      status:"warn", stText:"即将到期", bind:"2026-03-11", expire:"2026-10-05", data:"粉丝 418" },
+    { id:4, plat:"抖音", c:"douyin", letter:"抖", sub:"—", uid:"—",
+      status:"off", stText:"未开通", bind:"—", expire:"—", data:"—" },
+    { id:5, plat:"快手", c:"kuaishou", letter:"快", sub:"—", uid:"—",
+      status:"off", stText:"未开通", bind:"—", expire:"—", data:"—" },
+    { id:6, plat:"B 站", c:"bili", letter:"B", sub:"—", uid:"—",
+      status:"off", stText:"未开通", bind:"—", expire:"—", data:"—" }
+  ];
+  function pillFor(status, text){
+    if(status === 'ok')   return `<span class="pill ok">${text}</span>`;
+    if(status === 'warn') return `<span class="pill" style="background:var(--warning-bg);color:var(--warning);">${text}</span>`;
+    return `<span class="pill" style="background:var(--panel-soft);color:var(--muted);">${text}</span>`;
+  }
+  function renderAccounts(){
+    document.getElementById('acctGrid').innerHTML = ACCOUNTS.map(a => `
+      <article class="acct-card ${a.status === 'off' ? 'off' : ''}">
+        <div class="acct-top">
+          <div class="plat-ico plat-${a.c}">${a.letter}</div>
+          <div style="min-width:0;">
+            <div class="acct-plat">${a.plat}</div>
+            <div class="acct-uid">${a.sub === '—' ? '尚未绑定账号' : a.sub + ' · ' + a.uid}</div>
+          </div>
+          ${pillFor(a.status, a.stText)}
+        </div>
+        <div class="acct-rows">
+          <div class="r"><span>绑定时间</span><b>${a.bind}</b></div>
+          <div class="r"><span>有效期至</span><b>${a.expire}</b></div>
+          <div class="r"><span>账号数据</span><b>${a.data}</b></div>
+        </div>
+        <div class="acct-foot">
+          ${a.status === 'off'
+            ? `<button class="btn btn-primary" onclick="openAcctModal('bind','${a.plat}')">立即开通</button>`
+            : `<button class="btn btn-ghost" onclick="openAcctModal('view',${a.id})">查看</button>
+               <button class="btn btn-soft" onclick="toast('已解除「${a.plat}」绑定')">解除绑定</button>`}
+        </div>
+      </article>`).join('');
+    document.getElementById('statAcct').innerHTML =
+      ACCOUNTS.filter(a => a.status !== 'off').length + '<small>个</small>';
+  }
+  renderAccounts();
+
+  function openAcctModal(mode, arg){
+    const title = document.getElementById('acctModalTitle');
+    const body  = document.getElementById('acctModalBody');
+    const foot  = document.getElementById('acctModalFoot');
+    if(mode === 'bind'){
+      title.textContent = '开通平台账号';
+      body.innerHTML = `
+        <div class="form-grid">
+          <div class="field full">
+            <label>选择平台</label>
+            <select id="bindPlat">
+              <option>小红书</option><option>微信公众号</option><option>微信视频号</option>
+              <option>抖音</option><option>快手</option><option>B 站</option>
+            </select>
+          </div>
+          <div class="field full">
+            <label>授权方式</label>
+            <div class="radio-row">
+              <div class="radio on" onclick="pickRadio(this)"><b>扫码授权</b><span>用平台 App 扫码，免输密码更安全</span></div>
+              <div class="radio" onclick="pickRadio(this)"><b>手动填写凭据</b><span>适用于无扫码能力的开放平台</span></div>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:20px;text-align:center;">
+          <div class="qr-box" onclick="toast('已模拟扫码成功，正在回传授权…')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>
+              <path d="M14 14h3v3h-3zM20 14v.01M14 20v.01M17.5 20v.01M20 20v.01M20 17.5v.01"/>
+            </svg>
+            <span>点击模拟扫码</span>
+          </div>
+          <p style="font-size:11.5px;color:var(--muted-2);margin-top:14px;line-height:1.7;">
+            扫码后可在「平台授权管理」列表查看授权状态<br>有效期以平台实际返回为准
+          </p>
+        </div>`;
+      foot.innerHTML = `<button class="btn btn-ghost" onclick="closeAcctModal()">取消</button>
+        <button class="btn btn-primary" onclick="closeAcctModal();toast('开通申请已提交，状态将自动刷新')">确认开通</button>`;
+    } else {
+      const a = ACCOUNTS.find(x => x.id === arg);
+      title.textContent = '账号详情 · ' + a.plat;
+      body.innerHTML = `
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px;">
+          <div class="plat-ico plat-${a.c}" style="width:52px;height:52px;border-radius:15px;font-size:18px;">${a.letter}</div>
+          <div>
+            <div style="font-size:16px;font-weight:900;">${a.sub}</div>
+            <div style="font-size:12.5px;color:var(--muted);margin-top:4px;">${a.uid}</div>
+          </div>
+          <span style="margin-left:auto;">${pillFor(a.status, a.stText)}</span>
+        </div>
+        <div class="acct-rows" style="margin-top:0;padding-top:0;border-top:0;">
+          <div class="r"><span>平台</span><b>${a.plat}</b></div>
+          <div class="r"><span>授权范围</span><b>发布内容 · 读取数据</b></div>
+          <div class="r"><span>绑定时间</span><b>${a.bind}</b></div>
+          <div class="r"><span>有效期至</span><b>${a.expire}</b></div>
+          <div class="r"><span>最近同步</span><b>12 分钟前</b></div>
+        </div>`;
+      foot.innerHTML = `<button class="btn btn-ghost" onclick="toast('已刷新授权状态：正常')">刷新状态</button>
+        <button class="btn btn-ghost" onclick="closeAcctModal();toast('已重新发起授权')">重新授权</button>
+        <button class="btn btn-danger" onclick="closeAcctModal();toast('已解除绑定')">解除绑定</button>`;
+    }
+    document.getElementById('acctModal').classList.remove('hidden');
+  }
+  function closeAcctModal(){ document.getElementById('acctModal').classList.add('hidden'); }
+
+  /* ---------- 系统配置：模型 ---------- */
+  let SERVICES = [
+    { n:"OpenAI", code:"OA", cls:"g", url:"https://api.openai.com/v1", models:4,
+      key:"sk-proj-••••••••••••2b91", st:"ok", stText:"已连接" },
+    { n:"Anthropic Claude", code:"AN", cls:"", url:"https://api.anthropic.com", models:3,
+      key:"sk-ant-••••••••••••8d17", st:"ok", stText:"已连接" },
+    { n:"通义千问 DashScope", code:"QW", cls:"p", url:"https://dashscope.aliyuncs.com", models:3,
+      key:"sk-••••••••••••••7c40", st:"ok", stText:"已连接" },
+    { n:"DeepSeek", code:"DS", cls:"o", url:"https://api.deepseek.com", models:2,
+      key:"尚未填写", st:"off", stText:"待配置" }
+  ];
+  function renderServices(){
+    document.getElementById('svcList').innerHTML = SERVICES.map(s => `
+      <div class="svc-card ${s.st === 'off' ? 'off' : ''}">
+        <div class="svc-ico ${s.cls}">${s.code}</div>
+        <div class="svc-info">
+          <div class="svc-name">${s.n} ${pillFor(s.st, s.stText)}</div>
+          <div class="svc-meta">${s.url} · 可用模型 ${s.models} 个</div>
+        </div>
+        <div class="svc-key">
+          <span class="kl">API Key</span>
+          <code>${s.key}</code>
+          ${s.st === 'off' ? '' : '<button class="icon-btn" title="显示/隐藏" onclick="toggleKey(this)">👁</button>'}
+        </div>
+        <div class="svc-actions">
+          <button class="btn btn-ghost" onclick="toast('连接测试成功 · 延迟 42ms')">测试连接</button>
+          <button class="btn btn-ghost" onclick="toast('打开「${s.n}」编辑表单')">编辑</button>
+        </div>
+      </div>`).join('');
+  }
+  renderServices();
+
+  function openModelModal(){ document.getElementById('modelModal').classList.remove('hidden'); }
+  function closeModelModal(){ document.getElementById('modelModal').classList.add('hidden'); }
+  function saveModel(){
+    const name = document.getElementById('mSel').value;
+    const key  = document.getElementById('mKey').value.trim();
+    if(!key){ toast('请填写该模型对应的 API Key'); return; }
+    const url = document.getElementById('mUrl').value.trim() || '默认地址';
+    SERVICES.push({ n:name, code:name.slice(0,2).toUpperCase(), cls:"g", url,
+      models:1, key:'••••••••••••' + key.slice(-4), st:"ok", stText:"已连接" });
+    renderServices();
+    closeModelModal();
+    document.getElementById('mKey').value = '';
+    document.getElementById('mUrl').value = '';
+    toast('已添加模型：' + name);
+  }
+
+  function toggleKey(btn){
+    const scope = btn.closest('.svc-key') || btn.closest('.k-row');
+    const code = scope && scope.querySelector('code');
+    if(!code) return;
+    if(code.textContent.includes('•')){
+      code.dataset.mask = code.textContent;
+      code.textContent = code.textContent.replace(/•+/g, 'Xk92Fm4Qz7b');
+    } else {
+      code.textContent = code.dataset.mask || code.textContent;
+    }
+    toast('已切换密钥可见性');
+  }
+
+  /* ---------- 账号管理（平台用户） ---------- */
+  let USERS = [
+    { id:1, name:"大彬", role:"超级管理员", status:"ok", stText:"正常", creator:"系统", time:"2026-06-01 09:12" },
+    { id:2, name:"内容运营-小林", role:"运营", status:"ok", stText:"正常", creator:"大彬", time:"2026-07-14 15:30" },
+    { id:3, name:"剪辑-阿哲", role:"编辑", status:"ok", stText:"正常", creator:"大彬", time:"2026-08-02 11:05" },
+    { id:4, name:"客服-小周", role:"只读", status:"off", stText:"已停用", creator:"大彬", time:"2026-08-20 18:44" },
+    { id:5, name:"实习生-小唐", role:"只读", status:"ok", stText:"正常", creator:"小林", time:"2026-09-05 10:18" }
+  ];
+  function renderUsers(){
+    document.getElementById('uList').innerHTML = USERS.map(u => `
+      <div class="u-row u-cols">
+        <span class="u-name">
+          <span class="u-avatar">${u.name.slice(0,1)}</span>
+          <span style="min-width:0;"><span>${u.name}</span><div class="u-sub">${u.role}</div></span>
+        </span>
+        <span>${pillFor(u.status, u.stText)}</span>
+        <span class="u-muted">${u.creator}</span>
+        <span class="u-muted">${u.time}</span>
+        <span class="u-ops">
+          <button class="btn btn-ghost" onclick="openUserModal('edit',${u.id})">编辑</button>
+          <button class="btn btn-ghost" onclick="openUserModal('pwd',${u.id})">重置密码</button>
+          <button class="btn btn-ghost" style="color:var(--danger);" onclick="askUserDel(${u.id})">删除</button>
+        </span>
+      </div>`).join('');
+    document.getElementById('statUser').innerHTML = USERS.length + '<small>个</small>';
+  }
+  renderUsers();
+
+  function openUserModal(mode, id){
+    const title = document.getElementById('userModalTitle');
+    const body  = document.getElementById('userModalBody');
+    const foot  = document.getElementById('userModalFoot');
+    const u = id ? USERS.find(x => x.id === id) : null;
+
+    if(mode === 'pwd'){
+      title.textContent = '重置密码 · ' + u.name;
+      body.innerHTML = `
+        <div class="form-grid">
+          <div class="field full">
+            <label>新密码 <span>*</span></label>
+            <input id="uPwd" value="Ai@2026xK4m" />
+          </div>
+          <div class="field full">
+            <label>确认新密码 <span>*</span></label>
+            <input id="uPwd2" placeholder="再次输入新密码" />
+          </div>
+        </div>
+        <p style="font-size:11.5px;color:var(--muted-2);margin-top:14px;line-height:1.7;">
+          重置后该账号需用新密码重新登录，出于安全考虑不会展示明文。
+        </p>`;
+      foot.innerHTML = `<button class="btn btn-ghost" onclick="closeUserModal()">取消</button>
+        <button class="btn btn-primary" onclick="closeUserModal();toast('已重置「${u.name}」的登录密码')">确认重置</button>`;
+    } else {
+      title.textContent = mode === 'edit' ? '编辑账号 · ' + u.name : '新建账号';
+      body.innerHTML = `
+        <div class="form-grid">
+          <div class="field full">
+            <label>账号名称 <span>*</span></label>
+            <input id="uName" value="${u ? u.name : ''}" placeholder="如：内容运营-小林" />
+          </div>
+          <div class="field">
+            <label>角色</label>
+            <select id="uRole">
+              ${["超级管理员","运营","编辑","只读"].map(r => `<option ${u && u.role === r ? 'selected' : ''}>${r}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label>状态</label>
+            <select id="uSt">
+              <option value="ok" ${u && u.status === 'ok' ? 'selected' : ''}>正常</option>
+              <option value="off" ${u && u.status === 'off' ? 'selected' : ''}>已停用</option>
+            </select>
+          </div>
+          <div class="field full">
+            <label>登录手机号 / 邮箱 <span>（选填）</span></label>
+            <input placeholder="用于接收登录验证码与通知" />
+          </div>
+        </div>`;
+      foot.innerHTML = `<button class="btn btn-ghost" onclick="closeUserModal()">取消</button>
+        <button class="btn btn-primary" onclick="saveUser(${mode === 'edit' ? id : 'null'})">${mode === 'edit' ? '保存修改' : '创建账号'}</button>`;
+    }
+    document.getElementById('userModal').classList.remove('hidden');
+  }
+  function closeUserModal(){ document.getElementById('userModal').classList.add('hidden'); }
+  function saveUser(id){
+    const name = document.getElementById('uName').value.trim();
+    if(!name){ toast('请填写账号名称'); return; }
+    const role = document.getElementById('uRole').value;
+    const status = document.getElementById('uSt').value;
+    if(id){
+      const u = USERS.find(x => x.id === id);
+      u.name = name; u.role = role; u.status = status;
+      u.stText = status === 'ok' ? '正常' : '已停用';
+      toast('账号信息已更新');
+    } else {
+      USERS.push({ id: Date.now(), name, role, status,
+        stText: status === 'ok' ? '正常' : '已停用', creator:"大彬", time:"刚刚" });
+      toast('账号创建成功');
+    }
+    renderUsers();
+    closeUserModal();
+  }
+  let uDelId = null;
+  function askUserDel(id){
+    uDelId = id;
+    document.getElementById('uDelName').textContent = USERS.find(x => x.id === id).name;
+    document.getElementById('uDelModal').classList.remove('hidden');
+  }
+  function closeUDelModal(){ document.getElementById('uDelModal').classList.add('hidden'); }
+  function confirmUserDel(){
+    USERS = USERS.filter(x => x.id !== uDelId);
+    renderUsers();
+    closeUDelModal();
+    toast('账号已删除');
+  }
+
+  /* ---------- 新建 / 编辑弹窗 ---------- */
+  function openKbModal(isEdit, name){
+    document.getElementById('kbModalTitle').textContent = isEdit ? '编辑知识库信息' : '新建知识库';
+    document.getElementById('kbModal').classList.remove('hidden');
+  }
+  function closeKbModal(){ document.getElementById('kbModal').classList.add('hidden'); }
+  function saveKb(){
+    closeKbModal();
+    toast(document.getElementById('kbModalTitle').textContent.includes('编辑') ? '知识库信息已更新' : '知识库创建成功，去上传文件吧');
+  }
+
+  /* ---------- 删除确认 ---------- */
+  let delTarget = null;
+  function askDelete(name){
+    delTarget = name;
+    document.getElementById('delName').textContent = name;
+    document.getElementById('delModal').classList.remove('hidden');
+  }
+  function closeDelModal(){ document.getElementById('delModal').classList.add('hidden'); }
+  function confirmDelete(){
+    const name = delTarget;
+    closeDelModal();
+    KB = KB.filter(k => k.name !== name);
+    renderList();
+    toast('已删除知识库：' + name);
+  }
+
+  /* ---------- Toast ---------- */
+  let toastTimer;
+  function toast(msg){
+    const t = document.getElementById('toast');
+    document.getElementById('toastText').textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(()=>t.classList.remove('show'), 2000);
+  }
+</script>
+</body>
+</html>
