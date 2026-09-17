@@ -66,11 +66,10 @@ function buildTaskPrompt(contextText: string, content: string): string {
   ].join("\n");
 }
 
-function shouldAutoSave(userMessage: string, conversationContext: string, assistantContent: string): boolean {
-  if (assistantContent.length <= 300) return false;
-  const combined = `${userMessage} ${conversationContext}`.toLowerCase();
-  const hasKeyword = ARTICLE_KEYWORDS.some((kw) => combined.includes(kw.toLowerCase()));
-  if (!hasKeyword) return false;
+function shouldAutoSave(userMessage: string, _conversationContext: string, assistantContent: string): boolean {
+  if (assistantContent.length <= 500) return false;
+  const isExplicitArticleRequest = /(写一篇|写篇|生成一篇|生成篇|创作一篇|创作篇|公众号文章|小红书文案|文章正文)/i.test(userMessage);
+  if (!isExplicitArticleRequest) return false;
 
   // 进一步过滤：必须是真正的"图文/文章"内容（含有结构化特征），不能是纯推荐/对话回复
   // 结构特征：markdown 标题、列表项、引号标题、Markdown 链接/加粗
@@ -80,7 +79,8 @@ function shouldAutoSave(userMessage: string, conversationContext: string, assist
     /^\d+[.、．)）]\s*\S+/m.test(assistantContent) ||                     // 数字列表
     /[「『"'""''].{2,40}[」』""'']/.test(assistantContent) ||             // 引号标题
     /\*\*[^*\n]{2,30}\*\*/.test(assistantContent);                        // 加粗短语
-  if (!hasStructure) return false;
+  const hasArticleTitle = /^#{1,3}\s+\S+/m.test(assistantContent);
+  if (!hasStructure || !hasArticleTitle) return false;
 
   // 排除明显的"推荐/查询"回复：开头就是"以下是"、"根据"、"结合"等引导词，且内容里没有"选题/标题"等明确文章词
   const isRecommendation = /^(结合|根据|以下|参考|看到|听说|你好|感谢)/.test(assistantContent.trim());
@@ -168,6 +168,60 @@ export async function POST(request: Request, context: { params: { id: string } }
     return jsonError("对话不存在。", 404);
   }
 
+  if (content === "一键剪视频") {
+    const userMessage = await prisma.message.create({
+      data: { conversationId: conversation.id, role: "USER", content }
+    });
+    const assistantMessage = await prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        role: "ASSISTANT",
+        content: "请在下方上传需要剪辑的视频。开始剪辑后，我会在会话中实时展示视频分析、字幕生成、音频优化、画面特效、转场和成片渲染的完整过程。"
+      }
+    });
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(sseEncode({
+          type: "final",
+          message: {
+            id: assistantMessage.id,
+            role: "ASSISTANT",
+            content: assistantMessage.content,
+            createdAt: assistantMessage.createdAt.toISOString()
+          },
+          userMessage
+        }));
+        controller.close();
+      }
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no"
+      }
+    });
+  }
+
+  if (content === "一键复刻爆款视频") {
+    const userMessage = await prisma.message.create({ data: { conversationId: conversation.id, role: "USER", content } });
+    const assistantMessage = await prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        role: "ASSISTANT",
+        content: "请填写抖音、小红书、视频号、快手等平台的参考视频链接，或上传参考视频；同时上传用于制作的视频或图片素材。素材齐全后，系统将使用 OpenMontage 自动制作一条结构和节奏相近、但不直接复制参考内容的新视频。"
+      }
+    });
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(sseEncode({ type: "final", message: { id: assistantMessage.id, role: "ASSISTANT", content: assistantMessage.content, createdAt: assistantMessage.createdAt.toISOString() }, userMessage }));
+        controller.close();
+      }
+    });
+    return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" } });
+  }
+
   await prisma.message.create({
     data: {
       conversationId: conversation.id,
@@ -200,6 +254,10 @@ export async function POST(request: Request, context: { params: { id: string } }
           { message: content, context: conversationContext, prompt, conversationId: conversation.id, userId: user.id },
           (deltaText) => controller.enqueue(sseEncode({ type: "delta", text: deltaText }))
         );
+
+        if (!result.content.trim()) {
+          throw new Error("助手返回了空回复，请重试。");
+        }
 
         const assistantMessage = await prisma.message.create({
           data: {
@@ -253,17 +311,69 @@ export async function POST(request: Request, context: { params: { id: string } }
           contentSaved
         }));
       } catch (error) {
-        await prisma.openClawTask.update({
-          where: { id: task.id },
-          data: {
-            status: "FAILED",
-            error: error instanceof Error ? error.message : "OpenClaw 调用失败。"
+        const err = error as Error & { partialContent?: string };
+        const partial = (err.partialContent || "").trim();
+
+        // 超时/中断时若已有流式内容，保存部分内容并照常走自动入库判定，
+        // 避免用户已经看到的图文因超时全部丢失。
+        if (partial.length >= 100) {
+          const assistantMessage = await prisma.message.create({
+            data: {
+              conversationId: conversation.id,
+              role: "ASSISTANT",
+              content: partial
+            }
+          });
+
+          await prisma.openClawTask.update({
+            where: { id: task.id },
+            data: {
+              status: "FAILED",
+              error: `${err.message}（已保留流式部分内容）`
+            }
+          });
+
+          let contentSaved: { id: string; title: string; category: string } | null = null;
+          if (shouldAutoSave(content, conversationContext, partial)) {
+            const articleTitle = generateArticleTitle(partial);
+            const images = generateImageUrls(articleTitle, partial);
+            const category = detectCategory(content, conversationContext);
+            const saved = await prisma.contentItem.create({
+              data: {
+                userId: user.id,
+                title: articleTitle,
+                body: partial,
+                category,
+                coverImageUrl: images.coverImageUrl,
+                sourceConversationId: conversation.id
+              }
+            });
+            contentSaved = { id: saved.id, title: saved.title, category: saved.category ?? category };
           }
-        });
-        controller.enqueue(sseEncode({
-          type: "error",
-          error: error instanceof Error ? error.message : "OpenClaw 调用失败。"
-        }));
+
+          controller.enqueue(sseEncode({
+            type: "final",
+            message: {
+              id: assistantMessage.id,
+              role: "ASSISTANT",
+              content: assistantMessage.content,
+              createdAt: assistantMessage.createdAt.toISOString()
+            },
+            contentSaved
+          }));
+        } else {
+          await prisma.openClawTask.update({
+            where: { id: task.id },
+            data: {
+              status: "FAILED",
+              error: err.message || "OpenClaw 调用失败。"
+            }
+          });
+          controller.enqueue(sseEncode({
+            type: "error",
+            error: err.message || "OpenClaw 调用失败。"
+          }));
+        }
       } finally {
         controller.close();
       }

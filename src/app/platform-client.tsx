@@ -84,6 +84,54 @@ function parseInlineImages(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+function videoUrlFromMessage(content: string): string | null {
+  return content.match(/\/videos\/[A-Za-z0-9._-]+\.mp4\b/)?.[0] ?? null;
+}
+
+function isHumanizableArticle(content: string): boolean {
+  // 已经带着「去 AI 味报告」的内容不再重复处理
+  if (/AI\s?味[^\n]{0,4}报告|去\s?AI\s?味报告|质检报告/.test(content)) return false;
+  const paragraphs = content.split(/\n\s*\n/).filter((part) => part.trim().length >= 20);
+  return content.trim().length >= 300 && (/#\s+\S+/m.test(content) || paragraphs.length >= 3);
+}
+
+function matchTopicLine(line: string): string | null {
+  const cleaned = line.replace(/^#{1,4}\s*/, "").replace(/^\*\*\s*/, "").trim();
+  if (!cleaned) return null;
+
+  let topic: string | null = null;
+  const numbered = cleaned.match(/^\d{1,2}[.、．)）]\s*(.+)$/);
+  const bullet = cleaned.match(/^[-*•]\s*(.+)$/);
+  const chinese = cleaned.match(/^[一二三四五六七八九十]{1,3}[.、．]\s*(.+)$/);
+  if (numbered) topic = numbered[1];
+  else if (bullet) topic = bullet[1];
+  else if (chinese) topic = chinese[1];
+  if (!topic) return null;
+
+  topic = topic
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[「」『』]/g, "")
+    .replace(/^["'“”]+|["'“”]+$/g, "")
+    .trim();
+  return topic.length >= 4 && topic.length <= 80 ? topic : null;
+}
+
+function extractHotTopics(content: string): { topics: string[]; remainder: string } {
+  const topics: string[] = [];
+  const kept: string[] = [];
+  for (const rawLine of content.split(/\r?\n/)) {
+    const topic = matchTopicLine(rawLine.trim());
+    if (topic) {
+      topics.push(topic);
+    } else {
+      kept.push(rawLine);
+    }
+  }
+  return { topics, remainder: kept.join("\n") };
+}
+
 function renderQr(data?: QrData | null) {
   if (data?.qrCodeUrl) return <img className="qr-image" src={data.qrCodeUrl} alt="微信绑定二维码" />;
   if (data?.qrCodeText) {
@@ -112,6 +160,7 @@ export default function PlatformClient() {
   const [registerLoading, setRegisterLoading] = useState(false);
 
   const [section, setSection] = useState<Section>("chat");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
   const [chatInput, setChatInput] = useState("");
@@ -121,10 +170,14 @@ export default function PlatformClient() {
   const [streamingContent, setStreamingContent] = useState("");
   const [toast, setToast] = useState<{ message: string; linkLabel?: string; linkSection?: Section } | null>(null);
   const [lastSavedContent, setLastSavedContent] = useState<ContentItem | null>(null);
-  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [humanizingMessageId, setHumanizingMessageId] = useState<string | null>(null);
-  const [videoMode, setVideoMode] = useState(false);
   const [lastVideoUrl, setLastVideoUrl] = useState<string | null>(null);
+  const [montagePanelOpen, setMontagePanelOpen] = useState(false);
+  const [montageVideoFile, setMontageVideoFile] = useState<File | null>(null);
+  const [remakePanelOpen, setRemakePanelOpen] = useState(false);
+  const [referenceVideoUrl, setReferenceVideoUrl] = useState("");
+  const [referenceVideoFile, setReferenceVideoFile] = useState<File | null>(null);
+  const [remakeMaterials, setRemakeMaterials] = useState<File[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const isPinnedRef = useRef(true); // 用户是否在底部附近（用于自动滚动判断）
@@ -136,7 +189,7 @@ export default function PlatformClient() {
   const [activeContent, setActiveContent] = useState<ContentItem | null>(null);
   const [copyHint, setCopyHint] = useState("");
   const [copiedButton, setCopiedButton] = useState<string | null>(null);
-  const [editingContent, setEditingContent] = useState(false);
+  const [editingContent, setEditingContent] = useState<"title" | "body" | null>(null);
   const [editingBody, setEditingBody] = useState("");
   const [editingTitle, setEditingTitle] = useState("");
   const [contentSaving, setContentSaving] = useState(false);
@@ -147,6 +200,7 @@ export default function PlatformClient() {
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [profileHint, setProfileHint] = useState("密码修改后，下次登录请使用新密码。");
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === activeConversationId) ?? conversations[0],
@@ -358,9 +412,20 @@ export default function PlatformClient() {
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!chatInput.trim() || sending) return;
-    const content = chatInput;
-    const isVideoMode = videoMode;
+    await sendChatContent(chatInput);
+  }
+
+  async function sendChatContent(content: string) {
+    if (!content.trim() || sending) return;
+
+    if (content.trim() === "今日热点推荐") {
+      setMontagePanelOpen(false);
+      setMontageVideoFile(null);
+      setRemakePanelOpen(false);
+      setReferenceVideoUrl("");
+      setReferenceVideoFile(null);
+      setRemakeMaterials([]);
+    }
 
     // 没有对话时自动创建一个
     let conversationId = activeConversation?.id;
@@ -377,14 +442,13 @@ export default function PlatformClient() {
     }
 
     setChatInput("");
-    setVideoMode(false);
     setSending(true);
     setIsThinking(true);
     setChatError("");
     setStreamingContent("");
 
     const tempUserMessage: Message = {
-      id: `temp-${Date.now()}`, role: "USER", content: isVideoMode ? `[视频制作] ${content}` : content, createdAt: new Date().toISOString()
+      id: `temp-${Date.now()}`, role: "USER", content, createdAt: new Date().toISOString()
     };
     setConversations((prev) => prev.map((conv) =>
       conv.id === conversationId
@@ -398,10 +462,7 @@ export default function PlatformClient() {
     let stoppedByUser = false;
 
     try {
-      const endpoint = isVideoMode
-        ? `/api/conversations/${conversationId}/video`
-        : `/api/conversations/${conversationId}/messages`;
-      const response = await fetch(endpoint, {
+      const response = await fetch(`/api/conversations/${conversationId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content }),
@@ -409,8 +470,8 @@ export default function PlatformClient() {
       });
 
       if (!response.ok) {
-        const errorPayload = await response.json().catch(() => ({ error: isVideoMode ? "视频制作请求失败。" : "发送失败。" }));
-        throw new Error(errorPayload.error || (isVideoMode ? "视频制作请求失败。" : "发送失败。"));
+        const errorPayload = await response.json().catch(() => ({ error: "发送失败。" }));
+        throw new Error(errorPayload.error || "发送失败。");
       }
 
       const reader = response.body!.getReader();
@@ -443,6 +504,12 @@ export default function PlatformClient() {
               const all = await refreshContent();
               const saved = all.find((c) => c.id === data.contentSaved.id);
               if (saved) setLastSavedContent(saved);
+            }
+            if (content === "一键剪视频") {
+              setMontagePanelOpen(true);
+            }
+            if (content === "一键复刻爆款视频") {
+              setRemakePanelOpen(true);
             }
           } else if (data.type === "error") {
             throw new Error(data.error);
@@ -479,6 +546,130 @@ export default function PlatformClient() {
     }
   }
 
+  async function createMontageEdit() {
+    const file = montageVideoFile;
+    const conversationId = activeConversation?.id;
+    if (!file || !conversationId || sending) return;
+
+    setSending(true);
+    setIsThinking(true);
+    setChatError("");
+    setStreamingContent("");
+    setMontagePanelOpen(false);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    try {
+      const form = new FormData();
+      form.append("video", file);
+      const response = await fetch(`/api/conversations/${conversationId}/montage`, { method: "POST", body: form, signal: controller.signal });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({ error: "视频剪辑请求失败。" }))) as ApiResponse<unknown>;
+        throw new Error(payload.ok ? "视频剪辑请求失败。" : payload.error);
+      }
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("视频剪辑未返回进度流。");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+        for (const eventBlock of events) {
+          const dataLine = eventBlock.split("\n").find((line) => line.startsWith("data: "));
+          if (!dataLine) continue;
+          const data = JSON.parse(dataLine.slice(6));
+          if (data.type === "delta") {
+            setIsThinking(false);
+            setStreamingContent((previous) => previous + data.text);
+          } else if (data.type === "final") {
+            setLastVideoUrl(data.videoUrl || null);
+            setMontageVideoFile(null);
+            await Promise.all([refreshConversations(), refreshContent()]);
+          } else if (data.type === "error") {
+            throw new Error(data.error);
+          }
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) setChatError(error instanceof Error ? error.message : "视频剪辑失败。");
+    } finally {
+      setStreamingContent("");
+      setIsThinking(false);
+      setSending(false);
+      abortControllerRef.current = null;
+    }
+  }
+
+  async function createViralRemake() {
+    const conversationId = activeConversation?.id;
+    if (!conversationId || sending) return;
+    if (!referenceVideoUrl.trim() && !referenceVideoFile) {
+      setChatError("请填写参考视频链接，或上传一个参考视频。");
+      return;
+    }
+    if (!remakeMaterials.length) {
+      setChatError("请至少上传一个用于制作的视频或图片素材。");
+      return;
+    }
+
+    setSending(true);
+    setIsThinking(true);
+    setChatError("");
+    setStreamingContent("");
+    setRemakePanelOpen(false);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    try {
+      const form = new FormData();
+      if (referenceVideoUrl.trim()) form.append("referenceUrl", referenceVideoUrl.trim());
+      if (referenceVideoFile) form.append("referenceVideo", referenceVideoFile);
+      remakeMaterials.forEach((file) => form.append("materials", file));
+      const response = await fetch(`/api/conversations/${conversationId}/remake`, { method: "POST", body: form, signal: controller.signal });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({ error: "视频制作请求失败。" }))) as ApiResponse<unknown>;
+        throw new Error(payload.ok ? "视频制作请求失败。" : payload.error);
+      }
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("视频制作未返回进度流。");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+        for (const eventBlock of events) {
+          const dataLine = eventBlock.split("\n").find((line) => line.startsWith("data: "));
+          if (!dataLine) continue;
+          const data = JSON.parse(dataLine.slice(6));
+          if (data.type === "delta") {
+            setIsThinking(false);
+            setStreamingContent((previous) => previous + data.text);
+          } else if (data.type === "final") {
+            setLastVideoUrl(data.videoUrl || null);
+            setRemakePanelOpen(false);
+            setReferenceVideoUrl("");
+            setReferenceVideoFile(null);
+            setRemakeMaterials([]);
+            await Promise.all([refreshConversations(), refreshContent()]);
+          } else if (data.type === "error") {
+            throw new Error(data.error);
+          }
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) setChatError(error instanceof Error ? error.message : "视频制作失败。");
+    } finally {
+      setStreamingContent("");
+      setIsThinking(false);
+      setSending(false);
+      abortControllerRef.current = null;
+    }
+  }
+
   function stopGeneration() {
     // 防止重入：若已经 abort，直接 return
     if (!abortControllerRef.current || abortControllerRef.current.signal.aborted) return;
@@ -495,12 +686,6 @@ export default function PlatformClient() {
     }
   }
 
-  async function copyMessage(message: Message) {
-    await navigator.clipboard.writeText(message.content);
-    setCopiedMessageId(message.id);
-    window.setTimeout(() => setCopiedMessageId(null), 1600);
-  }
-
   async function humanizeMessage(message: Message) {
     const conversationId = activeConversation?.id;
     if (!conversationId) return;
@@ -511,31 +696,15 @@ export default function PlatformClient() {
     setChatError("");
     setStreamingContent("");
 
-    const tempUserMessage: Message = {
-      id: `temp-humanize-${Date.now()}`,
-      role: "USER",
-      content: "对以上内容进行去 AI 味处理",
-      createdAt: new Date().toISOString()
-    };
-    setConversations((prev) => prev.map((conv) =>
-      conv.id === conversationId
-        ? { ...conv, messages: [...conv.messages, tempUserMessage] }
-        : conv
-    ));
-
     const controller = new AbortController();
     abortControllerRef.current = controller;
-    let localStreamContent = "";
-    let stoppedByUser = false;
 
     try {
       const response = await fetch(`/api/conversations/${conversationId}/humanize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messageId: message.id,
-          title: lastSavedContent?.title ?? null,
-          category: lastSavedContent?.category ?? null
+          messageId: message.id
         }),
         signal: controller.signal
       });
@@ -564,7 +733,6 @@ export default function PlatformClient() {
 
           if (data.type === "delta") {
             setIsThinking(false);
-            localStreamContent += data.text;
             setStreamingContent((prev) => prev + data.text);
           } else if (data.type === "final") {
             setStreamingContent("");
@@ -575,34 +743,23 @@ export default function PlatformClient() {
               const saved = all.find((c) => c.id === data.contentSaved.id);
               if (saved) setLastSavedContent(saved);
             }
+            // 结果已经作为新消息落在会话里了，滚到底部让用户直接看到
+            isPinnedRef.current = true;
+            requestAnimationFrame(() => {
+              const container = messageListRef.current;
+              if (container) container.scrollTop = container.scrollHeight;
+            });
           } else if (data.type === "error") {
             throw new Error(data.error);
           }
         }
       }
     } catch (error) {
-      if (controller.signal.aborted) {
-        stoppedByUser = true;
-        setIsThinking(false);
-        if (localStreamContent) {
-          const stoppedContent = `**已停止**\n\n${localStreamContent}`;
-          try {
-            await api(`/api/conversations/${conversationId}/messages/assistant`, {
-              method: "POST",
-              body: JSON.stringify({ content: stoppedContent })
-            });
-            await refreshConversations();
-          } catch {
-            // Ignore save errors
-          }
-        }
-      } else {
+      if (!controller.signal.aborted) {
         setChatError(error instanceof Error ? error.message : "去 AI 味处理失败。");
       }
     } finally {
-      if (!stoppedByUser) {
-        setStreamingContent("");
-      }
+      setStreamingContent("");
       setIsThinking(false);
       setSending(false);
       setHumanizingMessageId(null);
@@ -645,32 +802,68 @@ export default function PlatformClient() {
 
   async function copyImage(contentId: string, buttonKey: string) {
     try {
+      // 1. Fetch image blob
       const response = await fetch(`/api/content/${contentId}/image`);
       if (!response.ok) {
         const error = await response.json().catch(() => ({ error: "获取图片失败" }));
         throw new Error(error.error || "获取图片失败");
       }
-      const blob = await response.blob();
-      const type = blob.type && blob.type.startsWith("image/") ? blob.type : "image/png";
-      const item = new ClipboardItem({ [type]: blob });
+      let blob = await response.blob();
+
+      // 2. Check clipboard API support
+      if (!navigator.clipboard || !navigator.clipboard.write) {
+        throw new Error("浏览器不支持复制图片，请右键图片另存为");
+      }
+
+      // 3. Convert to PNG if needed (ClipboardItem typically only supports PNG)
+      if (blob.type !== "image/png") {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        const objectUrl = URL.createObjectURL(blob);
+        try {
+          await new Promise<void>((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = () => reject(new Error("图片加载失败"));
+            img.src = objectUrl;
+          });
+          const canvas = document.createElement("canvas");
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) throw new Error("Canvas 不支持");
+          ctx.drawImage(img, 0, 0);
+          blob = await new Promise<Blob>((resolve, reject) => {
+            canvas.toBlob((b) => {
+              if (b) resolve(b);
+              else reject(new Error("图片转换失败"));
+            }, "image/png");
+          });
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+        }
+      }
+
+      // 4. Write to clipboard
+      const item = new ClipboardItem({ "image/png": blob });
       await navigator.clipboard.write([item]);
       setCopiedButton(buttonKey);
-      setCopyHint("图片已复制");
+      setCopyHint("图片已复制，可粘贴到 Word/微信等");
     } catch (err) {
       setCopiedButton(null);
-      setCopyHint(err instanceof Error ? err.message : "复制失败，请重试");
+      const msg = err instanceof Error ? err.message : "复制失败";
+      setCopyHint(msg);
     }
   }
 
-  function startEditContent() {
+  function startEditContent(target: "title" | "body") {
     if (!activeContent) return;
-    setEditingBody(activeContent.body);
-    setEditingTitle(activeContent.title);
-    setEditingContent(true);
+    if (target === "title") setEditingTitle(activeContent.title);
+    if (target === "body") setEditingBody(activeContent.body);
+    setEditingContent(target);
   }
 
   function cancelEditContent() {
-    setEditingContent(false);
+    setEditingContent(null);
     setEditingBody("");
     setEditingTitle("");
   }
@@ -683,10 +876,13 @@ export default function PlatformClient() {
     try {
       const data = await api<{ contentItem: ContentItem }>(`/api/content/${activeContent.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ title: editingTitle, body: editingBody })
+        body: JSON.stringify({
+          title: editingContent === "title" ? editingTitle : activeContent.title,
+          body: editingContent === "body" ? editingBody : activeContent.body
+        })
       });
       setActiveContent(data.contentItem);
-      setEditingContent(false);
+      setEditingContent(null);
       await refreshContent();
     } catch (error) {
       setChatError(error instanceof Error ? error.message : "保存失败。");
@@ -711,8 +907,9 @@ export default function PlatformClient() {
       );
       setActiveContent(data.contentItem);
       await refreshContent();
+      setCopyHint("图片已重新生成");
     } catch (error) {
-      setChatError(error instanceof Error ? error.message : "图片重新生成失败。");
+      setCopyHint(error instanceof Error ? error.message : "图片重新生成失败。");
     } finally {
       setRegeneratingImage(null);
     }
@@ -757,9 +954,21 @@ export default function PlatformClient() {
       setOldPassword("");
       setNewPassword("");
       setProfileHint("密码已修改成功。");
+      setShowPasswordModal(false);
     } catch (error) {
       setProfileHint(error instanceof Error ? error.message : "修改密码失败。");
     }
+  }
+
+  function openPasswordModal() {
+    setOldPassword("");
+    setNewPassword("");
+    setProfileHint("密码修改后，下次登录请使用新密码。");
+    setShowPasswordModal(true);
+  }
+
+  function closePasswordModal() {
+    setShowPasswordModal(false);
   }
 
   if (checkingSession) return <main className="auth-shell"><div className="auth-card">正在进入创星云...</div></main>;
@@ -842,25 +1051,27 @@ export default function PlatformClient() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar" aria-label="主菜单">
-        <div className="sidebar-brand">
-          <div className="brand-avatar">AI</div>
-          <div className="brand-text">
-            <span className="brand-title">创星云</span>
-            <span className="brand-sub">AI数字员工平台</span>
+        <div className="sidebar-top">
+          <div className="sidebar-brand">
+            <div className="brand-avatar">AI</div>
+            <div className="brand-text">
+              <span className="brand-title">创星云</span>
+              <span className="brand-sub">AI数字员工平台</span>
+            </div>
           </div>
+          <button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "展开左侧菜单" : "收起左侧菜单"} title={sidebarCollapsed ? "展开菜单" : "收起菜单"}>{sidebarCollapsed ? "›" : "‹"}</button>
         </div>
         <nav>
           {([
-            ["chat", "对话"],
-            ["library", "内容库"],
-            ["profile", "个人中心"]
-          ] as const).map(([key, label]) => (
-            <button key={key} className={section === key ? "active" : ""} onClick={() => setSection(key)}>{label}</button>
+            ["chat", "对话", "◉"],
+            ["library", "内容库", "▦"],
+            ["profile", "个人中心", "◌"]
+          ] as const).map(([key, label, icon]) => (
+            <button key={key} className={section === key ? "active" : ""} onClick={() => setSection(key)} title={sidebarCollapsed ? label : undefined}><span className="nav-icon" aria-hidden="true">{icon}</span><span className="nav-label">{label}</span></button>
           ))}
         </nav>
-        <button className="ghost-button" onClick={logout}>退出</button>
       </aside>
 
       <section className="workspace">
@@ -912,21 +1123,47 @@ export default function PlatformClient() {
                     {(() => {
                       const messages = activeConversation?.messages ?? [];
                       const lastAssistantId = messages.filter((m) => m.role === "ASSISTANT").slice(-1)[0]?.id;
-                      return messages.map((message) => (
+                      return messages.map((message, messageIndex) => {
+                        const messageVideoUrl = message.role === "ASSISTANT" ? videoUrlFromMessage(message.content) : null;
+                        const showHumanize = message.role === "ASSISTANT" && message.id === lastAssistantId && isHumanizableArticle(message.content);
+                        const previousMessage = messages[messageIndex - 1];
+                        const isHotTopicsReply =
+                          message.role === "ASSISTANT" &&
+                          previousMessage?.role === "USER" &&
+                          previousMessage.content.trim() === "今日热点推荐";
+                        const hotTopics = isHotTopicsReply ? extractHotTopics(message.content) : null;
+                        return (
                         <article key={message.id} id={`message-${message.id}`} className={`message ${message.role === "USER" ? "user" : "assistant"}`}>
                           {message.role === "ASSISTANT" ? (
                             <>
-                              <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }} />
-                              {lastVideoUrl && message.id === lastAssistantId && (
+                              <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(hotTopics ? hotTopics.remainder : message.content) }} />
+                              {hotTopics && hotTopics.topics.length >= 2 && (
+                                <div className="topic-actions">
+                                  {hotTopics.topics.map((topic, topicIndex) => (
+                                    <div className="topic-action-row" key={`${message.id}-topic-${topicIndex}`}>
+                                      <span className="topic-action-label">{topicIndex + 1}. {topic}</span>
+                                      <button
+                                        type="button"
+                                        className="topic-gen-btn"
+                                        disabled={sending}
+                                        onClick={() => void sendChatContent(`根据这个选题写一篇小红书风格的图文：${topic}`)}
+                                      >
+                                        生成小红书图文
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {messageVideoUrl && (
                                 <div className="video-player-wrap">
-                                  <video controls src={lastVideoUrl} className="inline-video-player" />
+                                  <video controls src={messageVideoUrl} className="inline-video-player" />
                                 </div>
                               )}
                             </>
                           ) : (
                             message.content
                           )}
-                          {message.role === "ASSISTANT" && (
+                          {message.role === "ASSISTANT" && ((lastSavedContent && message.id === lastAssistantId) || showHumanize) && (
                             <div className="message-actions">
                               {lastSavedContent && message.id === lastAssistantId && (
                                 <>
@@ -938,6 +1175,7 @@ export default function PlatformClient() {
                                   </button>
                                   <button
                                     className="message-copy-button humanize-button"
+                                    hidden={showHumanize}
                                     disabled={humanizingMessageId === message.id}
                                     onClick={() => humanizeMessage(message)}
                                   >
@@ -945,16 +1183,20 @@ export default function PlatformClient() {
                                   </button>
                                 </>
                               )}
-                              <button
-                                className={`message-copy-button ${copiedMessageId === message.id ? "copied" : ""}`}
-                                onClick={() => copyMessage(message)}
-                              >
-                                {copiedMessageId === message.id ? "已复制" : "复制"}
-                              </button>
+                              {showHumanize && (
+                                <button
+                                  className="message-copy-button humanize-button"
+                                  disabled={humanizingMessageId === message.id}
+                                  onClick={() => humanizeMessage(message)}
+                                >
+                                  {humanizingMessageId === message.id ? "去 AI 味中..." : "一键去 AI 味"}
+                                </button>
+                              )}
                             </div>
                           )}
                         </article>
-                      ));
+                      );
+                      });
                     })()}
                     {sending && (isThinking || streamingContent) && (
                       <article className="message assistant streaming">
@@ -996,29 +1238,49 @@ export default function PlatformClient() {
                   )}
                   <form className="chat-input" onSubmit={sendMessage}>
                     {chatError && <p className="error-text chat-error-inline">{chatError}</p>}
+                    {montagePanelOpen && (
+                      <div className="viral-remake-panel montage-upload-panel">
+                        <div className="viral-remake-title">一键剪视频</div>
+                        <p>请选择要剪辑的视频。上传后会在当前会话中展示完整的分析、字幕、音频、画面和成片制作进度。</p>
+                        <label className="viral-remake-file">上传待剪视频<input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v" onChange={(event) => setMontageVideoFile(event.target.files?.[0] ?? null)} /></label>
+                        <div className="viral-remake-summary">{montageVideoFile ? `已选择：${montageVideoFile.name}` : "暂未选择视频"}</div>
+                        <div className="viral-remake-actions"><button type="button" onClick={() => setMontagePanelOpen(false)}>取消</button><button type="button" disabled={!montageVideoFile || sending} onClick={() => void createMontageEdit()}>开始剪辑</button></div>
+                      </div>
+                    )}
+                    {remakePanelOpen && (
+                      <div className="viral-remake-panel">
+                        <div className="viral-remake-title">一键复刻爆款视频</div>
+                        <p>填写抖音、小红书、视频号、快手等平台的视频链接，或上传参考视频；再上传用于制作的视频或图片素材。</p>
+                        <input value={referenceVideoUrl} onChange={(event) => setReferenceVideoUrl(event.target.value)} placeholder="粘贴参考视频链接或完整平台分享口令" type="text" />
+                        <label className="viral-remake-file">上传参考视频（可选）<input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v" onChange={(event) => setReferenceVideoFile(event.target.files?.[0] ?? null)} /></label>
+                        <label className="viral-remake-file">上传制作素材（视频或图片，可多选）<input type="file" multiple accept="video/mp4,video/quicktime,video/webm,video/x-m4v,image/jpeg,image/png,image/webp" onChange={(event) => setRemakeMaterials(Array.from(event.target.files ?? []))} /></label>
+                        <div className="viral-remake-summary">{referenceVideoFile ? `参考：${referenceVideoFile.name}` : ""}{remakeMaterials.length ? `  素材：${remakeMaterials.length} 个` : ""}</div>
+                        <div className="viral-remake-actions"><button type="button" onClick={() => setRemakePanelOpen(false)}>取消</button><button type="button" disabled={sending} onClick={() => void createViralRemake()}>开始制作</button></div>
+                      </div>
+                    )}
                     <div className="chat-input-topbar">
-                      <button
-                        type="button"
-                        className={`quick-action-btn ${videoMode ? "active" : ""}`}
-                        onClick={() => setVideoMode((v) => !v)}
-                      >
-                        做视频
-                      </button>
+                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("今日热点推荐")}>今日热点推荐</button>
+                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键剪视频")}>一键剪视频</button>
+                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键复刻爆款视频")}>一键复刻爆款视频</button>
                     </div>
                     <div className="chat-input-wrap">
-                      {videoMode && (
-                        <span className="mode-chip mode-chip-video">
-                          做视频
-                          <button type="button" className="mode-chip-x" onClick={() => setVideoMode(false)}>×</button>
-                        </span>
+                      <textarea
+                        value={chatInput}
+                        onChange={(event) => setChatInput(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                            event.preventDefault();
+                            event.currentTarget.form?.requestSubmit();
+                          }
+                        }}
+                        placeholder="你可以直接发送你的问题即可（Enter 发送，Shift+Enter 换行）"
+                      />
+                      {sending ? (
+                        <button type="button" className="stop-button" onClick={stopGeneration}>停止</button>
+                      ) : (
+                        <button type="submit" disabled={!chatInput.trim()}>发送</button>
                       )}
-                      <textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} placeholder={videoMode ? "描述你想制作的视频内容..." : "你可以直接发送你的问题即可"} />
                     </div>
-                    {sending ? (
-                      <button type="button" className="stop-button" onClick={stopGeneration}>停止</button>
-                    ) : (
-                      <button type="submit" disabled={!chatInput.trim()}>发送</button>
-                    )}
                   </form>
                 </div>
 
@@ -1063,10 +1325,10 @@ export default function PlatformClient() {
 
         {section === "library" && (
           activeContent ? (
-            <section className="content-detail">
-              <button className="ghost-button" onClick={() => { setActiveContent(null); setEditingContent(false); }}>返回内容库</button>
+            <section className={`content-detail${activeContent.videoUrl ? " content-detail--video" : ""}`}>
+              <button className="back-to-library-btn" onClick={() => { setActiveContent(null); setEditingContent(null); }}>← 返回</button>
               <div className="detail-title-row">
-                {editingContent ? (
+                {editingContent === "title" ? (
                   <input
                     className="title-edit-input"
                     value={editingTitle}
@@ -1080,28 +1342,32 @@ export default function PlatformClient() {
                         cancelEditContent();
                       }
                     }}
+                    onBlur={() => {
+                      if (!contentSaving) saveContentEdit();
+                    }}
                     autoFocus
                   />
                 ) : (
-                  <h1
-                    className="editable-title"
-                    title="点击编辑标题"
-                    onClick={() => startEditContent()}
-                  >
-                    {activeContent.title}
-                  </h1>
+                  <h1>{activeContent.title}</h1>
                 )}
-                <button
-                  className={copiedButton === "title" ? "copied-button" : ""}
-                  onClick={() => copyText(activeContent.title, "title")}
-                >
-                  {copiedButton === "title" ? "已复制" : "复制标题"}
-                </button>
+                <div className="detail-title-actions">
+                  <button
+                    className={copiedButton === "title" ? "copied-button" : ""}
+                    onClick={() => copyText(activeContent.title, "title")}
+                  >
+                    {copiedButton === "title" ? "已复制" : "复制"}
+                  </button>
+                  {editingContent === "title" ? (
+                    <button onClick={saveContentEdit} disabled={contentSaving}>{contentSaving ? "保存中..." : "保存"}</button>
+                  ) : (
+                    <button onClick={() => startEditContent("title")}>编辑</button>
+                  )}
+                </div>
               </div>
               <span>{formatDate(activeContent.createdAt)}</span>
 
               {activeContent.videoUrl ? (
-                /* 视频内容：只展示标题和视频 */
+                /* 视频内容：居中放大展示 */
                 <div className="detail-video-block">
                   <video controls src={activeContent.videoUrl} className="detail-video-player" />
                 </div>
@@ -1115,7 +1381,7 @@ export default function PlatformClient() {
                     className={copiedButton === "image" ? "copied-button" : ""}
                     onClick={() => copyImage(activeContent.id, "image")}
                   >
-                    {copiedButton === "image" ? "已复制" : "复制图片"}
+                    {copiedButton === "image" ? "已复制" : "复制"}
                   </button>
                   <button
                     className="regen-image-button"
@@ -1133,7 +1399,7 @@ export default function PlatformClient() {
               <div className="detail-body-row">
                 <h2>正文</h2>
                 <div className="detail-body-actions">
-                  {editingContent ? (
+                  {editingContent === "body" ? (
                     <>
                       <button onClick={saveContentEdit} disabled={contentSaving}>{contentSaving ? "保存中..." : "保存"}</button>
                       <button className="ghost-button" onClick={cancelEditContent}>取消</button>
@@ -1144,14 +1410,14 @@ export default function PlatformClient() {
                         className={copiedButton === "body" ? "copied-button" : ""}
                         onClick={() => copyText(activeContent.body, "body")}
                       >
-                        {copiedButton === "body" ? "已复制" : "复制正文"}
+                        {copiedButton === "body" ? "已复制" : "复制"}
                       </button>
-                      <button onClick={startEditContent}>编辑</button>
+                      <button onClick={() => startEditContent("body")}>编辑</button>
                     </>
                   )}
                 </div>
               </div>
-              {editingContent ? (
+              {editingContent === "body" ? (
                 <textarea
                   className="content-edit-area"
                   value={editingBody}
@@ -1193,11 +1459,7 @@ export default function PlatformClient() {
             <article className="profile-card"><h3>账号信息</h3><p>手机号：{user.phone}</p></article>
             <article className="profile-card">
               <h3>修改密码</h3>
-              <form onSubmit={changePassword} className="auth-form compact">
-                <input type="password" placeholder="旧密码" value={oldPassword} onChange={(event) => setOldPassword(event.target.value)} />
-                <input type="password" placeholder="新密码" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
-                <button>保存</button>
-              </form>
+              <button onClick={openPasswordModal}>修改密码</button>
               <p className="hint">{profileHint}</p>
             </article>
             <article className="profile-card wide">
@@ -1230,6 +1492,30 @@ export default function PlatformClient() {
               {toast.linkLabel}
             </button>
           )}
+        </div>
+      )}
+      {showPasswordModal && (
+        <div className="humanizer-modal-overlay" onClick={(event) => { if (event.target === event.currentTarget) closePasswordModal(); }}>
+          <div className="humanizer-modal password-modal">
+            <div className="humanizer-modal-head">
+              <h3>修改密码</h3>
+              <div className="humanizer-modal-actions">
+                <button onClick={closePasswordModal}>取消</button>
+              </div>
+            </div>
+            <div className="humanizer-modal-body">
+              <form onSubmit={changePassword} className="auth-form">
+                <label>旧密码
+                  <input type="password" placeholder="请输入旧密码" value={oldPassword} onChange={(event) => setOldPassword(event.target.value)} />
+                </label>
+                <label>新密码
+                  <input type="password" placeholder="请输入新密码" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+                </label>
+                <button type="submit">保存</button>
+              </form>
+              <p className="hint">{profileHint}</p>
+            </div>
+          </div>
         </div>
       )}
     </main>

@@ -521,11 +521,17 @@ async function requestGatewayChat(
     }
 
     // Wait for the assistant's final reply via the event stream.
+    // Track accumulated deltas so timeouts / empty finals can still
+    // return the partial streamed content instead of losing it.
+    let deltaAccum = "";
     const content = await new Promise<string>((resolve, reject) => {
+      const fail = (message: string) => {
+        const err = new Error(message) as Error & { partialContent?: string };
+        if (deltaAccum.trim()) err.partialContent = deltaAccum;
+        reject(err);
+      };
       const timer = setTimeout(() => {
-        reject(
-          new Error(`OpenClaw 等待助手回复超时（${effectiveTimeout}ms）`)
-        );
+        fail(`OpenClaw 等待助手回复超时（${effectiveTimeout}ms）`);
       }, effectiveTimeout);
 
       conn.onEvent((event, payload) => {
@@ -536,8 +542,9 @@ async function requestGatewayChat(
           deltaText?: string;
           message?: { content?: ChatContentItem[] };
         };
-        if (p.state === "delta" && p.runId === runId && p.deltaText && onDelta) {
-          onDelta(p.deltaText);
+        if (p.state === "delta" && p.runId === runId && p.deltaText) {
+          deltaAccum += p.deltaText;
+          if (onDelta) onDelta(p.deltaText);
           return;
         }
         if (p.state === "final" && p.runId === runId) {
@@ -546,7 +553,9 @@ async function requestGatewayChat(
             .filter((c) => c.type === "text")
             .map((c) => c.text)
             .join("");
-          resolve(text);
+          // Final event arrived but carried no text (agent aborted the run,
+          // tool-only turn, etc.) — fall back to what was streamed.
+          resolve(text.trim() ? text : deltaAccum);
         }
       });
     });
