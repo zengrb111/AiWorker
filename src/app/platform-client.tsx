@@ -3,10 +3,45 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { renderMarkdown } from "@/lib/markdown";
 import { escapeHtml, escapeAttr } from "@/lib/escape";
+import KnowledgePanel from "./knowledge-panel";
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: string };
 type AuthMode = "login" | "register";
-type Section = "chat" | "library" | "profile";
+type Section =
+  | "chat"
+  | "library"
+  | "analytics"
+  | "knowledge"
+  | "accounts"
+  | "settings"
+  | "users"
+  | "profile";
+
+/** 侧栏菜单（顺序即展示顺序） */
+const navItems: Array<[Section, string, string]> = [
+  ["chat", "对话", "◉"],
+  ["library", "内容库", "▦"],
+  ["analytics", "效果分析", "◫"],
+  ["knowledge", "知识库", "▤"],
+  ["accounts", "平台授权管理", "◈"],
+  ["settings", "系统配置", "⚙"],
+  ["users", "账号管理", "◍"],
+  ["profile", "个人中心", "◌"]
+];
+
+const sectionTitles: Record<Section, string> = {
+  chat: "对话",
+  library: "内容库",
+  analytics: "效果分析",
+  knowledge: "知识库",
+  accounts: "平台授权管理",
+  settings: "系统配置",
+  users: "账号管理",
+  profile: "个人中心"
+};
+
+/** 尚未落地实现、以静态原型（iframe）方式引入平台的分区 */
+const prototypeSections: Section[] = ["analytics", "accounts", "settings", "users"];
 type MessageRole = "USER" | "ASSISTANT";
 type BindingStatus = "PENDING" | "BOUND" | "UNBOUND";
 
@@ -45,6 +80,8 @@ type BindingCheckStatus = {
 };
 
 const bindingWaitTimeoutMs = 490000;
+/** 触发热点选题列表渲染的快捷指令 */
+const hotTopicPrompts = ["今日全网热点推荐", "今日产品热点推荐"];
 const fallbackImages = [
   "https://images.unsplash.com/photo-1509042239860-f550ce710b93?auto=format&fit=crop&w=1200&q=80",
   "https://images.unsplash.com/photo-1469334031218-e382a71b716b?auto=format&fit=crop&w=1200&q=80",
@@ -418,7 +455,7 @@ export default function PlatformClient() {
   async function sendChatContent(content: string) {
     if (!content.trim() || sending) return;
 
-    if (content.trim() === "今日热点推荐") {
+    if (hotTopicPrompts.includes(content.trim())) {
       setMontagePanelOpen(false);
       setMontageVideoFile(null);
       setRemakePanelOpen(false);
@@ -1064,11 +1101,7 @@ export default function PlatformClient() {
           <button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "展开左侧菜单" : "收起左侧菜单"} title={sidebarCollapsed ? "展开菜单" : "收起菜单"}>{sidebarCollapsed ? "›" : "‹"}</button>
         </div>
         <nav>
-          {([
-            ["chat", "对话", "◉"],
-            ["library", "内容库", "▦"],
-            ["profile", "个人中心", "◌"]
-          ] as const).map(([key, label, icon]) => (
+          {navItems.map(([key, label, icon]) => (
             <button key={key} className={section === key ? "active" : ""} onClick={() => setSection(key)} title={sidebarCollapsed ? label : undefined}><span className="nav-icon" aria-hidden="true">{icon}</span><span className="nav-label">{label}</span></button>
           ))}
         </nav>
@@ -1078,7 +1111,7 @@ export default function PlatformClient() {
         <header className="workspace-header">
           <div className="workspace-header-left">
             <span className="crumb">当前页面</span>
-            <h2>{section === "chat" ? "对话" : section === "library" ? "内容库" : "个人中心"}</h2>
+            <h2>{sectionTitles[section]}</h2>
           </div>
           <div className="user-chip">
             <span>{user.phone}</span>
@@ -1130,7 +1163,7 @@ export default function PlatformClient() {
                         const isHotTopicsReply =
                           message.role === "ASSISTANT" &&
                           previousMessage?.role === "USER" &&
-                          previousMessage.content.trim() === "今日热点推荐";
+                          hotTopicPrompts.includes(previousMessage.content.trim());
                         const hotTopics = isHotTopicsReply ? extractHotTopics(message.content) : null;
                         return (
                         <article key={message.id} id={`message-${message.id}`} className={`message ${message.role === "USER" ? "user" : "assistant"}`}>
@@ -1259,7 +1292,9 @@ export default function PlatformClient() {
                       </div>
                     )}
                     <div className="chat-input-topbar">
-                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("今日热点推荐")}>今日热点推荐</button>
+                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("今日产品热点推荐")}>今日产品热点推荐</button>
+                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("今日全网热点推荐")}>今日全网热点推荐</button>
+                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键仿写爆款")}>一键仿写爆款</button>
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键剪视频")}>一键剪视频</button>
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键复刻爆款视频")}>一键复刻爆款视频</button>
                     </div>
@@ -1452,6 +1487,14 @@ export default function PlatformClient() {
               {!contentItems.length && <p className="hint">暂无生成内容。先在对话里让 AI 员工生成一篇图文。</p>}
             </section>
           )
+        )}
+
+        {section === "knowledge" && <KnowledgePanel />}
+
+        {prototypeSections.includes(section) && (
+          <div className="prototype-frame">
+            <iframe key={section} src={`/prototype/platform#embed=${section}`} title={sectionTitles[section]} />
+          </div>
         )}
 
         {section === "profile" && (

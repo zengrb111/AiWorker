@@ -18,6 +18,7 @@ model User {
   conversations  Conversation[]
   contentItems   ContentItem[]
   openClawTasks  OpenClawTask[]
+  knowledgeBases KnowledgeBase[]
 }
 
 model WechatBinding {
@@ -81,4 +82,58 @@ model OpenClawTask {
   error      String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+}
+
+/// RAG 知识库
+model KnowledgeBase {
+  id            String       @id @default(cuid())
+  userId        String
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name          String
+  description   String       @default("")
+  vectorModel   String       @default("local-hash-256")
+  chunkStrategy String       @default("semantic") // semantic | fixed
+  chunkSize     Int          @default(600)
+  chunkOverlap  Int          @default(80)
+  visibility    String       @default("private") // private | team
+  topK          Int          @default(5)
+  status        String       @default("EMPTY") // EMPTY | READY | TRAINING
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  documents     KbDocument[]
+  chunks        KbChunk[]
+}
+
+/// 知识库文档（文本 / 图片 / 图文）
+model KbDocument {
+  id              String        @id @default(cuid())
+  knowledgeBaseId String
+  knowledgeBase   KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  filename        String
+  mimeType        String        @default("")
+  kind            String        @default("text") // text | image | rich
+  sizeBytes       Int           @default(0)
+  storedPath      String        @default("")
+  parseStatus     String        @default("PENDING") // PENDING | PARSED | EMPTY | FAILED
+  parseNote       String        @default("")
+  extractedText   String        @default("")
+  chunkCount      Int           @default(0)
+  createdAt       DateTime      @default(now())
+  chunks          KbChunk[]
+}
+
+/// 知识库切片
+model KbChunk {
+  id              String        @id @default(cuid())
+  knowledgeBaseId String
+  knowledgeBase   KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  documentId      String
+  document        KbDocument    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  seq             Int
+  content         String
+  charCount       Int           @default(0)
+  enabled         Boolean       @default(true)
+  embedding       String? // JSON float array
+  trainedAt       DateTime?
+  createdAt       DateTime      @default(now())
 }
