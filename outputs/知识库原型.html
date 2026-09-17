@@ -392,8 +392,91 @@
   .qr-box:hover{border-color:var(--accent);color:var(--accent-dark);background:#eef5ff;}
   .qr-box svg{width:34px;height:34px;}
 
+  /* ============ 效果分析 ============ */
+  .stats.six{grid-template-columns:repeat(3,1fr);}
+  .stat .k .mut{color:var(--muted-2);font-weight:700;}
+
+  .seg.seg-plat button{display:inline-flex;align-items:center;gap:6px;}
+  .seg-plat .dot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:0 0 auto;}
+  .dot-xhs{background:#d9163a;} .dot-wechat{background:#12964b;}
+  .dot-douyin{background:#111827;} .dot-finder{background:#f2691e;}
+
+  .cmp-wrap{border:1px solid var(--line);border-radius:13px;overflow:hidden;background:#fff;}
+  .cmp-cols{display:grid;grid-template-columns:1.6fr .95fr .95fr 1fr .85fr 1.05fr 1.15fr;gap:10px;align-items:center;}
+  .cmp-head{padding:11px 16px;background:linear-gradient(180deg,#f7fafe,#f1f6fd);
+    font-size:11.5px;font-weight:900;color:var(--muted);border-bottom:1px solid var(--line);}
+  .cmp-head > span:not(:first-child){text-align:right;}
+  .cmp-row{padding:13px 16px;font-size:13px;border-top:1px solid var(--line-soft);}
+  .cmp-row:first-child{border-top:0;}
+  .cmp-row:hover{background:#f9fbff;}
+  .cmp-row.hl{background:#eef5ff;box-shadow:inset 3px 0 0 var(--accent);}
+  .cmp-row .plat{display:flex;align-items:center;gap:9px;font-weight:900;}
+  .cmp-row .plat .pd{width:9px;height:9px;border-radius:50%;flex:0 0 auto;}
+  .cmp-row .m{text-align:right;font-weight:800;font-variant-numeric:tabular-nums;}
+  .cmp-row .m.mut{color:var(--muted-2);font-weight:700;}
+  .cmp-row.total{background:var(--panel-soft);font-weight:900;}
+  .cmp-row.total:hover{background:var(--panel-soft);}
+  .rate{display:inline-flex;align-items:center;gap:8px;justify-content:flex-end;
+    font-weight:900;color:var(--accent-dark);font-variant-numeric:tabular-nums;}
+  .rate .rb{width:46px;height:6px;border-radius:99px;background:var(--line-soft);overflow:hidden;flex:0 0 auto;}
+  .rate .rb > i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent-cyan));}
+
+  .post-wrap{border:1px solid var(--line);border-radius:13px;overflow:hidden;background:#fff;}
+  .post-cols{display:grid;grid-template-columns:2.2fr .82fr 1fr 1.02fr .84fr .8fr 1.04fr 1fr 1.06fr;gap:8px;align-items:center;}
+  .post-head{padding:11px 16px;background:linear-gradient(180deg,#f7fafe,#f1f6fd);
+    font-size:11.5px;font-weight:900;color:var(--muted);border-bottom:1px solid var(--line);}
+  .post-head > span:not(:first-child){text-align:right;}
+  .post-row{padding:13px 16px;font-size:12.5px;border-top:1px solid var(--line-soft);transition:.12s;}
+  .post-row:first-child{border-top:0;}
+  .post-row:hover{background:#f9fbff;}
+  .p-title{min-width:0;}
+  .p-title .t{display:block;font-weight:800;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .p-title .s{display:flex;align-items:center;gap:6px;margin-top:5px;}
+  .type-tag{font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:6px;
+    background:var(--panel-soft);border:1px solid var(--line);color:var(--muted);}
+  .viral{font-size:10.5px;font-weight:900;padding:2px 9px;border-radius:99px;
+    background:#fff1e8;color:#c2410c;border:1px solid #ffd9c2;white-space:nowrap;}
+  .p-plat{display:inline-flex;align-items:center;gap:7px;font-weight:800;}
+  .p-plat .pd{width:8px;height:8px;border-radius:50%;flex:0 0 auto;}
+  .p-num{text-align:right;font-weight:800;font-variant-numeric:tabular-nums;}
+  .p-num.mut{color:var(--muted-2);font-weight:700;}
+  .p-ops{display:flex;justify-content:flex-end;}
+  .p-op{padding:5px 10px;font-size:12px;white-space:nowrap;}
+
+  /* ============ 内容拆解 ============ */
+  .bk-head{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:18px;}
+  .bk-head h3{font-size:20px;font-weight:900;line-height:1.4;max-width:620px;}
+  .bk-tags{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px;align-items:center;}
+  .data-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:11px;margin-bottom:18px;}
+  .ds{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;
+    box-shadow:0 4px 14px rgba(31,64,109,.05);}
+  .ds .k{font-size:11px;color:var(--muted);font-weight:800;}
+  .ds .v{font-size:19px;font-weight:900;margin-top:5px;font-variant-numeric:tabular-nums;}
+  .bk-section{border:1px solid var(--line);border-radius:14px;padding:15px 16px;background:#fff;transition:.15s;}
+  .bk-section + .bk-section{margin-top:12px;}
+  .bk-section.dirty{border-color:#ffd9a8;background:#fffdf7;}
+  .bk-section-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
+  .bk-num{display:grid;width:26px;height:26px;place-items:center;border-radius:8px;flex:0 0 auto;
+    background:#eaf3ff;color:var(--accent-dark);font-size:12px;font-weight:900;}
+  .bk-section-head b{font-size:14px;font-weight:900;}
+  .bk-section-head .hint{font-size:11.5px;color:var(--muted-2);font-weight:700;margin-left:auto;}
+  .bk-edit{width:100%;min-height:74px;border:1px solid var(--line);border-radius:11px;background:var(--panel-soft);
+    padding:11px 13px;font-size:13px;line-height:1.8;color:var(--ink);resize:vertical;outline:none;
+    transition:.15s;font-family:inherit;}
+  .bk-edit:focus{background:#fff;border-color:var(--accent);box-shadow:0 0 0 3px rgba(43,124,255,.1);}
+  .dirty-dot{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:800;color:var(--warning);}
+  .dirty-dot::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--warning);}
+
   .proto-tag{position:fixed;right:16px;bottom:16px;z-index:50;font-size:11px;font-weight:900;color:var(--muted-2);
     background:rgba(255,255,255,.8);border:1px solid var(--line);border-radius:99px;padding:6px 13px;}
+
+  /* ---------- Embed 模式：被主应用 iframe 引入时隐藏原型自身外壳 ---------- */
+  body.embed .sidebar,
+  body.embed .workspace-header,
+  body.embed .proto-tag{display:none !important;}
+  body.embed .app-shell{grid-template-columns:1fr;}
+  body.embed .workspace{padding:0;grid-template-rows:1fr;}
+  body.embed .workspace-body{padding:20px 24px 32px;}
 </style>
 </head>
 <body>
@@ -412,6 +495,7 @@
     <nav>
       <button data-sec="chat" onclick="switchSection('chat')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span><span class="nav-label">对话</span></button>
       <button data-sec="library" onclick="switchSection('library')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span><span class="nav-label">内容库</span></button>
+      <button data-sec="analytics" onclick="switchSection('analytics')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-7"/><path d="M17 7h3v3"/></svg></span><span class="nav-label">效果分析</span></button>
       <button class="active" data-sec="kb" onclick="switchSection('kb')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span><span class="nav-label">知识库</span></button>
       <button data-sec="accounts" onclick="switchSection('accounts')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.5 4.5 5.4V11c0 5 3.2 8.4 7.5 10.5C16.3 19.4 19.5 16 19.5 11V5.4z"/><path d="m9.2 11.6 2 2 3.6-3.8"/></svg></span><span class="nav-label">平台授权管理</span></button>
       <button data-sec="settings" onclick="switchSection('settings')"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 7.2l1.9 1.1M17.9 15.7l1.9 1.1M4.2 16.8l1.9-1.1M17.9 8.3l1.9-1.1"/></svg></span><span class="nav-label">系统配置</span></button>
@@ -897,6 +981,106 @@
         </div>
       </div><!-- /viewUsers -->
 
+      <!-- ---------- View: 效果分析 ---------- -->
+      <div id="viewAnalytics" class="hidden">
+        <div class="toolbar">
+          <div class="seg" id="anaRangeSeg">
+            <button data-range="7d" onclick="setAnaRange('7d',this)">近 7 天</button>
+            <button class="on" data-range="30d" onclick="setAnaRange('30d',this)">近 30 天</button>
+            <button data-range="90d" onclick="setAnaRange('90d',this)">近 90 天</button>
+          </div>
+          <div class="spacer"></div>
+          <button class="btn btn-ghost" onclick="toast('已导出投放效果报表（Excel）')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
+            导出报表
+          </button>
+        </div>
+
+        <div class="stats six">
+          <div class="stat"><div class="k">总阅读量 <span class="mut">· 图文</span></div><div class="v" id="anaReads">—</div></div>
+          <div class="stat"><div class="k">总播放量 <span class="mut">· 视频</span></div><div class="v" id="anaPlays">—</div></div>
+          <div class="stat"><div class="k">总点击量</div><div class="v" id="anaClicks">—</div></div>
+          <div class="stat"><div class="k">总订单量</div><div class="v" id="anaOrders">—</div></div>
+          <div class="stat"><div class="k">订单总额</div><div class="v" id="anaGmv">—</div></div>
+          <div class="stat"><div class="k">平均访购率</div><div class="v" id="anaRate">—</div></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>各平台数据对比</h3>
+              <p id="anaRangeLabel">近 30 天 · 按平台汇总投放内容的阅读 / 播放 / 点击与转化</p>
+            </div>
+          </div>
+          <div class="cmp-wrap">
+            <div class="cmp-head cmp-cols">
+              <span>平台</span><span>阅读量</span><span>播放量</span><span>点击量</span><span>订单量</span><span>订单总额</span><span>访购率</span>
+            </div>
+            <div id="cmpBody"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head" style="align-items:flex-end;">
+            <div>
+              <h3>投放内容明细 <span class="chip blue" id="postCount">0 条</span></h3>
+              <p>点击「内容拆解」对爆款内容做结构化拆解，拆解结果支持人工二次编辑</p>
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+              <label class="check" onclick="toggleViralOnly()">
+                <span class="sw" id="viralSw"></span>
+                只看爆款
+              </label>
+              <div class="seg seg-plat" id="platSeg">
+                <button class="on" data-plat="all" onclick="setAnaPlat('all',this)">全部</button>
+                <button data-plat="xhs" onclick="setAnaPlat('xhs',this)"><i class="dot dot-xhs"></i>小红书</button>
+                <button data-plat="wechat" onclick="setAnaPlat('wechat',this)"><i class="dot dot-wechat"></i>公众号</button>
+                <button data-plat="douyin" onclick="setAnaPlat('douyin',this)"><i class="dot dot-douyin"></i>抖音</button>
+                <button data-plat="finder" onclick="setAnaPlat('finder',this)"><i class="dot dot-finder"></i>视频号</button>
+              </div>
+            </div>
+          </div>
+          <div class="post-wrap">
+            <div class="post-head post-cols">
+              <span>内容标题</span><span>平台</span><span>发布时间</span><span>阅读 / 播放</span><span>点击量</span><span>订单量</span><span>订单总额</span><span>访购率</span><span style="text-align:right;">操作</span>
+            </div>
+            <div id="postList"></div>
+          </div>
+        </div>
+      </div><!-- /viewAnalytics -->
+
+      <!-- ---------- View: 内容拆解 ---------- -->
+      <div id="viewBreakdown" class="hidden">
+        <button class="back-btn" onclick="backToAnalytics()">← 返回效果分析</button>
+
+        <div class="bk-head">
+          <div style="flex:1;min-width:260px;">
+            <h3 id="bkTitle">—</h3>
+            <div class="bk-tags" id="bkTags"></div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <span class="dirty-dot hidden" id="bkDirty">有未保存的修改</span>
+            <button class="btn btn-ghost" onclick="redoBreakdown()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+              重新拆解
+            </button>
+            <button class="btn btn-primary" onclick="saveBreakdown()">保存拆解结果</button>
+          </div>
+        </div>
+
+        <div class="data-strip" id="bkStrip"></div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>AI 爆款拆解</h3>
+              <p>AI 已按标题钩子 / 封面 / 结构 / 情绪 / 互动 / 标签 / 可复用套路 7 个维度拆解，所有字段可直接修改</p>
+            </div>
+          </div>
+          <div id="bkSections"></div>
+        </div>
+      </div><!-- /viewBreakdown -->
+
       <!-- ---------- View: 占位（其他已上线模块） ---------- -->
       <div id="viewPlaceholder" class="hidden">
         <div class="panel" style="padding:64px 24px;">
@@ -1113,8 +1297,8 @@
   renderList();
 
   /* ---------- 导航分区切换 ---------- */
-  const SEC_TITLE = { chat:"对话", library:"内容库", kb:"知识库", accounts:"平台授权管理", settings:"系统配置", users:"账号管理", profile:"个人中心" };
-  const ALL_VIEWS = ['viewList','viewDetail','viewSearch','viewAccounts','viewSettings','viewUsers','viewPlaceholder'];
+  const SEC_TITLE = { chat:"对话", library:"内容库", analytics:"效果分析", kb:"知识库", accounts:"平台授权管理", settings:"系统配置", users:"账号管理", profile:"个人中心" };
+  const ALL_VIEWS = ['viewList','viewDetail','viewSearch','viewAnalytics','viewBreakdown','viewAccounts','viewSettings','viewUsers','viewPlaceholder'];
   function setNav(sec){
     document.querySelectorAll('.sidebar nav button').forEach(b => b.classList.toggle('active', b.dataset.sec === sec));
   }
@@ -1127,6 +1311,7 @@
     document.getElementById('crumb').textContent = '当前页面';
     document.getElementById('pageTitle').textContent = SEC_TITLE[sec] || '知识库';
     if(sec === 'kb') document.getElementById('viewList').classList.remove('hidden');
+    else if(sec === 'analytics'){ renderAnalytics(); document.getElementById('viewAnalytics').classList.remove('hidden'); }
     else if(sec === 'accounts') document.getElementById('viewAccounts').classList.remove('hidden');
     else if(sec === 'settings') document.getElementById('viewSettings').classList.remove('hidden');
     else if(sec === 'users') document.getElementById('viewUsers').classList.remove('hidden');
@@ -1694,6 +1879,233 @@
     toast('已删除知识库：' + name);
   }
 
+  /* ---------- 效果分析 ---------- */
+  const PLAT = {
+    xhs:    { name:'小红书', dot:'#d9163a' },
+    wechat: { name:'公众号', dot:'#12964b' },
+    douyin: { name:'抖音',   dot:'#111827' },
+    finder: { name:'视频号', dot:'#f2691e' }
+  };
+  const RANGE_FACTOR = { '7d':0.32, '30d':1, '90d':2.55 };
+  const RANGE_LABEL  = { '7d':'近 7 天', '30d':'近 30 天', '90d':'近 90 天' };
+
+  let POSTS = [
+    { id:1, title:'我妈的微信里，存着我爸最后一条语音', plat:'xhs',    type:'图文', time:'09-16 20:30', reads:128600, plays:0,      clicks:9420,  orders:318, gmv:28620, viral:true  },
+    { id:2, title:'72岁奶奶第一次用手机拍视频，孙子看哭了', plat:'douyin', type:'视频', time:'09-15 19:00', reads:0,      plays:486000, clicks:21400, orders:642, gmv:57780, viral:true  },
+    { id:3, title:'AI帮我写完了爸爸的一生',             plat:'wechat', type:'图文', time:'09-14 08:00', reads:43200,  plays:0,      clicks:3180,  orders:126, gmv:11340, viral:false },
+    { id:4, title:'把外婆的旧照片做成会动的回忆',       plat:'finder', type:'视频', time:'09-13 21:10', reads:0,      plays:158000, clicks:8600,  orders:236, gmv:21240, viral:false },
+    { id:5, title:'1987年那场婚礼，爸爸只留下这一张照片', plat:'xhs',    type:'图文', time:'09-12 20:00', reads:96500,  plays:0,      clicks:7240,  orders:264, gmv:23760, viral:true  },
+    { id:6, title:'给妈妈做了一本会说话的相册',         plat:'douyin', type:'视频', time:'09-11 18:30', reads:0,      plays:224000, clicks:11200, orders:388, gmv:34920, viral:true  },
+    { id:7, title:'AI回忆录，让父母的故事被听见',       plat:'wechat', type:'图文', time:'09-10 09:00', reads:18600,  plays:0,      clicks:1240,  orders:44,  gmv:3960,  viral:false },
+    { id:8, title:'爸爸的军装照，我用AI修复了',         plat:'finder', type:'视频', time:'09-09 20:20', reads:0,      plays:112000, clicks:6100,  orders:158, gmv:14220, viral:false }
+  ];
+
+  let anaRange = '30d', anaPlat = 'all', viralOnly = false;
+
+  function fmtBig(n){ return n >= 10000 ? (n/10000).toFixed(1).replace(/\.0$/,'') + '万' : n.toLocaleString(); }
+  function fmtMoney(n){ return '¥' + n.toLocaleString(); }
+  function fmtRate(r){ return (r*100).toFixed(2) + '%'; }
+  const sumBy = (arr, k) => arr.reduce((a, p) => a + p[k], 0);
+
+  function anaRows(){
+    const f = RANGE_FACTOR[anaRange];
+    return POSTS.map(p => ({ ...p,
+      reads:Math.round(p.reads*f), plays:Math.round(p.plays*f), clicks:Math.round(p.clicks*f),
+      orders:Math.round(p.orders*f), gmv:Math.round(p.gmv*f) }));
+  }
+
+  function renderAnalytics(){
+    const rows = anaRows();
+
+    /* 概览指标 */
+    const tReads=sumBy(rows,'reads'), tPlays=sumBy(rows,'plays'), tClicks=sumBy(rows,'clicks'),
+          tOrders=sumBy(rows,'orders'), tGmv=sumBy(rows,'gmv');
+    const tRate = tClicks ? tOrders/tClicks : 0;
+    document.getElementById('anaReads').innerHTML  = fmtBig(tReads).replace('万','<small>万</small>');
+    document.getElementById('anaPlays').innerHTML  = fmtBig(tPlays).replace('万','<small>万</small>');
+    document.getElementById('anaClicks').innerHTML = fmtBig(tClicks).replace('万','<small>万</small>');
+    document.getElementById('anaOrders').innerHTML = tOrders.toLocaleString() + '<small>单</small>';
+    document.getElementById('anaGmv').innerHTML    = fmtMoney(tGmv);
+    document.getElementById('anaRate').innerHTML   = (tRate*100).toFixed(2) + '<small>%</small>';
+    document.getElementById('anaRangeLabel').textContent =
+      RANGE_LABEL[anaRange] + ' · 按平台汇总投放内容的阅读 / 播放 / 点击与转化';
+
+    /* 各平台对比（始终展示全部平台，当前筛选平台高亮） */
+    const groups = ['xhs','wechat','douyin','finder'].map(id => {
+      const g = rows.filter(p => p.plat === id);
+      const c = sumBy(g,'clicks'), o = sumBy(g,'orders');
+      return { id, name:PLAT[id].name, dot:PLAT[id].dot, count:g.length,
+        reads:sumBy(g,'reads'), plays:sumBy(g,'plays'), clicks:c, orders:o, gmv:sumBy(g,'gmv'),
+        rate: c ? o/c : 0 };
+    });
+    const maxRate = Math.max(...groups.map(g => g.rate), 0.0001);
+    document.getElementById('cmpBody').innerHTML =
+      groups.map(g => `
+        <div class="cmp-row cmp-cols ${anaPlat === g.id ? 'hl' : ''}">
+          <span class="plat"><i class="pd" style="background:${g.dot}"></i>${g.name}<span class="chip" style="margin-left:2px;">${g.count} 条</span></span>
+          <span class="m ${g.reads ? '' : 'mut'}">${g.reads ? fmtBig(g.reads) : '—'}</span>
+          <span class="m ${g.plays ? '' : 'mut'}">${g.plays ? fmtBig(g.plays) : '—'}</span>
+          <span class="m">${g.clicks.toLocaleString()}</span>
+          <span class="m">${g.orders.toLocaleString()}</span>
+          <span class="m">${fmtMoney(g.gmv)}</span>
+          <span class="rate"><span class="rb"><i style="width:${(g.rate/maxRate*100).toFixed(1)}%"></i></span>${fmtRate(g.rate)}</span>
+        </div>`).join('') + `
+        <div class="cmp-row cmp-cols total">
+          <span class="plat">合计</span>
+          <span class="m">${fmtBig(tReads)}</span>
+          <span class="m">${fmtBig(tPlays)}</span>
+          <span class="m">${tClicks.toLocaleString()}</span>
+          <span class="m">${tOrders.toLocaleString()}</span>
+          <span class="m">${fmtMoney(tGmv)}</span>
+          <span class="rate">${fmtRate(tRate)}</span>
+        </div>`;
+
+    /* 投放内容明细（受平台 + 只看爆款筛选） */
+    const list = rows
+      .filter(p => (anaPlat === 'all' || p.plat === anaPlat) && (!viralOnly || p.viral))
+      .sort((a, b) => Math.max(b.reads, b.plays) - Math.max(a.reads, a.plays));
+    document.getElementById('postCount').textContent = list.length + ' 条';
+    document.getElementById('postList').innerHTML = list.length ? list.map(p => {
+      const main = p.reads ? p.reads : p.plays;
+      const mainLabel = p.reads ? '阅读' : '播放';
+      return `
+      <div class="post-row post-cols">
+        <span class="p-title">
+          <span class="t" title="${p.title}">${p.title}</span>
+          <span class="s"><span class="type-tag">${p.type}</span>${p.viral ? '<span class="viral">🔥 爆款</span>' : ''}</span>
+        </span>
+        <span class="p-plat"><i class="pd" style="background:${PLAT[p.plat].dot}"></i>${PLAT[p.plat].name}</span>
+        <span class="p-num mut">${p.time}</span>
+        <span class="p-num" title="${mainLabel} ${main.toLocaleString()}">${fmtBig(main)}</span>
+        <span class="p-num">${p.clicks.toLocaleString()}</span>
+        <span class="p-num">${p.orders.toLocaleString()}</span>
+        <span class="p-num">${fmtMoney(p.gmv)}</span>
+        <span class="p-num">${fmtRate(p.clicks ? p.orders/p.clicks : 0)}</span>
+        <span class="p-ops"><button class="btn btn-ghost p-op" onclick="openBreakdown(${p.id})">${p.viral ? '🔥 ' : ''}内容拆解</button></span>
+      </div>`;
+    }).join('') : `<div class="empty" style="padding:46px 20px;">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-7"/></svg></div>
+        <div><b style="font-size:14px;color:var(--ink);">暂无投放内容</b>
+        <div style="font-size:12px;margin-top:6px;">换个平台筛选，或关闭「只看爆款」再看</div></div>
+      </div>`;
+  }
+
+  function setAnaRange(r, btn){
+    anaRange = r;
+    document.querySelectorAll('#anaRangeSeg button').forEach(b => b.classList.toggle('on', b === btn));
+    renderAnalytics();
+  }
+  function setAnaPlat(p, btn){
+    anaPlat = p;
+    document.querySelectorAll('#platSeg button').forEach(b => b.classList.toggle('on', b === btn));
+    renderAnalytics();
+  }
+  function toggleViralOnly(){
+    viralOnly = !viralOnly;
+    document.getElementById('viralSw').classList.toggle('on', viralOnly);
+    renderAnalytics();
+  }
+
+  /* ---------- 内容拆解（可人工二次编辑） ---------- */
+  let bkId = null, bkDirty = false;
+
+  function buildBreakdown(p){
+    const platName = PLAT[p.plat].name;
+    const isVideo = p.type === '视频';
+    return [
+      { name:'标题钩子 · 公式拆解',
+        text:`「${p.title}」= 身份指代（第一人称「我 / 我妈」）+ 具体物件（${isVideo ? '画面冲突' : '那一条语音 / 那张照片'}）+ 情绪悬念（未说完、留白）。\n核心公式：具体细节 + 未完成叙事 → 激发「后来呢？」的追问。首行 / 前 3 秒必须出现冲突，不做铺垫。` },
+      { name:'封面设计',
+        text: isVideo
+          ? `人物特写占据画面 2/3，首帧即高对比表情；大字标题控制在 9 字以内，压在下方安全区，字号 ≥ 画面高度 1/5；避免纯文字封面。`
+          : `主图用手写体感大标题 + 一张带年代感的老照片，留白多、字少；实测带人脸 / 旧物的封面点击率高于纯文字封面约 40%。` },
+      { name:'内容结构',
+        text:`① 开头（0–3s / 首段）：直接抛细节，不解释背景\n② 冲突：把「错过 / 遗憾」摆出来\n③ 展开：用 2–3 个具体场景（时间、地点、对话）堆真实感\n④ 落点：回到「如果当时 / 幸好现在」，自然接上产品价值\n全文没有一句总结式说教。` },
+      { name:'情绪共鸣点',
+        text:`主打「子女与父母的错过」。目标人群（30–50 岁）极易代入「我也有没说出口的话」。共鸣词：看哭了 / 像我爸 / 想起我妈。情绪落点统一，不做多主题混搭。` },
+      { name:'互动引导（评论区预埋）',
+        text:`评论区预埋 2–3 条真实感话术：\n· 「看完立刻给我妈打了个电话」\n· 「我也有这样一张照片，一直没敢动」\n· （提问式）「你爸妈手机里，有没有舍不得删的东西？」\n注意：不做「点赞过百就更新」类诱导互动，避免限流。` },
+      { name:'话题标签',
+        text:`主标签：#${platName}热词 #父母 #回忆录 #老照片修复\n长尾：#亲情 #遗憾 #AI回忆录\n建议 5–8 个：1 个大词 + 3 个精准词 + 1 个品牌词。` },
+      { name:'可复用套路（模板提炼）',
+        text:`模板：「[具体物件 / 画面] + [未完成的关系] + [留白式提问]」\n复用示例：「我爸的旧钱包里，夹着一张我没见过的照片」 / 「妈妈的针线盒最底层，压着一封信」。\n可沉淀进知识库「银发赛道爆款笔记合集」，供后续选题复用。` }
+    ];
+  }
+
+  function stripItem(k, v){ return `<div class="ds"><div class="k">${k}</div><div class="v">${v}</div></div>`; }
+
+  function openBreakdown(id){
+    bkId = id;
+    const p = POSTS.find(x => x.id === id);
+    setNav('analytics');
+    hideAllViews();
+    document.getElementById('viewBreakdown').classList.remove('hidden');
+    document.getElementById('crumb').textContent = '效果分析 / 内容拆解';
+    document.getElementById('pageTitle').textContent = '爆款内容拆解';
+
+    document.getElementById('bkTitle').textContent = p.title;
+    document.getElementById('bkTags').innerHTML = `
+      <span class="chip blue">${PLAT[p.plat].name}</span>
+      <span class="chip">${p.type}</span>
+      <span class="chip">发布时间 ${p.time}</span>
+      ${p.viral ? '<span class="viral">🔥 爆款</span>' : '<span class="chip">常规内容</span>'}`;
+
+    document.getElementById('bkStrip').innerHTML =
+      (p.reads ? stripItem('阅读量', fmtBig(p.reads)) : '') +
+      (p.plays ? stripItem('播放量', fmtBig(p.plays)) : '') +
+      stripItem('点击量', p.clicks.toLocaleString()) +
+      stripItem('订单量', p.orders.toLocaleString()) +
+      stripItem('订单总额', fmtMoney(p.gmv)) +
+      stripItem('访购率', fmtRate(p.clicks ? p.orders/p.clicks : 0));
+
+    bkDirty = false;
+    document.getElementById('bkDirty').classList.add('hidden');
+    renderBreakdown();
+    document.querySelector('.workspace-body').scrollTop = 0;
+  }
+
+  function renderBreakdown(){
+    const p = POSTS.find(x => x.id === bkId);
+    document.getElementById('bkSections').innerHTML = buildBreakdown(p).map((s, i) => `
+      <div class="bk-section">
+        <div class="bk-section-head">
+          <span class="bk-num">${i + 1}</span>
+          <b>${s.name}</b>
+          <span class="hint">可直接编辑</span>
+        </div>
+        <textarea class="bk-edit" oninput="onBkInput(this)">${s.text}</textarea>
+      </div>`).join('');
+  }
+
+  function onBkInput(el){
+    el.closest('.bk-section').classList.add('dirty');
+    bkDirty = true;
+    document.getElementById('bkDirty').classList.remove('hidden');
+  }
+  function saveBreakdown(){
+    bkDirty = false;
+    document.querySelectorAll('#bkSections .bk-section').forEach(s => s.classList.remove('dirty'));
+    document.getElementById('bkDirty').classList.add('hidden');
+    toast('拆解结果已保存，已同步到该内容的拆解记录');
+  }
+  function redoBreakdown(){
+    renderBreakdown();
+    bkDirty = false;
+    document.getElementById('bkDirty').classList.add('hidden');
+    toast('已重新拆解，可继续人工编辑');
+  }
+  function backToAnalytics(){
+    setNav('analytics');
+    hideAllViews();
+    renderAnalytics();
+    document.getElementById('viewAnalytics').classList.remove('hidden');
+    document.getElementById('crumb').textContent = '当前页面';
+    document.getElementById('pageTitle').textContent = '效果分析';
+    document.querySelector('.workspace-body').scrollTop = 0;
+  }
+
+  renderAnalytics();
+
   /* ---------- Toast ---------- */
   let toastTimer;
   function toast(msg){
@@ -1703,6 +2115,16 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(()=>t.classList.remove('show'), 2000);
   }
+
+  /* ---------- Embed 模式：主应用 iframe 引入时隐藏外壳并直达指定分区 ---------- */
+  (function(){
+    const raw = (location.hash || '').replace(/^#/, '') + '&' + (location.search || '').replace(/^\?/, '');
+    const m = /embed[=:\/]([a-z]+)/i.exec(raw);
+    if(!m) return;
+    const sec = m[1];
+    document.body.classList.add('embed');
+    if(SEC_TITLE[sec]) switchSection(sec);
+  })();
 </script>
 </body>
 </html>

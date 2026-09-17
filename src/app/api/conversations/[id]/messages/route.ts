@@ -3,6 +3,13 @@ import { openClawClient } from "@/lib/openclaw";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { generateImageUrls } from "@/lib/image-gen";
+import {
+  filterRelevantTopics,
+  loadUserKbContext,
+  matchTopicsToKnowledge,
+  parseTopicLines,
+  type HotTopicMatch
+} from "@/lib/kb-hot-topics";
 
 type MessageBody = {
   content?: string;
@@ -149,6 +156,37 @@ function sseEncode(data: unknown): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
 }
 
+/** 组装「今日产品热点推荐」的筛选结果回复（编号行为热点本体，缩进行为命中证据）。 */
+function buildProductHotTopicReply(matched: HotTopicMatch[], reference: HotTopicMatch[]): string {
+  const lines: string[] = [];
+  if (matched.length > 0) {
+    lines.push(
+      `已结合你的知识库产品知识，从今日全网热点中筛选出 ${matched.length} 条相关热点：`,
+      ""
+    );
+    matched.forEach((match, index) => {
+      lines.push(`${index + 1}. ${match.topic}`);
+      lines.push(
+        `   相关度 ${match.score.toFixed(2)} · 命中关键词：${match.keywords.slice(0, 4).join("、")} · 知识库「${match.knowledgeBaseName} / ${match.filename}」：${match.snippet}`
+      );
+    });
+  } else {
+    lines.push(
+      "已获取今日全网热点并逐条与知识库产品知识比对，暂未发现与产品相关的热点。",
+      "",
+      "以下为相关度最高的 3 条热点，供参考：",
+      ""
+    );
+    reference.forEach((match, index) => {
+      lines.push(`${index + 1}. ${match.topic}`);
+      lines.push(
+        `   相关度 ${match.score.toFixed(2)} · 知识库「${match.knowledgeBaseName} / ${match.filename}」：${match.snippet}`
+      );
+    });
+  }
+  return lines.join("\n");
+}
+
 export async function POST(request: Request, context: { params: { id: string } }) {
   const user = await requireUser();
   if (!user) {
@@ -220,6 +258,97 @@ export async function POST(request: Request, context: { params: { id: string } }
       }
     });
     return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" } });
+  }
+
+  if (content === "今日产品热点推荐") {
+    const userMessage = await prisma.message.create({ data: { conversationId: conversation.id, role: "USER", content } });
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        let taskId: string | undefined;
+        const finishWith = async (assistantContent: string, taskStatus: "SUCCEEDED" | "FAILED", taskError?: string, id?: string) => {
+          const assistantMessage = await prisma.message.create({
+            data: { conversationId: conversation.id, role: "ASSISTANT", content: assistantContent }
+          });
+          if (taskId) {
+            await prisma.openClawTask.update({
+              where: { id: taskId },
+              data: { status: taskStatus, ...(taskError ? { error: taskError } : {}) }
+            });
+          }
+          controller.enqueue(sseEncode({
+            type: "final",
+            message: {
+              id: assistantMessage.id,
+              role: "ASSISTANT",
+              content: assistantMessage.content,
+              createdAt: assistantMessage.createdAt.toISOString()
+            },
+            userMessage
+          }));
+          controller.close();
+        };
+
+        try {
+          const kbContext = await loadUserKbContext(user.id);
+          if (!kbContext) {
+            await finishWith(
+              "知识库中还没有可检索的产品知识，暂时无法筛选产品热点。\n\n请先在「知识库」中创建知识库、上传产品资料并完成「切片 → 训练」，之后再来点击「今日产品热点推荐」，我会从今日全网热点中帮你筛选出与产品相关的热点。",
+              "FAILED",
+              "用户知识库无可用切片"
+            );
+            return;
+          }
+
+          controller.enqueue(sseEncode({ type: "delta", text: "正在获取今日全网热点，并结合知识库中的产品知识逐条比对筛选…" }));
+
+          const task = await prisma.openClawTask.create({
+            data: { userId: user.id, type: "conversation", prompt: "今日全网热点推荐", status: "RUNNING" }
+          });
+          taskId = task.id;
+
+          const hotResult = await openClawClient.sendTask({
+            message: "今日全网热点推荐",
+            prompt: "请推荐今日全网热点（各行业热门话题、社会热点、平台热点均可），以编号列表输出 10 条左右，每条一行，格式：1. 热点简述。不要展开分析。"
+          });
+
+          const topics = parseTopicLines(hotResult.content);
+          if (topics.length === 0) {
+            await finishWith(
+              `今日全网热点已获取，但未能解析出结构化热点列表，无法结合知识库筛选。原始热点内容如下：\n\n${hotResult.content.slice(0, 2000)}`,
+              "SUCCEEDED",
+              undefined,
+              task.id
+            );
+            return;
+          }
+
+          const matches = await matchTopicsToKnowledge(topics, kbContext);
+          const matched = filterRelevantTopics(matches, kbContext.keywords.length > 0);
+          const reply = buildProductHotTopicReply(matched, [...matches].sort((a, b) => b.score - a.score).slice(0, 3));
+          await finishWith(reply, "SUCCEEDED", undefined, task.id);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "获取今日热点失败。";
+          if (taskId) {
+            await prisma.openClawTask.update({
+              where: { id: taskId },
+              data: { status: "FAILED", error: message }
+            }).catch(() => {});
+          }
+          controller.enqueue(sseEncode({ type: "error", error: message || "获取今日热点失败。" }));
+          controller.close();
+        }
+      }
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no"
+      }
+    });
   }
 
   await prisma.message.create({
