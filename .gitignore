@@ -21,3 +21,8 @@ src/renderer/*.zip
 # Large local media / uploads (do not version)
 public/uploads/
 public/videos/
+.platform-cred.key
+
+.xhs-cookie.txt
+
+.toutiao-cookie.txt

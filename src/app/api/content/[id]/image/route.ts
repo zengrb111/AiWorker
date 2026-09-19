@@ -1,8 +1,23 @@
+import { readFile } from "fs/promises";
+import path from "path";
 import { jsonError } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 
-/** GET /api/content/[id]/image — proxy the cover image blob (bypasses CORS). */
+const MIME_BY_EXT: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".bmp": "image/bmp",
+};
+
+/**
+ * GET /api/content/[id]/image — 返回封面图片二进制。
+ * - 本地封面（/uploads/...）：直接从 public 目录读取（fetch 不支持相对路径）。
+ * - 远程封面（pollinations 等）：服务端代理抓取，绕过浏览器 CORS。
+ */
 export async function GET(
   _request: Request,
   context: { params: { id: string } }
@@ -26,9 +41,33 @@ export async function GET(
     return jsonError("暂无封面图片。", 404);
   }
 
+  // 1) 本地封面文件：直接读磁盘
+  if (imageUrl.startsWith("/")) {
+    const relative = path.normalize(imageUrl).replace(/^[/\\]+/, "");
+    if (!relative.startsWith("uploads")) {
+      return jsonError("图片路径非法。", 400);
+    }
+    const filePath = path.join(process.cwd(), "public", relative);
+    try {
+      const buffer = await readFile(filePath);
+      const ext = path.extname(filePath).toLowerCase();
+      return new Response(new Uint8Array(buffer), {
+        headers: {
+          "Content-Type": MIME_BY_EXT[ext] ?? "application/octet-stream",
+          "Cache-Control": "public, max-age=300, s-maxage=600",
+        },
+      });
+    } catch {
+      return jsonError("封面文件不存在，请重新生成。", 404);
+    }
+  }
+
+  // 2) 远程封面：代理抓取
   let imageResponse: Response;
   try {
-    imageResponse = await fetch(imageUrl);
+    imageResponse = await fetch(imageUrl, {
+      signal: AbortSignal.timeout(20_000),
+    });
   } catch {
     return jsonError("获取图片失败，请稍后重试。", 502);
   }

@@ -67,8 +67,9 @@ model ContentItem {
   videoUrl             String?
   inlineImagesJson     String?
   sourceConversationId String?
-  sourceConversation   Conversation? @relation(fields: [sourceConversationId], references: [id], onDelete: SetNull)
-  createdAt            DateTime      @default(now())
+  sourceConversation   Conversation?  @relation(fields: [sourceConversationId], references: [id], onDelete: SetNull)
+  publishRecords       PublishRecord[]
+  createdAt            DateTime       @default(now())
 }
 
 model OpenClawTask {
@@ -82,6 +83,72 @@ model OpenClawTask {
   error      String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+}
+
+/// 发布记录（内容库条目 → 各发布渠道）
+model PublishRecord {
+  id             String      @id @default(cuid())
+  contentItemId  String
+  contentItem    ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  channel        String      // 发布渠道：官网好物推荐(hgwx) / 小红书 / 公众号 …
+  remoteId       String?     // 渠道侧条目 id（如 hgwx 的 UUID）
+  remoteUrl      String?     // 渠道侧访问地址
+  title          String      // 发布时的标题快照
+  publisher      String      // 发布人（账号手机号或系统标识）
+  status         String      @default("SUCCESS") // SUCCESS | FAILED
+  error          String?
+  publishedAt    DateTime    @default(now())
+  createdAt      DateTime    @default(now())
+}
+
+/// 平台授权账号（官网渠道免授权；小红书/头条号以创作者后台 Cookie 授权）
+model PlatformAccount {
+  id            String    @id @default(cuid())
+  platform      String    // site | xhs | toutiao
+  displayName   String    // 平台侧账号昵称 / 名称
+  externalId    String?   // 平台侧用户/账号 ID
+  credentialEnc String?   // AES-256-GCM 加密的凭据（Cookie）
+  status        String    @default("active") // active | expired | error
+  statusMsg     String?   // 最近一次校验/同步结果说明
+  boundBy       String?   // 绑定人（账号手机号）
+  lastSyncAt    DateTime?
+  lastVerifyAt  DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  metrics       PlatformContentMetric[]
+  @@unique([platform, externalId])
+}
+
+/// 平台内容效果数据（按天、按内容；官网数据每日覆盖更新）
+model PlatformContentMetric {
+  id         String           @id @default(cuid())
+  account    PlatformAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  accountId  String?
+  platform   String           // site | xhs | toutiao
+  contentKey String           // 平台侧内容标识（官网 recommend id / 笔记 id / 文章 id）
+  title      String
+  category   String?
+  metricDate String           // yyyy-MM-dd，数据所属日
+  views      Int              @default(0)
+  clicks     Int              @default(0)
+  likes      Int              @default(0)
+  comments   Int              @default(0)
+  collects   Int              @default(0)
+  shares     Int              @default(0)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+  @@unique([platform, contentKey, metricDate])
+  @@index([platform, metricDate])
+}
+
+/// 平台站点级流量（按天 PV/UV）
+model PlatformSiteMetric {
+  id         String @id @default(cuid())
+  platform   String // site | xhs | toutiao
+  metricDate String // yyyy-MM-dd
+  pv         Int    @default(0)
+  uv         Int    @default(0)
+  @@unique([platform, metricDate])
 }
 
 /// RAG 知识库
