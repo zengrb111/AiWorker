@@ -18,11 +18,15 @@ export async function DELETE() {
     if (!binding) {
       return jsonError("当前没有已绑定的微信通道。");
     }
-    if (!binding.wechatOpenId) {
-      return jsonError("当前绑定缺少 OpenClaw 微信 openId，无法解绑。");
+
+    // 历史数据的 wechatOpenId 可能为空，退回用 wechatNo（微信 userId）反查本地账号。
+    const accountRef = binding.wechatOpenId?.trim() || binding.wechatNo?.trim() || "";
+
+    if (accountRef) {
+      // 停止通道 + 清理本地凭据；失败时直接返回错误，避免"界面显示已解绑、微信其实还能用"。
+      await openClawClient.unbindWechat(accountRef);
     }
 
-    await openClawClient.unbindWechat(binding.wechatOpenId);
     await prisma.wechatBinding.update({
       where: { id: binding.id },
       data: { status: "UNBOUND", boundAt: null }

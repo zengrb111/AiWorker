@@ -174,7 +174,7 @@ function termsFromQuery(query: string): string[] {
 
 /* -------------------------------- component ------------------------------- */
 
-export default function KnowledgePanel() {
+export default function KnowledgePanel({ resetToken = 0 }: { resetToken?: number }) {
   const [view, setView] = useState<"list" | "detail" | "search">("list");
   const [items, setItems] = useState<KbSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -224,6 +224,26 @@ export default function KnowledgePanel() {
   useEffect(() => {
     void loadList();
   }, [loadList]);
+
+  // 点左侧「知识库」菜单时回到知识库列表页：即使正停在某个知识库详情、或检索测试页也要退出，
+  // 并关掉可能开着的弹层。首次挂载（从其它分区切进来）跳过，避免重复刷新。
+  const skipFirstResetRef = useRef(true);
+  useEffect(() => {
+    if (skipFirstResetRef.current) {
+      skipFirstResetRef.current = false;
+      return;
+    }
+    setView("list");
+    setDetail(null);
+    setStep(1);
+    setNotice("");
+    setFormMode(null);
+    setDeleteTarget(null);
+    setHits(null);
+    setSearchStats(null);
+    setSearchMessage("");
+    void loadList();
+  }, [resetToken, loadList]);
 
   // 训练/切片的假进度条，让等待过程可感知
   useEffect(() => {

@@ -1,4 +1,5 @@
 import { inflateRawSync } from "node:zlib";
+import { PDFParse } from "pdf-parse";
 
 export type ExtractStatus = "PARSED" | "EMPTY" | "FAILED";
 
@@ -149,7 +150,30 @@ function extractPdfFromContent(content: string): string {
   return collected.join(" ");
 }
 
-function extractPdf(buf: Buffer): ExtractResult {
+/** 用 pdf-parse（pdf.js）提取 PDF 文本，支持中文 CID 字体；失败返回 null 走兜底 */
+async function extractPdfWithParser(buf: Buffer): Promise<string | null> {
+  try {
+    const parser = new PDFParse({ data: new Uint8Array(buf) });
+    try {
+      const result = await parser.getText();
+      const text = normalizeWhitespace(result.text || "");
+      return text || null;
+    } finally {
+      await parser.destroy().catch(() => undefined);
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function extractPdfAsync(buf: Buffer): Promise<ExtractResult> {
+  // 首选 pdf-parse（pdf.js）：正确处理中文 CID 字体、编码与分页
+  const parsed = await extractPdfWithParser(buf);
+  if (parsed) {
+    return { text: parsed, status: "PARSED", note: "已提取 PDF 文本" };
+  }
+
+  // 兜底：朴素启发式（仅对未压缩英文内容流有效）
   const raw = buf.toString("latin1");
   const chunks: string[] = [];
   const streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
@@ -163,6 +187,8 @@ function extractPdf(buf: Buffer): ExtractResult {
     } catch {
       decoded = match[1];
     }
+    // 只处理看起来像 PDF 内容流的解压结果，避免把图片/字体二进制当文本
+    if (!/BT[\s\S]*ET|Tj|TJ/.test(decoded)) continue;
     const text = extractPdfFromContent(decoded);
     if (text.trim()) chunks.push(text);
   }
@@ -175,7 +201,7 @@ function extractPdf(buf: Buffer): ExtractResult {
       note: "PDF 未提取到可复制文字（可能是扫描件，建议改传 .txt/.docx 或做 OCR）"
     };
   }
-  return { text, status: "PARSED", note: "已提取 PDF 文本" };
+  return { text, status: "PARSED", note: "已提取 PDF 文本（兜底模式）" };
 }
 
 /* ---------------------------------- ZIP 包 --------------------------------- */
@@ -249,7 +275,7 @@ export async function extractDocumentText(buf: Buffer, filename: string): Promis
         : { text: "", status: "EMPTY", note: "文件内容为空" };
     }
     if (ext === "docx") return extractDocx(buf);
-    if (ext === "pdf") return extractPdf(buf);
+    if (ext === "pdf") return await extractPdfAsync(buf);
     if (ext === "zip") return extractZipArchive(buf);
     if (IMAGE_EXTENSIONS.includes(ext)) {
       return { text: "", status: "EMPTY", note: "图片文件：已入库，暂未做 OCR 识别" };

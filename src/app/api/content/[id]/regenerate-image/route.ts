@@ -1,7 +1,7 @@
 import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
-import { regenerateImage, extractImagePrompt } from "@/lib/image-gen";
+import { regenerateImageWithFallback, extractImagePrompt, deleteLocalImage, coverPlatformOf, coverSizeOf } from "@/lib/image-gen";
 
 type RegenBody = {
   imageType?: "cover" | "inline";
@@ -26,10 +26,16 @@ export async function POST(request: Request, context: { params: { id: string } }
     return jsonError("内容不存在。", 404);
   }
 
-  const prompt = extractImagePrompt(contentItem.title, contentItem.body, imageIndex);
+  // 封面按内容所属平台出图：小红书 3:4 竖版、公众号 16:10 横版，
+  // 并且 prompt 与首次生成时保持同一套平台调性，重绘风格才不会漂移。
+  const platform = coverPlatformOf(contentItem.category);
+  const prompt = extractImagePrompt(contentItem.title, contentItem.body, imageIndex, platform);
 
   if (imageType === "cover") {
-    const coverImageUrl = regenerateImage(prompt, 1200, 630);
+    const { width, height } = coverSizeOf(platform);
+    const coverImageUrl = await regenerateImageWithFallback(prompt, width, height);
+    // Clean up the old locally stored cover (no-op for remote URLs).
+    deleteLocalImage(contentItem.coverImageUrl);
     const updated = await prisma.contentItem.update({
       where: { id: contentItem.id },
       data: { coverImageUrl }
@@ -53,7 +59,9 @@ export async function POST(request: Request, context: { params: { id: string } }
     inlineImages.push("");
   }
 
-  const newUrl = regenerateImage(prompt, 1200, 800);
+  const oldUrl = inlineImages[imageIndex];
+  const newUrl = await regenerateImageWithFallback(prompt, 1200, 800);
+  deleteLocalImage(oldUrl);
   inlineImages[imageIndex] = newUrl;
 
   const updated = await prisma.contentItem.update({

@@ -1,5 +1,5 @@
 /**
- * 「今日产品热点推荐」支持逻辑：
+ * 「今日产品热点」支持逻辑：
  * 1. 从 AI 返回的"今日全网热点"文本中解析出热点列表；
  * 2. 提取知识库中的产品关键词（高频 n-gram，过滤通用停用词）；
  * 3. 只有命中至少一个产品关键词的热点才进入候选，再按
@@ -200,4 +200,29 @@ export function filterRelevantTopics(matches: HotTopicMatch[], hasKeywords: bool
   const topScore = Math.max(...matches.map((match) => match.score));
   const floor = Math.max(0.08, topScore * 0.5);
   return candidates.filter((match) => match.score >= floor).slice(0, 10);
+}
+
+/**
+ * 针对多个查询，从用户知识库切片中检索相关片段并拼成参考文本，
+ * 供「仿写爆款」等场景把产品知识与营销账号 IP 定位信息注入 prompt。
+ * 与检索测试一致：依赖 scoreChunks（按 ctx.preferredModel 选择远端/本地向量）。
+ */
+export async function retrieveReferenceChunks(queries: string[], ctx: KbContext, topK = 6): Promise<string> {
+  if (!ctx || ctx.candidates.length === 0) return "";
+  const picked = new Map<string, RetrievalChunkInput>();
+  for (const query of queries) {
+    const { hits } = await scoreChunks(query, ctx.candidates, ctx.preferredModel);
+    for (const hit of hits.slice(0, topK)) {
+      picked.set(hit.chunk.id, hit.chunk);
+    }
+  }
+  if (picked.size === 0) return "";
+  return [...picked.values()]
+    .map((chunk) => {
+      const kb = ctx.kbNameMap.get(chunk.knowledgeBaseId) ?? "未知知识库";
+      const fn = ctx.filenameMap.get(chunk.documentId) ?? "未知文档";
+      const text = chunk.content.replace(/\s+/g, " ").trim();
+      return `【知识库「${kb}」/ 文档「${fn}」】\n${text}`;
+    })
+    .join("\n\n");
 }
