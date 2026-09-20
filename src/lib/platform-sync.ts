@@ -1,4 +1,7 @@
 import { prisma } from "./prisma";
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
 
 /**
  * 平台效果数据同步器。
@@ -181,6 +184,32 @@ function todayKey() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+/** 去 HTML 标签并压缩空白（头条号 feed 里的标题/正文是富文本片段） */
+function stripHtml(input: unknown): string {
+  return String(input || "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** 从头条号 feed 的富文本里抽话题标签（#xxx） */
+function extractToutiaoTopics(cell: { richContentInfo?: { richContent?: string } }): string {
+  const text = String(cell?.richContentInfo?.richContent || "");
+  const out: string[] = [];
+  const re = /#([^#\s，。！？、]{1,30})/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const t = m[1].trim();
+    if (t && !out.includes(t)) out.push(t);
+  }
+  return out.slice(0, 12).join(",");
+}
+
 async function upsertContentMetric(row: {
   platform: string;
   contentKey: string;
@@ -188,6 +217,7 @@ async function upsertContentMetric(row: {
   category?: string | null;
   accountId?: string | null;
   views: number;
+  impressions?: number;
   clicks: number;
   likes?: number;
   comments?: number;
@@ -206,12 +236,14 @@ async function upsertContentMetric(row: {
     update: {
       title: row.title,
       views: row.views,
+      impressions: row.impressions ?? 0,
       clicks: row.clicks,
       likes: row.likes ?? 0,
       comments: row.comments ?? 0,
       collects: row.collects ?? 0,
       shares: row.shares ?? 0,
       accountId: row.accountId ?? null,
+      visible: true,
     },
     create: {
       platform: row.platform,
@@ -221,13 +253,45 @@ async function upsertContentMetric(row: {
       category: row.category ?? null,
       accountId: row.accountId ?? null,
       views: row.views,
+      impressions: row.impressions ?? 0,
       clicks: row.clicks,
       likes: row.likes ?? 0,
       comments: row.comments ?? 0,
       collects: row.collects ?? 0,
       shares: row.shares ?? 0,
+      visible: true,
     },
   });
+}
+
+/**
+ * 同步收尾：把「本次公开列表里没有的」旧记录删掉。
+ * 平台内容被删除 / 下架 / 设为仅自己可见后，接口不再返回，
+ * 但库里历史 metric 会残留，导致效果数据虚高。这里按 contentKey 差集真删。
+ * 返回被清理的条数。
+ */
+async function pruneStaleMetrics(platform: string, accountId: string | null, liveKeys: string[]): Promise<number> {
+  if (liveKeys.length === 0) return 0;
+  const live = new Set(liveKeys);
+  const scope = { platform, ...(accountId ? { accountId } : {}) };
+  const existing = await prisma.platformContentMetric.findMany({
+    where: scope,
+    select: { contentKey: true },
+    distinct: ["contentKey"],
+  });
+  // 先算出差集，再用 in 分块删。
+  // 注意：不能对 notIn 做分块 —— 每一块的 notIn 会把其他块里仍然有效的数据当成「陈旧」删掉。
+  const stale = existing.map((r) => r.contentKey).filter((k) => !live.has(k));
+  if (stale.length === 0) return 0;
+  let removed = 0;
+  for (let i = 0; i < stale.length; i += 400) {
+    const keys = stale.slice(i, i + 400);
+    const r = await prisma.platformContentMetric.deleteMany({
+      where: { ...scope, contentKey: { in: keys } },
+    });
+    removed += r.count;
+  }
+  return removed;
 }
 
 /** 官网渠道：拉官网统计接口写入本地库（站点 PV/UV + 内容浏览/点击） */
@@ -261,7 +325,37 @@ export async function syncSiteMetrics(): Promise<{ ok: boolean; message: string;
         clicks: it.clicks || 0,
       });
     }
-    return { ok: true, message: `官网数据同步完成：${items.length} 条内容`, items: items.length };
+    // 原文入库：官网内容的正文在本地内容库（PublishRecord → ContentItem）
+    const records = await prisma.publishRecord.findMany({
+      where: { status: "SUCCESS" },
+      select: { remoteId: true, title: true, contentItemId: true },
+    });
+    let bodies = 0;
+    for (const rec of records) {
+      if (!rec.remoteId) continue;
+      const item = await prisma.contentItem.findUnique({ where: { id: rec.contentItemId } });
+      const text = String(item?.body || "").trim();
+      if (text.length < 30) continue;
+      const payload = {
+        title: String(rec.title || item?.title || "").slice(0, 500),
+        body: text.slice(0, 20000),
+        topics: null,
+        author: null,
+        source: "content-item",
+        fetchedAt: new Date(),
+      };
+      await prisma.contentSource.upsert({
+        where: { platform_contentKey: { platform: "site", contentKey: rec.remoteId } },
+        update: payload,
+        create: { platform: "site", contentKey: rec.remoteId, ...payload },
+      });
+      bodies++;
+    }
+    return {
+      ok: true,
+      message: `官网数据同步完成：${items.length} 条内容${bodies ? `，原文 ${bodies} 篇` : ""}`,
+      items: items.length,
+    };
   } catch (e) {
     return { ok: false, message: `官网数据同步失败：${e instanceof Error ? e.message : String(e)}` };
   }
@@ -287,21 +381,58 @@ export async function syncXhsMetrics(accountId: string): Promise<{ ok: boolean; 
     if (json?.data?.userId) {
       // 凭据有效。笔记明细数据由本地采集器（scripts/xhs-collect.mjs，CDP 真实浏览器通道）推送入库。
       const synced = await prisma.platformContentMetric.count({ where: { platform: "xhs", accountId } });
+      const triggered = triggerXhsCollector(cookie, accountId);
       await prisma.platformAccount.update({
         where: { id: accountId },
         data: {
           lastSyncAt: new Date(),
           status: "active",
-          statusMsg: synced > 0 ? `凭据有效；已有 ${synced} 篇笔记数据（由本地采集器同步）` : "凭据有效；笔记数据待本地采集器同步",
+          statusMsg: triggered
+            ? "凭据有效；已触发本地采集器回填笔记数据（约需几分钟）"
+            : synced > 0
+              ? `凭据有效；已有 ${synced} 篇笔记数据`
+              : "凭据有效；笔记数据采集器已在运行中，稍后自动入库",
         },
       });
-      return { ok: true, message: `小红书凭据有效（${json.data.userName || account.displayName}）`, items: synced };
+      return {
+        ok: true,
+        message: `小红书凭据有效（${json.data.userName || account.displayName}）${triggered ? "；已触发本地采集器回填笔记数据" : ""}`,
+        items: synced,
+      };
     }
     await markAccountError(accountId, `凭据已失效（平台响应 ${json?.code ?? res.status}），请重新授权`);
     return { ok: false, message: "凭据失效，请重新授权" };
   } catch (e) {
     await markAccountError(accountId, `请求失败：${e instanceof Error ? e.message : String(e)}`);
     return { ok: false, message: "小红书数据同步失败（详见账号状态）" };
+  }
+}
+
+/**
+ * 把库内 Cookie 同步到采集器文件并后台拉起 scripts/xhs-collect.mjs（CDP 采集 → ingest 入库）。
+ * 用时间戳锁文件防止重复拉起（10 分钟内视为仍在运行）。
+ */
+function triggerXhsCollector(cookie: string, accountId: string): boolean {
+  const root = process.cwd();
+  const cookieFile = path.join(root, ".xhs-cookie.txt");
+  const lockFile = path.join(root, ".xhs-collect.lock");
+  try {
+    const lockStat = fs.existsSync(lockFile) ? fs.statSync(lockFile) : null;
+    if (lockStat && Date.now() - lockStat.mtimeMs < 10 * 60 * 1000) return false;
+    fs.writeFileSync(cookieFile, cookie, "utf8");
+    fs.writeFileSync(lockFile, String(Date.now()), "utf8");
+    const child = spawn(
+      process.execPath,
+      [path.join(root, "scripts", "xhs-collect.mjs")],
+      { cwd: root, detached: true, stdio: "ignore" }
+    );
+    child.on("exit", () => {
+      try { fs.unlinkSync(lockFile); } catch {}
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -348,8 +479,12 @@ export async function syncToutiaoMetrics(accountId: string): Promise<{ ok: boole
     + `&device_platform=pc&platform_id=0&visited_uid=${info.user_id}&count=20&keyword=&app_id=1231`
     + '&client_extra_params=%7B%22category%22%3A%22mp_all%22%2C%22real_app_id%22%3A%221231%22%2C%22need_forward%22%3A%22true%22%2C%22offset_mode%22%3A%221%22%2C%22page_index%22%3A%22REPLACE_PAGE%22%2C%22status%22%3A%228%22%2C%22source%22%3A%220%22%7D';
 
-  const byId = new Map<string, { title: string; views: number; clicks: number; likes: number; comments: number; collects: number; shares: number }>();
+  const byId = new Map<
+    string,
+    { title: string; views: number; impressions: number; clicks: number; likes: number; comments: number; collects: number; shares: number; hasVideo: boolean; body: string; topics: string }
+  >();
   let consecutiveEmpty = 0;
+  let skippedNotPublic = 0;
   for (let i = 0; i < 200; i++) {
     const res = await fetchJson(base.replace("REPLACE_PAGE", String(i + 1)) + `&offset=${byId.size}`);
     if (res.expired) {
@@ -359,6 +494,12 @@ export async function syncToutiaoMetrics(accountId: string): Promise<{ ok: boole
     const cells = (res.json?.data || []).map((d: any) => d?.assembleCell?.itemCell).filter(Boolean);
     let added = 0;
     for (const cell of cells) {
+      // 只统计「当前公开可见」的内容：itemStatus=20 为已发布且对外可见，
+      // 10/25/40 等为草稿 / 审核未通过 / 已下架，接口仍会返回但不该计入效果数据。
+      if (Number(cell?.articleBase?.itemStatus ?? -1) !== 20) {
+        skippedNotPublic++;
+        continue;
+      }
       const urls = [cell?.shareInfo?.shareURL, cell?.articleBase?.articleURL].filter(Boolean).join(" ");
       const m = /\/(?:a|i)(\d{10,})\/?/.exec(urls) || /thread\/(\d{10,})/.exec(urls);
       if (!m || byId.has(m[1])) continue;
@@ -370,12 +511,20 @@ export async function syncToutiaoMetrics(accountId: string): Promise<{ ok: boole
       ).slice(0, 120);
       byId.set(m[1], {
         title,
+        // 阅读（图文 readCount）+ 播放（视频 videoWatchCount）
         views: Number(c.readCount || 0) + Number(c.videoWatchCount || 0),
-        clicks: Number(c.showCount || 0),
+        // showCount 是「展现量」（推荐曝光数），不是点击量，另行存字段
+        impressions: Number(c.showCount || 0),
+        // 头条号后台不提供真实点击数，置 0 避免与展现量混淆
+        clicks: 0,
         likes: Number(c.diggCount || 0),
         comments: Number(c.commentCount || 0),
         collects: Number(c.repinCount || 0),
         shares: 0,
+        // 图文（微头条）的正文就在 feed 里；视频没有可拆解的文本
+        hasVideo: !!cell.containsElements?.hasVideo,
+        body: stripHtml(cell.articleBase?.content || cell.richContentInfo?.richContent || ""),
+        topics: extractToutiaoTopics(cell),
       });
       added++;
     }
@@ -396,12 +545,45 @@ export async function syncToutiaoMetrics(accountId: string): Promise<{ ok: boole
   for (const [contentKey, row] of byId) {
     await upsertContentMetric({ platform: "toutiao", contentKey, accountId, ...row });
   }
+  // 原文入库：图文（微头条）的正文 feed 里就有，存下来供拆解使用；
+  // 视频没有可拆解的文本，不写原文记录（前端据此禁用拆解）。
+  let bodies = 0;
+  for (const [contentKey, row] of byId) {
+    if (row.hasVideo) continue;
+    if (row.body.length < 15) continue;
+    const payload = {
+      title: row.title.slice(0, 500),
+      body: row.body.slice(0, 20000),
+      topics: row.topics || null,
+      author: null,
+      source: "feed",
+      fetchedAt: new Date(),
+    };
+    await prisma.contentSource.upsert({
+      where: { platform_contentKey: { platform: "toutiao", contentKey } },
+      update: payload,
+      create: { platform: "toutiao", contentKey, ...payload },
+    });
+    bodies++;
+  }
+  // 已删除 / 下架的内容本次不再出现，清掉历史残留，避免效果数据虚高
+  const removed = await pruneStaleMetrics("toutiao", accountId, [...byId.keys()]);
   const totalViews = [...byId.values()].reduce((s, r) => s + r.views, 0);
+  const totalImpressions = [...byId.values()].reduce((s, r) => s + r.impressions, 0);
+  const extra = [
+    bodies > 0 ? `原文 ${bodies} 篇` : "",
+    skippedNotPublic > 0 ? `已排除 ${skippedNotPublic} 条非公开内容` : "",
+    removed > 0 ? `清理 ${removed} 条已下架残留` : "",
+  ].filter(Boolean).join("；");
   await prisma.platformAccount.update({
     where: { id: accountId },
-    data: { lastSyncAt: new Date(), status: "active", statusMsg: `同步成功（${byId.size} 条内容，阅读+播放 ${totalViews}）` },
+    data: {
+      lastSyncAt: new Date(),
+      status: "active",
+      statusMsg: `同步成功（${byId.size} 条公开内容，阅读+播放 ${totalViews}，展现 ${totalImpressions}）${extra ? "；" + extra : ""}`,
+    },
   });
-  return { ok: true, message: `头条号数据同步完成：${byId.size} 条内容`, items: byId.size };
+  return { ok: true, message: `头条号数据同步完成：${byId.size} 条公开可见内容${extra ? "（" + extra + "）" : ""}`, items: byId.size };
 }
 
 async function markAccountError(accountId: string, msg: string) {

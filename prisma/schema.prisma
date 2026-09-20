@@ -129,16 +129,53 @@ model PlatformContentMetric {
   title      String
   category   String?
   metricDate String           // yyyy-MM-dd，数据所属日
-  views      Int              @default(0)
-  clicks     Int              @default(0)
-  likes      Int              @default(0)
-  comments   Int              @default(0)
-  collects   Int              @default(0)
-  shares     Int              @default(0)
-  createdAt  DateTime         @default(now())
-  updatedAt  DateTime         @updatedAt
+  views       Int              @default(0)
+  impressions Int              @default(0) // 展现量（头条号 showCount）；小红书/官网平台不提供时为 0
+  clicks      Int              @default(0) // 点击量（仅官网有真实统计；小红书/头条号平台不提供）
+  likes       Int              @default(0)
+  comments    Int              @default(0)
+  collects    Int              @default(0)
+  shares      Int              @default(0)
+  visible     Boolean          @default(true) // 该内容当前是否仍公开可见（同步时不在公开列表里的会被移除）
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
   @@unique([platform, contentKey, metricDate])
   @@index([platform, metricDate])
+}
+
+/// 内容原文（爆款拆解必须基于真实原文，不做通用推断）
+/// 采集时抓取图文内容的正文存这里；视频等无文字内容不写记录。
+model ContentSource {
+  id         String   @id @default(cuid())
+  platform   String // site | xhs | toutiao
+  contentKey String // 与 PlatformContentMetric.contentKey 对应
+  title      String
+  body       String // 正文全文（含话题标签）
+  topics     String? // 话题标签，逗号分隔
+  author     String?
+  source     String   @default("collector") // collector(CDP) | feed | content-item
+  fetchedAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  @@unique([platform, contentKey])
+  @@index([platform])
+}
+
+/// 爆款内容拆解（效果分析触发，AI 拆解 + 人工二次编辑，供每日内容生产任务参考）
+model ContentBreakdown {
+  id            String   @id @default(cuid())
+  platform      String   // site | xhs | toutiao
+  contentKey    String   // 平台侧内容标识（与 PlatformContentMetric.contentKey 对应）
+  title         String
+  category      String?
+  metricViews   Int      @default(0) // 拆解时的阅读/播放量（爆款上下文）
+  aiBreakdown   String   // AI 生成的结构化拆解（Markdown）
+  editedBreakdown String? // 人工二次编辑后的版本（null 表示未编辑）
+  status        String   @default("draft") // draft | edited | active
+  usedByCron    Boolean  @default(false)   // 是否已纳入每日任务参考文件
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  @@unique([platform, contentKey])
+  @@index([status])
 }
 
 /// 平台站点级流量（按天 PV/UV）

@@ -320,12 +320,9 @@
   .acct-top{display:flex;align-items:center;gap:12px;}
   .plat-ico{display:grid;width:42px;height:42px;place-items:center;border-radius:13px;flex:0 0 auto;
     color:#fff;font-weight:900;font-size:15px;box-shadow:0 6px 14px rgba(31,64,109,.16);}
+  .plat-site{background:linear-gradient(135deg,#4d94ff,#155bd4);}
   .plat-xhs{background:linear-gradient(135deg,#ff4d67,#d9163a);}
-  .plat-wechat{background:linear-gradient(135deg,#33bd72,#12964b);}
-  .plat-finder{background:linear-gradient(135deg,#ffb057,#f2691e);}
-  .plat-douyin{background:linear-gradient(135deg,#4b5563,#111827);}
-  .plat-kuaishou{background:linear-gradient(135deg,#ff8a3d,#e34a00);}
-  .plat-bili{background:linear-gradient(135deg,#3cc3f0,#0d95c9);}
+  .plat-toutiao{background:linear-gradient(135deg,#ff5f5f,#d92b2b);}
   .acct-plat{font-size:15px;font-weight:900;}
   .acct-uid{font-size:12px;color:var(--muted);margin-top:3px;word-break:break-all;}
   .acct-top .pill{margin-left:auto;flex:0 0 auto;}
@@ -398,8 +395,8 @@
 
   .seg.seg-plat button{display:inline-flex;align-items:center;gap:6px;}
   .seg-plat .dot{display:inline-block;width:7px;height:7px;border-radius:50%;flex:0 0 auto;}
-  .dot-xhs{background:#d9163a;} .dot-wechat{background:#12964b;}
-  .dot-douyin{background:#111827;} .dot-finder{background:#f2691e;}
+  .dot-site{background:#2b7cff;} .dot-xhs{background:#d9163a;}
+  .dot-toutiao{background:#e33b3b;}
 
   .cmp-wrap{border:1px solid var(--line);border-radius:13px;overflow:hidden;background:#fff;}
   .cmp-cols{display:grid;grid-template-columns:1.6fr .95fr .95fr 1fr .85fr 1.05fr 1.15fr;gap:10px;align-items:center;}
@@ -881,9 +878,9 @@
       <!-- ---------- View: 平台授权管理 ---------- -->
       <div id="viewAccounts" class="hidden">
         <div class="stats">
-          <div class="stat"><div class="k">已开通账号</div><div class="v" id="statAcct">3<small>个</small></div></div>
-          <div class="stat"><div class="k">可对接平台</div><div class="v">6<small>个</small></div></div>
-          <div class="stat"><div class="k">即将到期</div><div class="v" style="color:var(--warning)">1<small>个</small></div></div>
+          <div class="stat"><div class="k">已开通账号</div><div class="v" id="statAcct">1<small>个</small></div></div>
+          <div class="stat"><div class="k">可对接平台</div><div class="v">2<small>个</small></div></div>
+          <div class="stat"><div class="k">即将到期</div><div class="v" style="color:var(--warning)">0<small>个</small></div></div>
           <div class="stat"><div class="k">异常 / 掉线</div><div class="v" style="color:var(--success)">0<small>个</small></div></div>
         </div>
 
@@ -1033,10 +1030,9 @@
               </label>
               <div class="seg seg-plat" id="platSeg">
                 <button class="on" data-plat="all" onclick="setAnaPlat('all',this)">全部</button>
+                <button data-plat="site" onclick="setAnaPlat('site',this)"><i class="dot dot-site"></i>官网</button>
                 <button data-plat="xhs" onclick="setAnaPlat('xhs',this)"><i class="dot dot-xhs"></i>小红书</button>
-                <button data-plat="wechat" onclick="setAnaPlat('wechat',this)"><i class="dot dot-wechat"></i>公众号</button>
-                <button data-plat="douyin" onclick="setAnaPlat('douyin',this)"><i class="dot dot-douyin"></i>抖音</button>
-                <button data-plat="finder" onclick="setAnaPlat('finder',this)"><i class="dot dot-finder"></i>视频号</button>
+                <button data-plat="toutiao" onclick="setAnaPlat('toutiao',this)"><i class="dot dot-toutiao"></i>头条号</button>
               </div>
             </div>
           </div>
@@ -1567,15 +1563,7 @@
   let ACCOUNTS = [
     { id:1, plat:"小红书", c:"xhs", letter:"书", sub:"金润瀚宇", uid:"XHS_88231024",
       status:"ok", stText:"已开通", bind:"2026-07-02", expire:"2027-07-02", data:"粉丝 1,284" },
-    { id:2, plat:"微信公众号", c:"wechat", letter:"微", sub:"金润瀚宇", uid:"gh_9f3c2a71b8d4",
-      status:"ok", stText:"已开通", bind:"2026-06-18", expire:"长期有效", data:"关注 362" },
-    { id:3, plat:"微信视频号", c:"finder", letter:"视", sub:"金润瀚宇", uid:"Finder_77210394",
-      status:"warn", stText:"即将到期", bind:"2026-03-11", expire:"2026-10-05", data:"粉丝 418" },
-    { id:4, plat:"抖音", c:"douyin", letter:"抖", sub:"—", uid:"—",
-      status:"off", stText:"未开通", bind:"—", expire:"—", data:"—" },
-    { id:5, plat:"快手", c:"kuaishou", letter:"快", sub:"—", uid:"—",
-      status:"off", stText:"未开通", bind:"—", expire:"—", data:"—" },
-    { id:6, plat:"B 站", c:"bili", letter:"B", sub:"—", uid:"—",
+    { id:2, plat:"头条号", c:"toutiao", letter:"头", sub:"—", uid:"—",
       status:"off", stText:"未开通", bind:"—", expire:"—", data:"—" }
   ];
   function pillFor(status, text){
@@ -1622,8 +1610,7 @@
           <div class="field full">
             <label>选择平台</label>
             <select id="bindPlat">
-              <option>小红书</option><option>微信公众号</option><option>微信视频号</option>
-              <option>抖音</option><option>快手</option><option>B 站</option>
+              <option>小红书</option><option>头条号</option>
             </select>
           </div>
           <div class="field full">
@@ -1881,23 +1868,22 @@
 
   /* ---------- 效果分析 ---------- */
   const PLAT = {
+    site:   { name:'官网',   dot:'#2b7cff' },
     xhs:    { name:'小红书', dot:'#d9163a' },
-    wechat: { name:'公众号', dot:'#12964b' },
-    douyin: { name:'抖音',   dot:'#111827' },
-    finder: { name:'视频号', dot:'#f2691e' }
+    toutiao:{ name:'头条号', dot:'#e33b3b' }
   };
   const RANGE_FACTOR = { '7d':0.32, '30d':1, '90d':2.55 };
   const RANGE_LABEL  = { '7d':'近 7 天', '30d':'近 30 天', '90d':'近 90 天' };
 
   let POSTS = [
     { id:1, title:'我妈的微信里，存着我爸最后一条语音', plat:'xhs',    type:'图文', time:'09-16 20:30', reads:128600, plays:0,      clicks:9420,  orders:318, gmv:28620, viral:true  },
-    { id:2, title:'72岁奶奶第一次用手机拍视频，孙子看哭了', plat:'douyin', type:'视频', time:'09-15 19:00', reads:0,      plays:486000, clicks:21400, orders:642, gmv:57780, viral:true  },
-    { id:3, title:'AI帮我写完了爸爸的一生',             plat:'wechat', type:'图文', time:'09-14 08:00', reads:43200,  plays:0,      clicks:3180,  orders:126, gmv:11340, viral:false },
-    { id:4, title:'把外婆的旧照片做成会动的回忆',       plat:'finder', type:'视频', time:'09-13 21:10', reads:0,      plays:158000, clicks:8600,  orders:236, gmv:21240, viral:false },
+    { id:2, title:'72岁奶奶第一次用手机拍视频，孙子看哭了', plat:'toutiao', type:'视频', time:'09-15 19:00', reads:0,      plays:486000, clicks:21400, orders:642, gmv:57780, viral:true  },
+    { id:3, title:'AI帮我写完了爸爸的一生',             plat:'site',   type:'图文', time:'09-14 08:00', reads:43200,  plays:0,      clicks:3180,  orders:126, gmv:11340, viral:false },
+    { id:4, title:'把外婆的旧照片做成会动的回忆',       plat:'toutiao', type:'视频', time:'09-13 21:10', reads:0,      plays:158000, clicks:8600,  orders:236, gmv:21240, viral:false },
     { id:5, title:'1987年那场婚礼，爸爸只留下这一张照片', plat:'xhs',    type:'图文', time:'09-12 20:00', reads:96500,  plays:0,      clicks:7240,  orders:264, gmv:23760, viral:true  },
-    { id:6, title:'给妈妈做了一本会说话的相册',         plat:'douyin', type:'视频', time:'09-11 18:30', reads:0,      plays:224000, clicks:11200, orders:388, gmv:34920, viral:true  },
-    { id:7, title:'AI回忆录，让父母的故事被听见',       plat:'wechat', type:'图文', time:'09-10 09:00', reads:18600,  plays:0,      clicks:1240,  orders:44,  gmv:3960,  viral:false },
-    { id:8, title:'爸爸的军装照，我用AI修复了',         plat:'finder', type:'视频', time:'09-09 20:20', reads:0,      plays:112000, clicks:6100,  orders:158, gmv:14220, viral:false }
+    { id:6, title:'给妈妈做了一本会说话的相册',         plat:'toutiao', type:'视频', time:'09-11 18:30', reads:0,      plays:224000, clicks:11200, orders:388, gmv:34920, viral:true  },
+    { id:7, title:'AI回忆录，让父母的故事被听见',       plat:'site',   type:'图文', time:'09-10 09:00', reads:18600,  plays:0,      clicks:1240,  orders:44,  gmv:3960,  viral:false },
+    { id:8, title:'爸爸的军装照，我用AI修复了',         plat:'toutiao', type:'视频', time:'09-09 20:20', reads:0,      plays:112000, clicks:6100,  orders:158, gmv:14220, viral:false }
   ];
 
   let anaRange = '30d', anaPlat = 'all', viralOnly = false;
@@ -1931,7 +1917,7 @@
       RANGE_LABEL[anaRange] + ' · 按平台汇总投放内容的阅读 / 播放 / 点击与转化';
 
     /* 各平台对比（始终展示全部平台，当前筛选平台高亮） */
-    const groups = ['xhs','wechat','douyin','finder'].map(id => {
+    const groups = ['site','xhs','toutiao'].map(id => {
       const g = rows.filter(p => p.plat === id);
       const c = sumBy(g,'clicks'), o = sumBy(g,'orders');
       return { id, name:PLAT[id].name, dot:PLAT[id].dot, count:g.length,
