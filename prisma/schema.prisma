@@ -19,6 +19,9 @@ model User {
   contentItems   ContentItem[]
   openClawTasks  OpenClawTask[]
   knowledgeBases KnowledgeBase[]
+  platformAccounts       PlatformAccount[]
+  platformSiteMetrics    PlatformSiteMetric[]
+  platformContentMetrics PlatformContentMetric[]
 }
 
 model WechatBinding {
@@ -101,27 +104,31 @@ model PublishRecord {
   createdAt      DateTime    @default(now())
 }
 
-/// 平台授权账号（官网渠道免授权；小红书/头条号以创作者后台 Cookie 授权）
+/// 平台授权账号（按登录用户隔离；官网/小红书/头条号各自授权，凭据加密存储）
 model PlatformAccount {
   id            String    @id @default(cuid())
+  userId        String    // 归属登录用户
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   platform      String    // site | xhs | toutiao
-  displayName   String    // 平台侧账号昵称 / 名称
-  externalId    String?   // 平台侧用户/账号 ID
-  credentialEnc String?   // AES-256-GCM 加密的凭据（Cookie）
+  displayName   String    // 平台侧账号昵称 / 名称（官网为域名）
+  externalId    String?   // 平台侧用户/账号 ID（官网为 null）
+  credentialEnc String?   // AES-256-GCM 加密的凭据（小红书/头条号=Cookie；官网={domain,token} JSON）
   status        String    @default("active") // active | expired | error
   statusMsg     String?   // 最近一次校验/同步结果说明
-  boundBy       String?   // 绑定人（账号手机号）
+  boundBy       String?   // 绑定人（账号手机号，便于展示）
   lastSyncAt    DateTime?
   lastVerifyAt  DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   metrics       PlatformContentMetric[]
-  @@unique([platform, externalId])
+  @@unique([userId, platform])
 }
 
-/// 平台内容效果数据（按天、按内容；官网数据每日覆盖更新）
+/// 平台内容效果数据（按天、按内容；按登录用户隔离）
 model PlatformContentMetric {
   id         String           @id @default(cuid())
+  userId     String           // 归属登录用户（解绑账号时仍保留，避免效果数据丢失）
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   account    PlatformAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
   accountId  String?
   platform   String           // site | xhs | toutiao
@@ -129,26 +136,65 @@ model PlatformContentMetric {
   title      String
   category   String?
   metricDate String           // yyyy-MM-dd，数据所属日
-  views      Int              @default(0)
-  clicks     Int              @default(0)
-  likes      Int              @default(0)
-  comments   Int              @default(0)
-  collects   Int              @default(0)
-  shares     Int              @default(0)
-  createdAt  DateTime         @default(now())
-  updatedAt  DateTime         @updatedAt
-  @@unique([platform, contentKey, metricDate])
+  views       Int              @default(0)
+  impressions Int              @default(0) // 展现量（头条号 showCount）；小红书/官网平台不提供时为 0
+  clicks      Int              @default(0) // 点击量（仅官网有真实统计；小红书/头条号平台不提供）
+  likes       Int              @default(0)
+  comments    Int              @default(0)
+  collects    Int              @default(0)
+  shares      Int              @default(0)
+  visible     Boolean          @default(true) // 该内容当前是否仍公开可见（同步时不在公开列表里的会被移除）
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  @@unique([userId, platform, contentKey, metricDate])
   @@index([platform, metricDate])
 }
 
-/// 平台站点级流量（按天 PV/UV）
+/// 内容原文（爆款拆解必须基于真实原文，不做通用推断）
+/// 采集时抓取图文内容的正文存这里；视频等无文字内容不写记录。
+model ContentSource {
+  id         String   @id @default(cuid())
+  platform   String // site | xhs | toutiao
+  contentKey String // 与 PlatformContentMetric.contentKey 对应
+  title      String
+  body       String // 正文全文（含话题标签）
+  topics     String? // 话题标签，逗号分隔
+  author     String?
+  source     String   @default("collector") // collector(CDP) | feed | content-item
+  fetchedAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  @@unique([platform, contentKey])
+  @@index([platform])
+}
+
+/// 爆款内容拆解（效果分析触发，AI 拆解 + 人工二次编辑，供每日内容生产任务参考）
+model ContentBreakdown {
+  id            String   @id @default(cuid())
+  platform      String   // site | xhs | toutiao
+  contentKey    String   // 平台侧内容标识（与 PlatformContentMetric.contentKey 对应）
+  title         String
+  category      String?
+  metricViews   Int      @default(0) // 拆解时的阅读/播放量（爆款上下文）
+  aiBreakdown   String   // AI 生成的结构化拆解（Markdown）
+  editedBreakdown String? // 人工二次编辑后的版本（null 表示未编辑）
+  status        String   @default("draft") // draft | edited | active
+  usedByCron    Boolean  @default(false)   // 是否已纳入每日任务参考文件
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  @@unique([platform, contentKey])
+  @@index([status])
+}
+
+/// 平台站点级流量（按天 PV/UV，按登录用户隔离）
 model PlatformSiteMetric {
   id         String @id @default(cuid())
+  userId     String // 归属登录用户
+  user       User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   platform   String // site | xhs | toutiao
   metricDate String // yyyy-MM-dd
   pv         Int    @default(0)
   uv         Int    @default(0)
-  @@unique([platform, metricDate])
+  @@unique([userId, platform, metricDate])
 }
 
 /// RAG 知识库

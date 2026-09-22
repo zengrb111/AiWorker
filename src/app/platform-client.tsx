@@ -110,13 +110,14 @@ const hotTopicPrompts = ["今日全网热点", "今日产品热点", "今日全�
 /** 内容库瀑布流每页展示条数（滚到底部自动再加载一页）。 */
 const LIBRARY_PAGE_SIZE = 12;
 
-/** 内容库类型筛选项：全部 / 小红书 / 公众号 / 视频 / 其他。 */
-type ContentKind = "xhs" | "wechat" | "video" | "other";
+/** 内容库类型筛选项：全部 / 小红书 / 公众号 / 头条号 / 视频 / 其他。 */
+type ContentKind = "xhs" | "wechat" | "toutiao" | "video" | "other";
 type ContentFilterKey = "all" | ContentKind;
 const contentFilterOptions: Array<{ key: ContentFilterKey; label: string }> = [
   { key: "all", label: "全部" },
   { key: "xhs", label: "小红书" },
   { key: "wechat", label: "公众号" },
+  { key: "toutiao", label: "头条号" },
   { key: "video", label: "视频" },
   { key: "other", label: "其他" }
 ];
@@ -127,6 +128,7 @@ function contentKindOf(item: ContentItem): ContentKind {
   const category = item.category ?? "";
   if (category.includes("小红书")) return "xhs";
   if (category.includes("公众号") || category.includes("微信")) return "wechat";
+  if (category.includes("头条")) return "toutiao";
   return "other";
 }
 
@@ -137,6 +139,8 @@ function contentKindMeta(item: ContentItem): { label: string; tagClass: string }
       return { label: item.category || "小红书", tagClass: "tag-xhs" };
     case "wechat":
       return { label: item.category || "公众号文章", tagClass: "tag-wechat" };
+    case "toutiao":
+      return { label: item.category || "头条号", tagClass: "tag-toutiao" };
     case "video":
       return { label: item.category || "视频", tagClass: "tag-video" };
     default:
@@ -401,6 +405,7 @@ export default function PlatformClient() {
   const [editingTitle, setEditingTitle] = useState("");
   const [contentSaving, setContentSaving] = useState(false);
   const [publishingContent, setPublishingContent] = useState(false);
+  const [publishingHealing, setPublishingHealing] = useState(false);
   const [regeneratingImage, setRegeneratingImage] = useState<string | null>(null);
   const [wechatBinding, setWechatBinding] = useState<WechatBinding | null>(null);
   const [profileQr, setProfileQr] = useState<QrData | null>(null);
@@ -411,6 +416,8 @@ export default function PlatformClient() {
   // 模型选择：当前会话实际使用的模型 + 网关可用模型列表
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [currentModel, setCurrentModel] = useState<CurrentModel>(null);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState("");
   const [switchingModel, setSwitchingModel] = useState(false);
   const [modelNotice, setModelNotice] = useState<{ text: string; status: "running" | "done" | "error" } | null>(null);
   const [oldPassword, setOldPassword] = useState("");
@@ -496,15 +503,26 @@ export default function PlatformClient() {
     void refreshMe();
   }, []);
 
-  /** 拉取网关模型列表与当前会话实际使用的模型。 */
+  /**
+   * 拉取网关模型列表与当前会话实际使用的模型。
+   * 网关可能比页面晚起来（本地开发常见），所以失败时记下原因，
+   * 供「选择模型」面板在打开时重试——不能只拉一次就静默放弃。
+   */
   async function loadModels() {
+    if (modelsLoading) return;
+    setModelsLoading(true);
     try {
       const data = await api<{ current: CurrentModel; models: ModelOption[] }>("/api/models", undefined, 30000);
-      setModelOptions(data.models);
+      setModelOptions(data.models ?? []);
       setCurrentModel(data.current);
+      setModelsError("");
     } catch (error) {
-      // 模型信息拿不到不影响主流程，静默处理
+      // 模型信息拿不到不影响主流程，但要把原因显示出来，否则用户只看到空列表
+      const text = error instanceof Error ? error.message : String(error);
+      setModelsError(text);
       console.warn("[models] 加载模型列表失败：", error);
+    } finally {
+      setModelsLoading(false);
     }
   }
 
@@ -557,6 +575,7 @@ export default function PlatformClient() {
       all: contentItems.length,
       xhs: 0,
       wechat: 0,
+      toutiao: 0,
       video: 0,
       other: 0
     };
@@ -1438,6 +1457,29 @@ export default function PlatformClient() {
     }
   }
 
+  /** 把当前这篇图文推送到 AI回忆录官网「心灵驿站」频道（aimemory.cafe/healing.html）。 */
+  async function publishToHealing() {
+    if (!activeContent || publishingHealing) return;
+    setPublishingHealing(true);
+    setCopiedButton(null);
+    setCopyHint("");
+    try {
+      const data = await api<{ skipped?: boolean; message?: string; title: string }>(
+        `/api/content/${activeContent.id}/publish`,
+        { method: "POST", body: JSON.stringify({ channel: "healing" }) }
+      );
+      if (data.skipped) {
+        showCopyHint(data.message || "该内容已推送到心灵驿站。");
+      } else {
+        showCopyHint(data.message || "已推送到官网心灵驿站");
+      }
+    } catch (error) {
+      showCopyHint(error instanceof Error ? error.message : "推送失败。");
+    } finally {
+      setPublishingHealing(false);
+    }
+  }
+
   async function ensureProfileQr() {
     if (profileQrLoading) return;
     setProfileQrLoading(true);
@@ -1881,6 +1923,9 @@ export default function PlatformClient() {
                           busy={sending}
                           onSwitch={handleSwitchModel}
                           onModelsChanged={setModelOptions}
+                          onRefresh={loadModels}
+                          refreshing={modelsLoading}
+                          errorText={modelsError}
                         />
                         {sending ? (
                           <button type="button" className="stop-button" onClick={stopGeneration}>停止</button>
@@ -1978,6 +2023,14 @@ export default function PlatformClient() {
                     title="发布到官网好物推荐板块（hgwx.aimemory.cafe）"
                   >
                     {publishingContent ? "发布中..." : "发布官网"}
+                  </button>
+                  <button
+                    className="publish-site-button publish-healing-button"
+                    disabled={publishingHealing}
+                    onClick={() => void publishToHealing()}
+                    title="推送到 AI回忆录官网「心灵驿站」频道（aimemory.cafe/healing.html），需先在「平台授权管理」配置官网 + 心灵驿站令牌"
+                  >
+                    {publishingHealing ? "推送中..." : "推送心灵驿站"}
                   </button>
                   {editingContent === "title" ? (
                     <button onClick={saveContentEdit} disabled={contentSaving}>{contentSaving ? "保存中..." : "保存"}</button>

@@ -42,10 +42,33 @@ function formatTime(iso: string): string {
   });
 }
 
+type DateFilter = "all" | "today" | "7d" | "30d";
+
+const DATE_FILTERS: { key: DateFilter; label: string }[] = [
+  { key: "all", label: "全部" },
+  { key: "today", label: "今天" },
+  { key: "7d", label: "最近7天" },
+  { key: "30d", label: "最近30天" }
+];
+
+function inRange(iso: string, f: DateFilter): boolean {
+  const t = new Date(iso).getTime();
+  if (f === "all") return true;
+  const now = Date.now();
+  if (f === "today") {
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    return t >= start.getTime();
+  }
+  const days = f === "7d" ? 7 : 30;
+  return t >= now - days * 86400000;
+}
+
 export default function PublishPanel({ resetToken }: { resetToken: number }) {
   const [records, setRecords] = useState<PublishRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [filter, setFilter] = useState<DateFilter>("today");
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -70,8 +93,9 @@ export default function PublishPanel({ resetToken }: { resetToken: number }) {
     void refresh();
   }, [refresh, resetToken]);
 
-  const successCount = records.filter((r) => r.status === "SUCCESS").length;
-  const failedCount = records.length - successCount;
+  const filtered = records.filter((r) => inRange(r.publishedAt, filter));
+  const successCount = filtered.filter((r) => r.status === "SUCCESS").length;
+  const failedCount = filtered.length - successCount;
 
   return (
     <div className="pub-root">
@@ -93,7 +117,7 @@ export default function PublishPanel({ resetToken }: { resetToken: number }) {
       <div className="pub-stats">
         <div className="pub-stat">
           <div className="k">发布总数</div>
-          <div className="v">{records.length}</div>
+          <div className="v">{filtered.length}</div>
         </div>
         <div className="pub-stat">
           <div className="k">成功</div>
@@ -107,6 +131,22 @@ export default function PublishPanel({ resetToken }: { resetToken: number }) {
 
       {error && <div className="pub-alert">{error}</div>}
 
+      <div className="ana-chips pub-filter-bar">
+        {DATE_FILTERS.map((f) => {
+          const count = records.filter((r) => inRange(r.publishedAt, f.key)).length;
+          return (
+            <button
+              key={f.key}
+              className={`ana-chip ${filter === f.key ? "on" : ""}`}
+              onClick={() => setFilter(f.key)}
+            >
+              {f.label}
+              <span className="ana-chip-n">{count}</span>
+            </button>
+          );
+        })}
+      </div>
+
       {loading && records.length === 0 ? (
         <div className="pub-empty">正在加载发布记录…</div>
       ) : records.length === 0 ? (
@@ -115,6 +155,8 @@ export default function PublishPanel({ resetToken }: { resetToken: number }) {
           <p>还没有发布记录。</p>
           <p className="pub-empty-hint">在内容库打开一篇图文点「发布官网」，或等每日定时任务自动发布后，这里会显示记录。</p>
         </div>
+      ) : filtered.length === 0 ? (
+        <div className="pub-empty">所选时间范围内没有发布记录。</div>
       ) : (
         <div className="pub-list">
           <div className="pub-head">
@@ -124,7 +166,7 @@ export default function PublishPanel({ resetToken }: { resetToken: number }) {
             <span className="col-time">发布时间</span>
             <span className="col-status">状态</span>
           </div>
-          {records.map((record) => (
+          {filtered.map((record) => (
             <div key={record.id} className={`pub-row ${record.status === "FAILED" ? "failed" : ""}`} title={record.error || record.title}>
               <span className="col-title">
                 <span className="pub-row-title">{record.title}</span>

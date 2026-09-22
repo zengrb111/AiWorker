@@ -2,16 +2,21 @@ import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { HGWX_CHANNEL, publishContentToHgwx, type HgwxPublishOptions } from "@/lib/hgwx-publish";
+import { HEALING_CHANNEL, publishContentToHealing, type HealingPublishOptions } from "@/lib/healing-publish";
 
 /**
  * POST /api/content/[id]/publish —— 把一条内容库条目发布到指定渠道。
  *
- * 目前支持的渠道：官网好物推荐（hgwx.aimemory.cafe）。
+ * 支持的渠道：
+ * - 官网好物推荐（hgwx.aimemory.cafe）：channel = "hgwx"（默认）
+ * - 官网心灵驿站（aimemory.cafe）：channel = "healing"（需先在「平台授权管理」配置官网为 aimemory.cafe + 心灵驿站令牌）
+ *
  * 请求体（均可选）：{ "channel": "hgwx", "hgwxCategory": "产品热点", "badge": "今日必看", "force": false }
  */
 export const dynamic = "force-dynamic";
 
-const SUPPORTED_CHANNELS = new Set([HGWX_CHANNEL, "hgwx"]);
+const HGWX_CHANNELS = new Set([HGWX_CHANNEL, "hgwx"]);
+const HEALING_CHANNELS = new Set([HEALING_CHANNEL, "healing", "xinling"]);
 
 export async function POST(request: Request, context: { params: { id: string } }) {
   const user = await requireUser();
@@ -19,11 +24,8 @@ export async function POST(request: Request, context: { params: { id: string } }
     return jsonError("未登录。", 401);
   }
 
-  const body = await readJson<{ channel?: string } & HgwxPublishOptions>(request);
+  const body = await readJson<{ channel?: string } & HgwxPublishOptions & HealingPublishOptions>(request);
   const channel = (body.channel || HGWX_CHANNEL).trim();
-  if (!SUPPORTED_CHANNELS.has(channel)) {
-    return jsonError(`暂不支持的发布渠道：${channel}（当前仅支持「官网好物推荐」）。`);
-  }
 
   const contentItem = await prisma.contentItem.findFirst({
     where: { id: context.params.id, userId: user.id },
@@ -34,6 +36,19 @@ export async function POST(request: Request, context: { params: { id: string } }
   }
 
   try {
+    if (HEALING_CHANNELS.has(channel)) {
+      const result = await publishContentToHealing(contentItem.id, user.id, user.phone, {
+        category: body.category,
+        publishedAt: body.publishedAt,
+        force: body.force
+      });
+      return jsonOk(result);
+    }
+
+    if (!HGWX_CHANNELS.has(channel)) {
+      return jsonError(`暂不支持的发布渠道：${channel}（支持「官网好物推荐」与「官网心灵驿站」）。`);
+    }
+
     const result = await publishContentToHgwx(contentItem.id, user.phone, {
       hgwxCategory: body.hgwxCategory,
       badge: body.badge,

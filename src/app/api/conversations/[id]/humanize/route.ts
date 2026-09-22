@@ -81,7 +81,7 @@ export async function POST(request: Request, context: { params: { id: string } }
         }));
 
         const result = await openClawClient.sendTaskStream(
-          prompt,
+          { message: prompt, prompt, userId: user.id },
           (deltaText) => controller.enqueue(sseEncode({ type: "delta", text: deltaText }))
         );
 

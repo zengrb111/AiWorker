@@ -26,3 +26,13 @@ public/videos/
 .xhs-cookie.txt
 
 .toutiao-cookie.txt
+
+# 根目录调试残留（截图脚本输出、tsc 临时输出、探针脚本等）：
+# 忽略根目录下所有点开头文件；已被跟踪的 .gitignore/.env.example/.eslintrc.json 不受影响
+/.??*
+!/.env.example
+!/.eslintrc.json
+!/.gitignore
+*.tmp
+*.out
+*.err

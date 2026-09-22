@@ -226,3 +226,46 @@ export async function retrieveReferenceChunks(queries: string[], ctx: KbContext,
     })
     .join("\n\n");
 }
+
+export type ReferenceHit = {
+  id: string;
+  kbName: string;
+  filename: string;
+  score: number;
+  snippet: string;
+  content: string;
+};
+
+export type ReferenceGroup = {
+  label: string;
+  query: string;
+  hits: ReferenceHit[];
+};
+
+/**
+ * 结构化检索：按「分组」分别取 topK 命中，并保留来源元数据
+ * （知识库名 / 文档名 / 相关度 / 片段 / 全文），供会话里把
+ * "参考了哪些知识库与 IP 人设" 的过程展示给用户看。
+ * 与 retrieveReferenceChunks 共用 scoreChunks 打分逻辑。
+ */
+export async function retrieveReferenceGroups(
+  groups: { label: string; query: string }[],
+  ctx: KbContext,
+  topK = 3
+): Promise<ReferenceGroup[]> {
+  if (!ctx || ctx.candidates.length === 0) return [];
+  const out: ReferenceGroup[] = [];
+  for (const g of groups) {
+    const { hits } = await scoreChunks(g.query, ctx.candidates, ctx.preferredModel);
+    const mapped: ReferenceHit[] = hits.slice(0, topK).map((h) => ({
+      id: h.chunk.id,
+      kbName: ctx.kbNameMap.get(h.chunk.knowledgeBaseId) ?? "未知知识库",
+      filename: ctx.filenameMap.get(h.chunk.documentId) ?? "未知文档",
+      score: Number(h.score.toFixed(4)),
+      snippet: h.chunk.content.replace(/\s+/g, " ").trim().slice(0, 90),
+      content: h.chunk.content.replace(/\s+/g, " ").trim()
+    }));
+    out.push({ label: g.label, query: g.query, hits: mapped });
+  }
+  return out;
+}

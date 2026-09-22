@@ -2099,6 +2099,11 @@ textarea:focus {
   color: #7c3aed;
 }
 
+.category-tag.tag-toutiao {
+  background: #e6f7f1;
+  color: #0d9373;
+}
+
 .category-tag.tag-other {
   background: #eef1f6;
   color: #64748b;
@@ -3076,6 +3081,20 @@ textarea:focus {
   font-size: 12px;
 }
 
+/* 列表为空时的重试入口（网关可能比页面晚起来） */
+.model-panel-retry {
+  margin-left: 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.model-panel-retry:hover { background: rgba(43, 124, 255, 0.08); }
+
 .model-option {
   display: flex;
   align-items: center;
@@ -3354,6 +3373,7 @@ textarea:focus {
 }
 
 .acct-plat-badge.site { background: linear-gradient(135deg, #4d94ff, #155bd4); }
+.acct-plat-badge.healing { background: linear-gradient(135deg, #14b8a6, #0d9488); }
 .acct-plat-badge.xhs { background: linear-gradient(135deg, #ff4d67, #d9163a); }
 .acct-plat-badge.toutiao { background: linear-gradient(135deg, #ff5f5f, #d92b2b); }
 
@@ -3436,6 +3456,7 @@ textarea:focus {
   background: #f6f9ff;
   border-radius: 10px;
   padding: 10px 12px;
+  white-space: pre-line;
 }
 
 .acct-cookie-input {
@@ -3450,6 +3471,22 @@ textarea:focus {
 }
 
 .acct-cookie-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(43, 124, 255, 0.15);
+}
+
+.acct-input {
+  width: 100%;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+}
+
+.acct-input:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(43, 124, 255, 0.15);
@@ -3594,14 +3631,23 @@ textarea:focus {
   padding: 12px 18px;
 }
 
-.pub-head.ana-head:has(.col-n:nth-child(8)),
-.pub-row.ana-row:has(.col-n:nth-child(8)) {
-  grid-template-columns: 84px minmax(0, 1fr) repeat(7, 52px);
+/* 渠道对比表：渠道 / 内容数 / 浏览 / 展现 / 点赞 / 评论 / 收藏 / 分享 */
+.pub-head.ana-head.ana-cols-summary,
+.pub-row.ana-row.ana-cols-summary {
+  grid-template-columns: 84px 56px minmax(0, 1fr) repeat(5, 54px);
 }
 
-.pub-head.ana-head:has(.col-n:nth-child(9)),
-.pub-row.ana-row:has(.col-n:nth-child(9)) {
-  grid-template-columns: 84px minmax(0, 1fr) repeat(6, 50px) 62px;
+/* 内容明细表：渠道 / 标题 / 浏览 / 展现 / 点赞 / 评论 / 收藏 / 分享 / 日期 */
+.pub-head.ana-head.ana-cols-detail,
+.pub-row.ana-row.ana-cols-detail {
+  grid-template-columns: 84px minmax(0, 1fr) repeat(6, 54px) 62px;
+}
+
+/* 平台不提供的指标显示「—」而不是 0，避免误读 */
+.pub-row.ana-row .col-n.na,
+.pub-head.ana-head .col-n.na {
+  color: var(--text-dim);
+  opacity: 0.55;
 }
 
 .pub-row.ana-row .col-n { text-align: right; font-variant-numeric: tabular-nums; }
@@ -3733,6 +3779,11 @@ textarea:focus {
 .pub-empty-card p { margin: 10px 0 0; font-size: 14px; }
 .pub-empty-hint { font-size: 12.5px !important; color: var(--muted-2); }
 
+.pub-filter-bar {
+  margin: 10px 0 2px;
+  flex-shrink: 0;
+}
+
 .pub-list {
   border-radius: 16px;
   background: var(--panel);
@@ -3838,6 +3889,17 @@ textarea:focus {
   cursor: default;
 }
 
+/* 「推送心灵驿站」按钮：与「发布官网」区分，用青绿色 */
+.publish-healing-button {
+  border-color: #0f9d8f;
+  color: #0f9d8f;
+}
+
+.publish-healing-button:hover:not(:disabled) {
+  background: #0f9d8f;
+  color: #fff;
+}
+
 @media (max-width: 900px) {
   .pub-head { display: none; }
   .pub-row {
@@ -3846,4 +3908,142 @@ textarea:focus {
     row-gap: 6px;
   }
   .col-channel, .col-publisher, .col-time { justify-self: start; }
+}
+
+/* ===== 效果分析：爆款拆解 ===== */
+.ana-tabs { display: flex; gap: 6px; }
+.ana-tab {
+  border: 1px solid var(--line-soft);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.ana-tab:hover { color: var(--text-main); }
+.ana-tab.active {
+  background: rgba(43, 124, 255, 0.1);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 标题单元格内嵌「拆解」按钮 */
+.pub-row.ana-row .col-title,
+.pub-head.ana-head .col-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.pub-row.ana-row .col-title .pub-row-title { flex: 1 1 auto; min-width: 0; }
+
+.ana-decomp-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--accent);
+  background: rgba(43, 124, 255, 0.08);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  white-space: nowrap;
+}
+.ana-decomp-btn:hover { background: var(--accent); color: #fff; }
+.ana-decomp-btn.done { border-color: var(--success); color: var(--success); background: rgba(22, 163, 74, 0.1); }
+/* 没抓到原文（视频等）时不可拆解 */
+.ana-decomp-btn.disabled {
+  border-color: var(--border);
+  color: var(--text-dim);
+  background: transparent;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.ana-decomp-btn.disabled:hover { background: transparent; color: var(--text-dim); }
+.ana-decomp-btn.done:hover { background: var(--success); color: #fff; }
+.ana-decomp-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* 拆解库列表（不同列结构） */
+.pub-head.ana-lib-head,
+.pub-row.ana-lib-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px 92px 72px 96px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 18px;
+}
+.pub-head.ana-lib-head { font-size: 12px; font-weight: 700; color: var(--muted); letter-spacing: 0.4px; }
+.pub-row.ana-lib-row .col-act { text-align: right; }
+.pub-row.ana-lib-row .col-n.strong { font-weight: 800; color: var(--text-main); text-align: right; }
+
+/* 拆解弹窗 */
+.bd-modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+.bd-modal {
+  width: min(760px, 100%);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  border-radius: 18px;
+  box-shadow: 0 30px 80px rgba(15, 23, 42, 0.3);
+  overflow: hidden;
+}
+.bd-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.bd-modal-title { font-size: 16px; font-weight: 800; color: var(--text-main); }
+.bd-modal-sub { margin-top: 4px; font-size: 12.5px; color: var(--muted); }
+.bd-modal-close {
+  border: none;
+  background: transparent;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+}
+.bd-modal-close:hover { color: var(--text-main); }
+.bd-modal-body { padding: 18px 22px; overflow-y: auto; }
+.bd-loading { padding: 40px 0; text-align: center; color: var(--muted); font-size: 13px; }
+.bd-editor {
+  width: 100%;
+  min-height: 360px;
+  resize: vertical;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  padding: 14px;
+  font-size: 13.5px;
+  line-height: 1.7;
+  font-family: "SFMono-Regular", Consolas, "PingFang SC", monospace;
+  color: var(--text-main);
+  background: var(--bg);
+  outline: none;
+}
+.bd-editor:focus { border-color: var(--accent); }
+.bd-modal-msg { padding: 0 22px 10px; font-size: 12.5px; color: #d92b2b; }
+.bd-modal-msg.ok { color: var(--success); }
+.bd-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--line-soft);
 }

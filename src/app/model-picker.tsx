@@ -16,6 +16,11 @@ type Props = {
   busy?: boolean;
   onSwitch: (modelId: string, label: string) => void;
   onModelsChanged: (models: ModelOption[]) => void;
+  /** 列表为空（或网关比页面晚起来）时，打开面板会触发重新拉取 */
+  onRefresh?: () => void;
+  refreshing?: boolean;
+  /** 上次拉取失败的原因，展示给用户 */
+  errorText?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -114,7 +119,10 @@ export default function ModelPicker({
   switching,
   busy,
   onSwitch,
-  onModelsChanged
+  onModelsChanged,
+  onRefresh,
+  refreshing,
+  errorText
 }: Props) {
   const [open, setOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
@@ -207,12 +215,22 @@ export default function ModelPicker({
   const locked = switching || Boolean(busy);
   const activePreset = findPreset(configProvider) ?? MODEL_PRESETS[0];
 
+  /**
+   * 展开面板。模型列表是登录时拉一次的，如果那一刻网关还没起来就会是空的，
+   * 所以每次展开且列表为空时顺手重拉一次，避免用户只能刷新页面。
+   */
+  function toggleOpen() {
+    const next = !open;
+    setOpen(next);
+    if (next && models.length === 0) onRefresh?.();
+  }
+
   return (
     <div className="model-picker" ref={rootRef}>
       <button
         type="button"
         className={`model-chip ${open ? "open" : ""}`}
-        onClick={() => setOpen((value) => !value)}
+        onClick={toggleOpen}
         disabled={locked}
         title={switching ? "正在切换模型…" : `当前模型：${currentLabel}`}
       >
@@ -227,7 +245,20 @@ export default function ModelPicker({
         <div className="model-panel">
           <div className="model-panel-section-title">选择模型</div>
           <div className="model-panel-list">
-            {models.length === 0 && <p className="model-panel-empty">网关尚未返回模型列表。</p>}
+            {models.length === 0 && (
+              <p className="model-panel-empty">
+                {refreshing
+                  ? "正在读取网关模型列表…"
+                  : errorText
+                    ? `读取失败：${errorText}`
+                    : "网关尚未返回模型列表。"}
+                {!refreshing && onRefresh && (
+                  <button type="button" className="model-panel-retry" onClick={() => onRefresh()}>
+                    重试
+                  </button>
+                )}
+              </p>
+            )}
             {models.map((item) => {
               const active = item.id === current?.model;
               return (

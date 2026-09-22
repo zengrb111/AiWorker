@@ -732,16 +732,25 @@ async function requestGateway<T>(
 
 type ChatContentItem = { type: string; text: string };
 
+function deriveUserSessionKey(userId?: string | null): string {
+  if (userId && typeof userId === "string" && userId.trim()) {
+    const safe = userId.trim().replace(/[^a-zA-Z0-9_-]/g, "-");
+    return `agent:main:user-${safe}`;
+  }
+  return process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
+}
+
 async function requestGatewayChat(
   message: string,
   timeoutMs?: number,
-  onDelta?: (deltaText: string) => void
+  onDelta?: (deltaText: string) => void,
+  sessionKeyOverride?: string
 ): Promise<{ runId: string; content: string; raw: unknown }> {
   const effectiveTimeout =
     timeoutMs ?? Number(process.env.OPENCLAW_CHAT_TIMEOUT_MS ?? 120000);
   const conn = await connectGateway();
   try {
-    const sessionKey = process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
+    const sessionKey = sessionKeyOverride ?? (process.env.OPENCLAW_SESSION_KEY || "agent:main:main");
 
     // Initialise the chat session.
     await conn.request("chat.startup", { sessionKey }, 15000);
@@ -974,9 +983,9 @@ export const openClawClient = {
   // 模型管理：查询当前模型 / 可用模型 / 切换 / 添加自定义 provider
   // -------------------------------------------------------------------------
 
-  /** 当前 main 会话实际使用的模型（即「龙虾正在调用的模型」）。 */
-  async getCurrentModel(): Promise<{ provider: string; model: string } | null> {
-    const sessionKey = process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
+  /** 当前会话实际使用的模型（按 userId 隔离到用户专属会话）。 */
+  async getCurrentModel(userId?: string): Promise<{ provider: string; model: string } | null> {
+    const sessionKey = deriveUserSessionKey(userId);
     const result = await requestGateway<{
       sessions?: Array<{ key?: string; model?: string; modelProvider?: string }>;
     }>("sessions.list", {}, 20000);
@@ -1001,9 +1010,9 @@ export const openClawClient = {
       }));
   },
 
-  /** 切换 main 会话使用的模型。 */
-  async switchModel(model: string): Promise<void> {
-    const sessionKey = process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
+  /** 切换当前会话使用的模型（按 userId 隔离到用户专属会话）。 */
+  async switchModel(model: string, userId?: string): Promise<void> {
+    const sessionKey = deriveUserSessionKey(userId);
     await requestGateway("sessions.patch", { key: sessionKey, model }, 25000);
   },
 

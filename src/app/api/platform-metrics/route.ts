@@ -19,16 +19,26 @@ export async function GET(req: Request) {
 
   // 全量取回做「每内容最新一天」聚合（当前库量千级，安全；明细单独截 Top 100）
   const metrics = await prisma.platformContentMetric.findMany({
+    where: { userId: user.id },
     orderBy: { updatedAt: "desc" },
     take: 20000,
   });
-  const siteMetrics = await prisma.platformSiteMetric.findMany({
-    orderBy: { metricDate: "asc" },
+  // ⚠️ 要取「最近 N 天」必须 desc + take 再翻回升序：
+  // 直接 asc + take 拿到的是最旧的 N 天，天数一超上限「官网今日 PV/UV」就会停在旧日期上。
+  const siteRecent = await prisma.platformSiteMetric.findMany({
+    where: { userId: user.id },
+    orderBy: { metricDate: "desc" },
     take: days,
   });
+  const siteMetrics = siteRecent.reverse();
   const accounts = await prisma.platformAccount.findMany({
+    where: { userId: user.id },
     select: { id: true, platform: true, displayName: true, status: true, lastSyncAt: true },
   });
+
+  // 已抓到原文的内容（拆解必须基于原文，前端据此决定「拆解」按钮是否可用）
+  const sources = await prisma.contentSource.findMany({ select: { platform: true, contentKey: true } });
+  const withSource = new Set(sources.map((s) => `${s.platform}:${s.contentKey}`));
 
   // 各平台汇总（累计口径：取每个内容最新一天的值相加，避免多日重复累计）
   const latestByContent = new Map<string, (typeof metrics)[number]>();
@@ -39,7 +49,7 @@ export async function GET(req: Request) {
   }
   const perPlatform: Record<
     string,
-    { platform: string; name: string; contents: number; views: number; clicks: number; likes: number; comments: number; collects: number; shares: number }
+    { platform: string; name: string; contents: number; views: number; impressions: number; clicks: number; likes: number; comments: number; collects: number; shares: number }
   > = {};
   for (const m of latestByContent.values()) {
     const p = (perPlatform[m.platform] = perPlatform[m.platform] || {
@@ -47,6 +57,7 @@ export async function GET(req: Request) {
       name: PLATFORM_META[m.platform]?.name || m.platform,
       contents: 0,
       views: 0,
+      impressions: 0,
       clicks: 0,
       likes: 0,
       comments: 0,
@@ -55,6 +66,7 @@ export async function GET(req: Request) {
     });
     p.contents += 1;
     p.views += m.views;
+    p.impressions += m.impressions;
     p.clicks += m.clicks;
     p.likes += m.likes;
     p.comments += m.comments;
@@ -76,11 +88,13 @@ export async function GET(req: Request) {
       category: m.category,
       metricDate: m.metricDate,
       views: m.views,
+      impressions: m.impressions,
       clicks: m.clicks,
       likes: m.likes,
       comments: m.comments,
       collects: m.collects,
       shares: m.shares,
+      hasSource: withSource.has(`${m.platform}:${m.contentKey}`),
     }));
 
   return NextResponse.json({

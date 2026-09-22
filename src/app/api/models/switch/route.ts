@@ -18,7 +18,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    await openClawClient.switchModel(model);
+    await openClawClient.switchModel(model, user.id);
     // 回读一次，确认网关真的切过去了（切换是异步落盘的）
     const current = await openClawClient.getCurrentModel();
     return jsonOk({ current });

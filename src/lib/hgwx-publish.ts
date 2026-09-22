@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { prisma } from "@/lib/prisma";
+import { generateCoverImage, coverPlatformOf } from "@/lib/image-gen";
 
 /**
  * 官网「好物推荐」发布链路（hgwx.aimemory.cafe）。
@@ -40,14 +41,34 @@ export function buildSummary(body: string, maxLen = 120): string {
   const lines = body
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line && !/^[#>|`\-*[]/.test(line));
+    .filter((line) => line && !/^[#>|*\-\[]/.test(line));
   const text = lines
     .join(" ")
-    .replace(/[*_`#]/g, "")
+    .replace(/[_*#]/g, "")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
   return text.slice(0, maxLen);
+}
+
+/**
+ * Markdown 正文 → 详情页纯文本（保留段落换行，去语法标记）。
+ * 官网 detail.js 按 \n 分段渲染，所以保留空行分段、并去掉标题/引用/列表等 Markdown 标记。
+ */
+export function mdToPlainText(md?: string | null): string {
+  if (!md) return "";
+  return md
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "") // 图片
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1") // 链接 → 文字
+    .replace(/^#{1,6}\s+/gm, "") // 标题 #
+    .replace(/[*_~\u0060]/g, "") // 强调符
+    .replace(/^>\s?/gm, "") // 引用 >
+    .replace(/^[-*+]\s+/gm, "· ") // 无序列表 → ·
+    .replace(/^\s*\d+\.\s+/gm, "") // 有序列表序号
+    .replace(/^\s*[-*_]{3,}\s*$/gm, "") // 分隔线
+    .replace(/[ \t]+\n/g, "\n") // 行尾空白
+    .replace(/\n{3,}/g, "\n\n") // 多余空行
+    .trim();
 }
 
 type CoverData = { dataUrl: string; ext: string };
@@ -149,6 +170,25 @@ export async function publishContentToHgwx(
   try {
     if (!TOKEN) throw new Error("服务端未配置 HGWX_PUBLISH_TOKEN，发布接口未启用。");
 
+    // 发布前置：封面必须是已生成本地图（非 pollinations 等占位/远程图）。
+    // 否则先触发智谱生图并等待完成，确保「封面及内容都生成后再发布到官网」。
+    if (!item.coverImageUrl || !item.coverImageUrl.startsWith("/uploads/")) {
+      console.log("[hgwx-publish] 封面尚未就绪（占位图），先触发智谱生图：", item.title);
+      const localCover = await generateCoverImage(
+        item.title,
+        item.body || "",
+        coverPlatformOf(item.category)
+      ).catch(() => null);
+      if (!localCover) {
+        throw new Error("封面尚未生成（智谱生图失败），暂缓发布，待封面就绪后重试。");
+      }
+      await prisma.contentItem.update({
+        where: { id: item.id },
+        data: { coverImageUrl: localCover }
+      });
+      item.coverImageUrl = localCover;
+    }
+
     const { hgwxCategory: mappedCategory, type, platform } = categoryMapping(item.category);
     const hgwxCategory = options.hgwxCategory?.trim() || mappedCategory;
 
@@ -183,6 +223,7 @@ export async function publishContentToHgwx(
     const remoteItem: Record<string, unknown> = {
       title: item.title,
       summary: buildSummary(item.body),
+      content: mdToPlainText(item.body),
       cover: coverUrl,
       gallery,
       tags: [platform, "AI好物", "数字员工"],

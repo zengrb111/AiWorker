@@ -126,6 +126,10 @@ try {
             id: n.id, title: n.display_title || '', time: n.time || '', type: n.type || '',
             views: n.view_count || 0, likes: n.likes || 0, comments: n.comments_count || 0,
             collects: n.collected_count || 0, shares: n.shared_count || 0,
+            // 可见性：permission_code=0 为公开可见；非 0（如 1「仅自己可见」）不计入效果数据
+            permissionCode: n.permission_code ?? 0, permissionMsg: n.permission_msg || '',
+            // 详情页需要 xsec_token 才能打开（小红书反爬）
+            token: n.xsec_token || '',
           });
         }
       } catch {}
@@ -144,8 +148,43 @@ try {
 
   const byId = new Map();
   for (const n of raw) if (n.id && !byId.has(n.id)) byId.set(n.id, n);
-  const notes = [...byId.values()];
-  console.log('采集完成：', notes.length, '篇笔记');
+  const allNotes = [...byId.values()];
+  // 只保留当前公开可见的笔记（排除「仅自己可见」等）
+  const notes = allNotes.filter((n) => n.permissionCode === 0);
+  const hidden = allNotes.filter((n) => n.permissionCode !== 0);
+  console.log('采集完成：', allNotes.length, '篇笔记；公开可见', notes.length, '篇；已排除非公开', hidden.length, '篇');
+  if (hidden.length) {
+    for (const h of hidden.slice(0, 5)) console.log('  排除：', h.permissionMsg || ('code=' + h.permissionCode), '::', h.title.slice(0, 30));
+  }
+
+  // 抓图文笔记的真实原文：拆解必须基于原文，小红书笔记页已改 CSR 且要 xsec_token，
+  // 只能借当前这个已登录的浏览器逐篇打开详情页，读 window.__INITIAL_STATE__。
+  const graphicNotes = notes.filter((n) => n.type === 'normal' && n.token);
+  const bodies = [];
+  if (graphicNotes.length) {
+    console.log('开始抓取图文原文：', graphicNotes.length, '篇…');
+    for (const n of graphicNotes) {
+      const url = `https://www.xiaohongshu.com/explore/${n.id}?xsec_token=${encodeURIComponent(n.token)}&xsec_source=pc_creatormng`;
+      try {
+        await send('Page.navigate', { url });
+        await sleep(6500);
+        const r = await evaluate(`(()=>{try{
+          const s = window.__INITIAL_STATE__; if(!s) return null;
+          const map = s?.note?.noteDetailMap; if(!map) return null;
+          const nt = map[Object.keys(map)[0]]?.note; if(!nt) return null;
+          return { title: nt.title||'', desc: nt.desc||'', type: nt.type, tags:(nt.tagList||[]).map(t=>t&&t.name).filter(Boolean), author: (nt.user&&nt.user.nickname)||'' };
+        }catch(e){return null}})()`);
+        if (r && (r.title || r.desc)) {
+          bodies.push({ id: n.id, title: r.title || n.title, body: r.desc || '', topics: (r.tags || []).join(','), author: r.author || '' });
+          console.log('  原文 OK', (r.desc || '').length, '字 ::', (r.title || n.title).slice(0, 24));
+        } else {
+          console.log('  原文 未取到 ::', String(n.title).slice(0, 24));
+        }
+      } catch (e) {
+        console.log('  原文 失败', e.message, '::', String(n.title).slice(0, 24));
+      }
+    }
+  }
 
   // 推送到平台入库
   const token = (fs.readFileSync(path.join(ROOT, '.env.local'), 'utf8').match(/CONTENT_INGEST_TOKEN="([^"]+)"/) || [])[1];
@@ -153,7 +192,7 @@ try {
   const res = await fetch(`${API}/api/platform-metrics/ingest`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ platform: 'xhs', notes }),
+    body: JSON.stringify({ platform: 'xhs', notes, bodies, accountId: process.env.ACCOUNT_ID || '' }),
   });
   const out = await res.json().catch(() => null);
   console.log('入库结果 HTTP', res.status, JSON.stringify(out));

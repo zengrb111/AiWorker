@@ -20,12 +20,22 @@ type Account = {
   createdAt: string;
 };
 
-const PLATFORMS: Record<string, { name: string; desc: string; cookieGuide: string; badge: string }> = {
+const PLATFORMS: Record<string, { name: string; desc: string; cookieGuide: string; badge: string; needsToken?: boolean }> = {
   site: {
     name: "官网",
-    desc: "和光万象官网 hgwx.aimemory.cafe，服务端令牌直连，无需授权",
-    cookieGuide: "",
-    badge: "已接入",
+    desc: "和光万象官网（好物推荐）或 AI回忆录官网（心灵驿站），配置域名 + 令牌后可用",
+    cookieGuide:
+      "填写官网域名与令牌（Bearer Token），保存时会自动识别官网类型：\n· 好物推荐：https://hgwx.aimemory.cafe —— 拉取站点统计数据\n· 心灵驿站：https://aimemory.cafe —— 把图文推送到「心灵驿站」频道（内容库详情页有「推送心灵驿站」按钮）\n令牌在对应官网后台的开放接口处获取。",
+    badge: "未授权",
+    needsToken: true,
+  },
+  healing: {
+    name: "官网-AI回忆录",
+    desc: "AI回忆录官网心灵驿站频道（aimemory.cafe），授权后可将图文推送到该频道",
+    cookieGuide:
+      "填写 https://aimemory.cafe 与心灵驿站令牌（Bearer Token）。\n保存时会真实调用 /api/healing/sync-log 校验令牌有效性。\n授权后，内容库详情页会出现「推送心灵驿站」按钮；该频道无流量统计，与官网统计授权互不影响。",
+    badge: "未授权",
+    needsToken: true,
   },
   xhs: {
     name: "小红书",
@@ -55,6 +65,8 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
   const [error, setError] = useState("");
   const [bindPlatform, setBindPlatform] = useState<string | null>(null);
   const [cookieInput, setCookieInput] = useState("");
+  const [domainInput, setDomainInput] = useState("");
+  const [tokenInput, setTokenInput] = useState("");
   const [binding, setBinding] = useState(false);
   const [bindMsg, setBindMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null);
@@ -83,21 +95,28 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
 
   async function submitBind() {
     if (!bindPlatform) return;
+    const meta = PLATFORMS[bindPlatform];
+    const body =
+      meta?.needsToken
+        ? JSON.stringify({ platform: bindPlatform, domain: domainInput, token: tokenInput })
+        : JSON.stringify({ platform: bindPlatform, cookie: cookieInput });
     setBinding(true);
     setBindMsg(null);
     try {
       const res = await fetch("/api/platform-accounts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ platform: bindPlatform, cookie: cookieInput }),
+        body,
       });
       const json = (await res.json()) as { ok: boolean; message?: string };
       if (!json.ok) {
-        setBindMsg({ ok: false, text: json.message || "绑定失败，请检查 Cookie 是否完整。" });
+        setBindMsg({ ok: false, text: json.message || "绑定失败，请检查凭据是否完整。" });
         return;
       }
-      setBindMsg({ ok: true, text: "绑定成功，平台凭据已加密保存。" });
+      setBindMsg({ ok: true, text: meta?.needsToken ? "官网配置成功，凭据已加密保存。" : "绑定成功，平台凭据已加密保存。" });
       setCookieInput("");
+      setDomainInput("");
+      setTokenInput("");
       setTimeout(() => {
         setBindPlatform(null);
         setBindMsg(null);
@@ -147,16 +166,13 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
       <div className="acct-list">
         {Object.entries(PLATFORMS).map(([platform, meta]) => {
           const acc = accountFor(platform);
-          const statusLabel =
-            platform === "site"
-              ? "已接入"
-              : acc
-                ? acc.status === "active"
-                  ? "已授权"
-                  : acc.status === "error"
-                    ? "异常"
-                    : "失效"
-                : "未授权";
+          const statusLabel = acc
+            ? acc.status === "active"
+              ? "已授权"
+              : acc.status === "error"
+                ? "异常"
+                : "失效"
+            : "未授权";
           return (
             <div key={platform} className="acct-card">
               <div className="acct-head">
@@ -165,9 +181,9 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
                   <div className="acct-name">{acc ? acc.displayName : meta.name}</div>
                   <div className="acct-desc">{meta.desc}</div>
                 </div>
-                <span className={`pub-badge ${acc || platform === "site" ? "ok" : ""}`}>{statusLabel}</span>
+                <span className={`pub-badge ${acc ? "ok" : ""}`}>{statusLabel}</span>
               </div>
-              {acc && platform !== "site" && (
+              {acc && (
                 <div className="acct-meta">
                   <span>绑定人：{acc.boundBy || "—"}</span>
                   <span>绑定时间：{formatTime(acc.createdAt)}</span>
@@ -176,9 +192,7 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
               )}
               {acc?.statusMsg && acc.status !== "active" && <div className="acct-error">{acc.statusMsg}</div>}
               <div className="acct-ops">
-                {platform === "site" ? (
-                  <span className="acct-note">服务端令牌直连，数据每日自动同步</span>
-                ) : acc ? (
+                {acc ? (
                   <button
                     className="acct-btn danger"
                     onClick={() => void removeAccount(acc.id)}
@@ -187,8 +201,17 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
                     {confirmRemove?.id === acc.id ? "4 秒内再点一次确认解绑" : removing === acc.id ? "解绑中…" : "解除授权"}
                   </button>
                 ) : (
-                  <button className="acct-btn primary" onClick={() => { setBindPlatform(platform); setBindMsg(null); setCookieInput(""); }}>
-                    授权绑定
+                  <button
+                    className="acct-btn primary"
+                    onClick={() => {
+                      setBindPlatform(platform);
+                      setBindMsg(null);
+                      setCookieInput("");
+                      setDomainInput("");
+                      setTokenInput("");
+                    }}
+                  >
+                    {meta.needsToken ? "配置授权" : "授权绑定"}
                   </button>
                 )}
               </div>
@@ -200,16 +223,35 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
       {bindPlatform && (
         <div className="acct-mask" onClick={() => !binding && setBindPlatform(null)}>
           <div className="acct-dialog" onClick={(e) => e.stopPropagation()}>
-            <h3>{PLATFORMS[bindPlatform].name} 授权绑定</h3>
+            <h3>{PLATFORMS[bindPlatform].name} 授权配置</h3>
             <p className="acct-guide">{PLATFORMS[bindPlatform].cookieGuide}</p>
-            <textarea
-              className="acct-cookie-input"
-              placeholder="粘贴完整的 Cookie 值（形如 a=1; b=2; ...）"
-              value={cookieInput}
-              onChange={(e) => setCookieInput(e.target.value)}
-              rows={6}
-              disabled={binding}
-            />
+            {PLATFORMS[bindPlatform].needsToken ? (
+              <>
+                <input
+                  className="acct-input"
+                  placeholder="官网域名，如 https://hgwx.aimemory.cafe 或 https://aimemory.cafe"
+                  value={domainInput}
+                  onChange={(e) => setDomainInput(e.target.value)}
+                  disabled={binding}
+                />
+                <input
+                  className="acct-input"
+                  placeholder="服务端令牌（Bearer Token）"
+                  value={tokenInput}
+                  onChange={(e) => setTokenInput(e.target.value)}
+                  disabled={binding}
+                />
+              </>
+            ) : (
+              <textarea
+                className="acct-cookie-input"
+                placeholder="粘贴完整的 Cookie 值（形如 a=1; b=2; ...）"
+                value={cookieInput}
+                onChange={(e) => setCookieInput(e.target.value)}
+                rows={6}
+                disabled={binding}
+              />
+            )}
             {bindMsg && <div className={bindMsg.ok ? "acct-msg ok" : "acct-msg bad"}>{bindMsg.text}</div>}
             <div className="acct-dialog-ops">
               <button className="acct-btn" onClick={() => setBindPlatform(null)} disabled={binding}>
@@ -218,9 +260,14 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
               <button
                 className="acct-btn primary"
                 onClick={() => void submitBind()}
-                disabled={binding || cookieInput.trim().length < 20}
+                disabled={
+                  binding ||
+                  (PLATFORMS[bindPlatform].needsToken
+                    ? domainInput.trim().length < 4 || tokenInput.trim().length < 4
+                    : cookieInput.trim().length < 20)
+                }
               >
-                {binding ? "正在验证凭据…" : "验证并绑定"}
+                {binding ? "正在验证凭据…" : "验证并保存"}
               </button>
             </div>
             <p className="acct-security">凭据使用 AES-256-GCM 加密存储，仅用于服务端拉取平台数据。</p>
