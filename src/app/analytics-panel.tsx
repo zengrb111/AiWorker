@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * 「效果分析」真实面板 —— 数据来自各渠道真实采集：
@@ -96,6 +96,7 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
   const [error, setError] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const syncPollRef = useRef<number | null>(null);
   const [channel, setChannel] = useState<"all" | "site" | "xhs" | "toutiao">("all");
   const [query, setQuery] = useState("");
   const [shown, setShown] = useState(100);
@@ -270,20 +271,96 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
 
   useEffect(() => {
     void refresh();
+    return () => {
+      // 面板卸载（切到其它菜单）时停止轮询；同步仍在服务端后台继续，
+      // 回到本面板时 mount 检查会从服务端读回「同步中/已完成」状态。
+      if (syncPollRef.current) {
+        window.clearTimeout(syncPollRef.current);
+        syncPollRef.current = null;
+      }
+    };
   }, [refresh, resetToken]);
+
+  /** 轮询服务端同步状态：running 继续等；结束则展示结果并刷新数据 */
+  const pollSyncStatus = useCallback(async () => {
+    let stillRunning = false;
+    try {
+      const res = await fetch("/api/platform-metrics/sync", { cache: "no-store" });
+      const json = (await res.json()) as {
+        ok: boolean;
+        state?: {
+          running: boolean;
+          finishedAt?: string;
+          ok?: boolean;
+          results?: Array<{ platform: string; ok: boolean; message: string }>;
+          error?: string;
+        } | null;
+      };
+      const st = json.state;
+      if (st?.running) {
+        stillRunning = true;
+      } else if (st && st.finishedAt) {
+        const lines = (st.results || []).map((r) => r.message);
+        setSyncMsg({
+          ok: !!st.ok,
+          text: st.error || lines.join("；") || "同步完成",
+        });
+        await refresh();
+      }
+    } catch {
+      // 单次查询失败不中断轮询
+      stillRunning = true;
+    }
+    if (stillRunning) {
+      if (syncPollRef.current) window.clearTimeout(syncPollRef.current);
+      syncPollRef.current = window.setTimeout(() => void pollSyncStatus(), 3000);
+    } else {
+      setSyncing(false);
+      syncPollRef.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refresh]);
+
+  // 挂载时读一次服务端同步状态：同步中 → 恢复「同步中」并继续轮询；
+  // 刚结束（2 分钟内）→ 恢复结果提示，让用户切走再回来也能看到。
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/platform-metrics/sync", { cache: "no-store" });
+        const json = (await res.json()) as { state?: { running: boolean; finishedAt?: string } | null };
+        if (cancelled || !json.state) return;
+        if (json.state.running) {
+          setSyncing(true);
+          setSyncMsg(null);
+          syncPollRef.current = window.setTimeout(() => void pollSyncStatus(), 1500);
+        } else if (json.state.finishedAt) {
+          const ageMs = Date.now() - new Date(json.state.finishedAt).getTime();
+          if (ageMs < 120000) {
+            void pollSyncStatus(); // 结束态复用同一逻辑展示结果
+          }
+        }
+      } catch {
+        // 状态读取失败按无同步处理
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pollSyncStatus]);
 
   async function syncNow() {
     setSyncing(true);
     setSyncMsg(null);
     try {
       const res = await fetch("/api/platform-metrics/sync", { method: "POST" });
-      const json = (await res.json()) as { ok: boolean; results?: Array<{ platform: string; ok: boolean; message: string }> };
-      const lines = (json.results || []).map((r) => `${r.message}`);
-      setSyncMsg({ ok: json.ok, text: lines.join("；") || "同步完成" });
-      await refresh();
+      const json = (await res.json()) as { ok: boolean; error?: string };
+      if (!json.ok) throw new Error(json.error || "触发同步失败。");
+      // 已在后台执行（或本就在执行中）→ 轮询状态直到完成
+      if (syncPollRef.current) window.clearTimeout(syncPollRef.current);
+      syncPollRef.current = window.setTimeout(() => void pollSyncStatus(), 1500);
     } catch (err) {
       setSyncMsg({ ok: false, text: err instanceof Error ? err.message : String(err) });
-    } finally {
       setSyncing(false);
     }
   }
@@ -291,6 +368,13 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
   const perPlatform = data?.perPlatform || [];
   const allItems = data?.items || [];
   const siteDays = data?.siteDays || [];
+  // 「官网今日 PV/UV」按今天的日期取，不能取 siteDays 的最后一行——
+  // 最后一行可能是昨天（今天还没产生访问/还没同步），那样会把旧数据当今日展示。
+  const todayStr = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
+  const siteToday = siteDays.find((d) => d.date === todayStr) ?? null;
 
   // 渠道筛选 + 标题搜索（全量明细，不分渠道截断）
   const filtered = allItems.filter((it) => {
@@ -340,11 +424,11 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
         </div>
         <div className="pub-stat">
           <div className="k">官网今日 PV</div>
-          <div className="v">{num(siteDays.at(-1)?.pv || 0)}</div>
+          <div className="v">{siteToday ? num(siteToday.pv) : "—"}</div>
         </div>
         <div className="pub-stat">
           <div className="k">官网今日 UV</div>
-          <div className="v">{num(siteDays.at(-1)?.uv || 0)}</div>
+          <div className="v">{siteToday ? num(siteToday.uv) : "—"}</div>
         </div>
       </div>
 
@@ -355,7 +439,7 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
         <div className="pub-empty-card">
           <div className="pub-empty-ico">◫</div>
           <p>还没有效果数据。</p>
-          <p className="pub-empty-hint">点右上角「同步数据」拉取官网真实统计；小红书 / 头条号需先在「平台授权管理」完成授权。</p>
+          <p className="pub-empty-hint">点右上角「同步数据」拉取各渠道真实统计；官网 / 小红书 / 头条号需先在「平台授权管理」完成配置（官网填域名 + 令牌）。</p>
         </div>
       ) : (
         <>

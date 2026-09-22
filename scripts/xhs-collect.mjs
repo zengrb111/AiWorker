@@ -192,7 +192,7 @@ try {
   const res = await fetch(`${API}/api/platform-metrics/ingest`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ platform: 'xhs', notes, bodies }),
+    body: JSON.stringify({ platform: 'xhs', notes, bodies, accountId: process.env.ACCOUNT_ID || '' }),
   });
   const out = await res.json().catch(() => null);
   console.log('入库结果 HTTP', res.status, JSON.stringify(out));

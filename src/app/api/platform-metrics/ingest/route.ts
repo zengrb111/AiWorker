@@ -36,10 +36,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, message: "参数错误：需要 platform（xhs/toutiao）和非空 notes" }, { status: 400 });
   }
 
-  const account = await prisma.platformAccount.findFirst({ where: { platform, status: { not: "expired" } } });
+  const accountId = String(body?.accountId || "").trim();
+  const account = await prisma.platformAccount.findFirst({
+    where: accountId ? { id: accountId } : { platform, status: { not: "expired" } },
+  });
   if (!account) {
     return NextResponse.json({ ok: false, message: "平台尚未授权，请先在「平台授权管理」完成绑定" }, { status: 400 });
   }
+  const userId = account.userId;
 
   const metricDate = (() => {
     const d = new Date();
@@ -75,9 +79,9 @@ export async function POST(req: Request) {
     };
     totalViews += row.views;
     await prisma.platformContentMetric.upsert({
-      where: { platform_contentKey_metricDate: { platform, contentKey, metricDate } },
+      where: { userId_platform_contentKey_metricDate: { userId, platform, contentKey, metricDate } },
       update: { ...row, accountId: account.id },
-      create: { platform, contentKey, metricDate, accountId: account.id, ...row },
+      create: { userId, platform, contentKey, metricDate, accountId: account.id, ...row },
     });
     saved++;
     liveKeys.push(contentKey);
@@ -110,7 +114,7 @@ export async function POST(req: Request) {
   const live = new Set(liveKeys);
   if (live.size > 0) {
     const existing = await prisma.platformContentMetric.findMany({
-      where: { platform, accountId: account.id },
+      where: { userId, platform, accountId: account.id },
       select: { contentKey: true },
       distinct: ["contentKey"],
     });
@@ -119,7 +123,7 @@ export async function POST(req: Request) {
     for (let i = 0; i < stale.length; i += 400) {
       const keys = stale.slice(i, i + 400);
       const r = await prisma.platformContentMetric.deleteMany({
-        where: { platform, accountId: account.id, contentKey: { in: keys } },
+        where: { userId, platform, accountId: account.id, contentKey: { in: keys } },
       });
       removed += r.count;
     }

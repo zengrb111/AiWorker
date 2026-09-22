@@ -9,7 +9,9 @@ import {
   matchTopicsToKnowledge,
   parseTopicLines,
   retrieveReferenceChunks,
-  type HotTopicMatch
+  retrieveReferenceGroups,
+  type HotTopicMatch,
+  type ReferenceGroup
 } from "@/lib/kb-hot-topics";
 import { fetchXiaohongshuNote, formatXhsForPrompt } from "@/lib/xhs-parse";
 
@@ -80,7 +82,57 @@ function articleFormatInstruction(content: string): string {
   return `${base} 正文用短段落，可穿插 emoji 与「**小标题**」加粗。`;
 }
 
-function buildTaskPrompt(contextText: string, content: string): string {
+/**
+ * 内容创作类请求（小红书创作 / 公众号创作 / 写一篇 等）：
+ * 把"参考了哪些知识库与 IP 人设"的过程渲染成一段可见的 Markdown，
+ * 在生成正文前展示给用户，并随正文一起持久化到会话。
+ */
+function isContentCreationRequest(content: string): boolean {
+  return /(小红书创作|公众号创作|头条号创作|写一篇|写篇|写[一个条篇]{0,2}文案|写个?图文|生成一篇|生成篇|创作一篇|小红书(风格|文案|图文)|公众号(风格|文案|图文|文章)|头条号(风格|文案|图文|文章)|微头条|文章正文|软文)/i.test(
+    content
+  );
+}
+
+function buildReferenceProcessMarkdown(groups: ReferenceGroup[], platformLabel: string): string {
+  const lines: string[] = [];
+  lines.push(`## 📚 创作参考（已读取你的知识库与 IP 人设）`);
+  lines.push("");
+  lines.push(
+    `为写这篇**${platformLabel}**内容，我先调取了你本人知识库里的相关资料，作为「人设语气」与「产品卖点」的依据：`
+  );
+  lines.push("");
+
+  const seen = new Set<string>();
+  let anyHit = false;
+  for (const g of groups) {
+    const hits = g.hits.filter((h) => {
+      if (seen.has(h.id)) return false;
+      seen.add(h.id);
+      return true;
+    });
+    if (hits.length === 0) continue;
+    anyHit = true;
+    lines.push(`**${g.label}**`);
+    for (const h of hits) {
+      const pct = Math.round(Math.max(0, Math.min(1, h.score)) * 100);
+      lines.push(`- 知识库「${h.kbName}」/ 文档「${h.filename}」 · 相关度 ${pct}% — ${h.snippet}`);
+    }
+    lines.push("");
+  }
+
+  if (!anyHit) {
+    lines.push("_知识库中暂未检索到与本次选题强相关的片段，将基于通用经验并保持你已设定的人设一致性来写。_");
+    lines.push("");
+  } else {
+    lines.push("下面据此组织人设语气与产品植入，生成正文 👇");
+    lines.push("");
+    lines.push("---");
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+function buildTaskPrompt(contextText: string, content: string, kbText?: string): string {
   // 图文/文案类请求：约定输出格式（# 一级标题开头），让自动入库判定稳定命中，
   // 也保证 generateArticleTitle 能提到干净的标题。
   const isArticleRequest = /(写一篇|写篇|写个?文案|写个?图文|生成一篇|生成篇|小红书(风格|文案|图文)|公众号(风格|文案|图文|文章)|文章正文|软文)/i.test(content);
@@ -94,6 +146,14 @@ function buildTaskPrompt(contextText: string, content: string): string {
     "",
     "当前用户任务：",
     content,
+    ...(kbText
+      ? [
+          "",
+          "【参考知识库（来自当前登录用户本人创建的知识库，仅供本次回答参考）】",
+          "若用户问题涉及产品、账号定位、品牌、人设、卖点等内容，请优先以上述知识库内容为准；知识库未覆盖的内容可结合通用经验作答，但请勿编造知识库中不存在的产品或账号信息。",
+          kbText
+        ]
+      : []),
     ...(isArticleRequest ? ["", articleFormatInstruction(content)] : []),
     ...(isHotTopicsRequest
       ? [
@@ -127,30 +187,12 @@ async function upgradeCoverInBackground(
 }
 
 function shouldAutoSave(userMessage: string, _conversationContext: string, assistantContent: string): boolean {
-  if (assistantContent.length <= 500) return false;
-  const isExplicitArticleRequest = /(写一篇|写篇|生成一篇|生成篇|创作一篇|创作篇|公众号文章|小红书文案|文章正文)/i.test(userMessage);
-  if (!isExplicitArticleRequest) return false;
-
-  // 进一步过滤：必须是真正的"图文/文章"内容（含有结构化特征），不能是纯推荐/对话回复
-  // 结构特征：markdown 标题、列表项、引号标题、Markdown 链接/加粗
-  const hasStructure =
-    assistantContent.includes("##") ||                                    // markdown 标题
-    assistantContent.includes("\n- ") || assistantContent.includes("\n* ") || // 列表
-    /^\d+[.、．)）]\s*\S+/m.test(assistantContent) ||                     // 数字列表
-    /[「『"'""''].{2,40}[」』""'']/.test(assistantContent) ||             // 引号标题
-    /\*\*[^*\n]{2,30}\*\*/.test(assistantContent);                        // 加粗短语
-  // 标题特征放宽：agent 输出的标题可能是 "# 标题" 也可能是 "**标题：…**" 加粗行
-  const hasArticleTitle =
-    /^#{1,3}\s+\S+/m.test(assistantContent) ||
-    /^\*\*[^*\n]{2,40}\*\*/m.test(assistantContent);
-  if (!hasStructure || !hasArticleTitle) return false;
-
-  // 排除明显的"推荐/查询"回复：开头就是"以下是"、"根据"、"结合"等引导词，且内容里没有"选题/标题"等明确文章词
-  const isRecommendation = /^(结合|根据|以下|参考|看到|听说|你好|感谢)/.test(assistantContent.trim());
-  const hasExplicitArticle = /标题[：:]|选题|写作|生成一?篇|正文[：:]|封面[：:]/i.test(assistantContent);
-  if (isRecommendation && !hasExplicitArticle) return false;
-
-  return true;
+  // 内容创作类指令（小红书创作 / 公众号创作 / 头条号创作 / 写一篇…）+ 产出足够长
+  // → 直接入库，不再用「标题 / 结构特征」过滤。此前的结构启发式会把
+  // 「写一篇小红书风格的图文」这类正常产出误杀（如开头是"以下是"、没有 # 标题等），
+  // 导致创作结果没进内容库。
+  if (assistantContent.trim().length < 200) return false;
+  return isContentCreationRequest(userMessage);
 }
 
 /**
@@ -160,6 +202,7 @@ function shouldAutoSave(userMessage: string, _conversationContext: string, assis
 function detectCategory(userMessage: string, conversationContext: string): string {
   const XHS_KEYWORDS = ["小红书", "小红薯", "种草", "xhs", "xhongshu"];
   const WECHAT_KEYWORDS = ["公众号", "微信推文", "订阅号", "服务号"];
+  const TOUTIAO_KEYWORDS = ["头条号", "今日头条", "微头条", "toutiao"];
 
   // 先只看当前这条消息：热点卡片的「小红书创作 / 公众号创作」入口自带平台词，
   // 必须优先于历史上下文 —— 否则对话里出现过「小红书」之后，
@@ -167,13 +210,18 @@ function detectCategory(userMessage: string, conversationContext: string): strin
   const current = userMessage.toLowerCase();
   const currentWechat = WECHAT_KEYWORDS.some((kw) => current.includes(kw.toLowerCase()));
   const currentXhs = XHS_KEYWORDS.some((kw) => current.includes(kw.toLowerCase()));
+  const currentToutiao = TOUTIAO_KEYWORDS.some((kw) => current.includes(kw.toLowerCase()));
   if (currentWechat) return "公众号文章";
   if (currentXhs) return "小红书";
+  if (currentToutiao) return "头条号";
 
   // 当前消息没有指定平台时，再退回结合上下文推断
   const combined = `${userMessage} ${conversationContext}`.toLowerCase();
   if (XHS_KEYWORDS.some((kw) => combined.includes(kw.toLowerCase()))) {
     return "小红书";
+  }
+  if (TOUTIAO_KEYWORDS.some((kw) => combined.includes(kw.toLowerCase()))) {
+    return "头条号";
   }
   return "公众号文章";
 }
@@ -438,7 +486,8 @@ export async function POST(request: Request, context: { params: { id: string } }
 
           const hotResult = await openClawClient.sendTask({
             message: "今日全网热点推荐",
-            prompt: "请推荐今日全网热点（各行业热门话题、社会热点、平台热点均可），以编号列表输出 10 条左右，每条一行，格式：1. 热点简述。不要展开分析。"
+            prompt: "请推荐今日全网热点（各行业热门话题、社会热点、平台热点均可），以编号列表输出 10 条左右，每条一行，格式：1. 热点简述。不要展开分析。",
+            userId: user.id
           });
 
           const topics = parseTopicLines(hotResult.content);
@@ -649,7 +698,36 @@ await prisma.message.create({
     take: maxContextMessages
   });
   const conversationContext = buildConversationContext(recentMessages.reverse());
-  const prompt = buildTaskPrompt(conversationContext, content);
+
+  // 通用对话生成也须以「当前登录用户本人创建的知识库」为参考来源，
+  // 与「今日产品热点 / 一键仿写爆款」共用同一套按 userId 隔离的检索逻辑。
+  // 用户没有可用知识库切片时 kbText 为空，prompt 不注入该段，行为等同此前。
+  let kbText = "";
+  let referenceProcess = "";
+  const kbCtx = await loadUserKbContext(user.id);
+  if (kbCtx) {
+    kbText = await retrieveReferenceChunks(
+      [content, "产品卖点 账号人设 品牌定位 用户痛点"],
+      kbCtx,
+      5
+    );
+    // 内容创作类请求：先算出"参考了哪些知识库 / IP 人设"的过程，
+    // 生成正文前以可见段落展示，并随正文一起入库（持久化）。
+    if (isContentCreationRequest(content)) {
+      const platformLabel = detectCategory(content, conversationContext) === "小红书" ? "小红书" : "公众号";
+      const groups = await retrieveReferenceGroups(
+        [
+          { label: "IP 人设 / 调性", query: "账号人设 IP定位 风格 调性 语气 粉丝画像" },
+          { label: "产品卖点 / 用户痛点", query: "产品 卖点 参数 使用场景 用户痛点" },
+          { label: "本选题相关素材", query: content }
+        ],
+        kbCtx,
+        3
+      );
+      referenceProcess = buildReferenceProcessMarkdown(groups, platformLabel);
+    }
+  }
+  const prompt = buildTaskPrompt(conversationContext, content, kbText);
 
   const task = await prisma.openClawTask.create({
     data: {
@@ -679,6 +757,12 @@ await prisma.message.create({
       }, 15000);
 
       try {
+        // 先把"参考知识库 / IP 人设"的过程展示出来（内容创作类请求才有），
+        // 再开始生成正文。这样用户能直接看到本次创作的依据来源。
+        if (referenceProcess) {
+          safeEnqueue(sseEncode({ type: "delta", text: referenceProcess }));
+        }
+
         const result = await openClawClient.sendTaskStream(
           { message: content, context: conversationContext, prompt, conversationId: conversation.id, userId: user.id },
           (deltaText) => safeEnqueue(sseEncode({ type: "delta", text: deltaText }))
@@ -692,7 +776,7 @@ await prisma.message.create({
           data: {
             conversationId: conversation.id,
             role: "ASSISTANT",
-            content: result.content
+            content: referenceProcess ? `${referenceProcess}${result.content}` : result.content
           }
         });
 
@@ -751,7 +835,7 @@ await prisma.message.create({
             data: {
               conversationId: conversation.id,
               role: "ASSISTANT",
-              content: partial
+              content: referenceProcess ? `${referenceProcess}${partial}` : partial
             }
           });
 

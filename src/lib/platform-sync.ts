@@ -2,20 +2,31 @@ import { prisma } from "./prisma";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { decryptCredential } from "./platform-creds";
 
 /**
- * 平台效果数据同步器。
- * - 官网(site)：无需授权，用服务端 HGWX_PUBLISH_TOKEN 拉官网统计接口，真实数据。
+ * 平台效果数据同步器（按登录用户隔离）。
+ * - 官网(site)：每个用户各自在「平台授权管理」配置自己的官网域名 + 令牌，
+ *   同步时用该用户的凭据拉官网统计接口（/api/stats）。
  * - 小红书(xhs) / 头条号(toutiao)：无个人可申请的内容数据开放 API，
  *   采用创作者后台 Cookie 授权（业界通行做法），凭据加密存储后真实请求平台接口。
  *   平台接口有签名/风控不确定性，验证器按候选端点轮询，失败如实记录到账号状态。
  */
 
-export const PLATFORM_META: Record<string, { name: string; desc: string; cookieGuide: string }> = {
+export const PLATFORM_META: Record<string, { name: string; desc: string; cookieGuide: string; needsToken?: boolean }> = {
   site: {
     name: "官网",
-    desc: "和光万象官网 hgwx.aimemory.cafe",
-    cookieGuide: "",
+    desc: "和光万象官网（好物推荐）或 AI回忆录官网（心灵驿站），配置域名 + 令牌后可用",
+    cookieGuide:
+      "填写官网域名与令牌（Bearer Token），保存时会自动识别类型：\n· 好物推荐：https://hgwx.aimemory.cafe（拉取统计数据）\n· 心灵驿站：https://aimemory.cafe（推送图文到「心灵驿站」频道）\n令牌在对应官网后台的开放接口处获取。",
+    needsToken: true,
+  },
+  healing: {
+    name: "官网-AI回忆录",
+    desc: "AI回忆录官网心灵驿站频道（aimemory.cafe），授权后可把图文推送到该频道",
+    cookieGuide:
+      "填写 https://aimemory.cafe 与心灵驿站令牌（Bearer Token）。\n保存时会真实调用 /api/healing/sync-log 校验令牌。\n授权后，内容库详情页即可「推送心灵驿站」；该频道无流量统计，不影响官网统计授权。",
+    needsToken: true,
   },
   xhs: {
     name: "小红书",
@@ -58,8 +69,26 @@ async function fetchWithCookie(url: string, cookie: string, timeoutMs = 12000) {
 }
 
 export type VerifyResult =
-  | { ok: true; displayName: string; externalId: string }
+  | { ok: true; displayName: string; externalId: string; siteKind?: SiteKind }
   | { ok: false; message: string };
+
+/**
+ * 官网类型：
+ * - hgwx：和光万象官网（hgwx.aimemory.cafe），Bearer 令牌 + GET /api/stats 拉统计
+ * - healing：AI回忆录官网「心灵驿站」频道（aimemory.cafe），Bearer 令牌 + POST /api/healing/sync 推图文
+ */
+export type SiteKind = "hgwx" | "healing";
+
+export type SiteCredential = { domain: string; token: string; kind: SiteKind };
+
+/** 域名推断官网类型（老凭据没有 kind 字段时兜底） */
+export function inferSiteKind(domain: string): SiteKind {
+  let host = domain;
+  try { host = new URL(domain).host; } catch { /* 保留原串 */ }
+  if (/^hgwx\./i.test(host)) return "hgwx";
+  if (/aimemory\.cafe$/i.test(host)) return "healing";
+  return "hgwx";
+}
 
 /** 小红书凭据验证：候选端点轮询 */
 async function verifyXhs(cookie: string): Promise<VerifyResult> {
@@ -102,33 +131,32 @@ async function verifyXhs(cookie: string): Promise<VerifyResult> {
 async function verifyToutiao(cookie: string): Promise<VerifyResult> {
   const candidates: Array<{ url: string; parse: (j: any) => VerifyResult | null }> = [
     {
-      // 头条号后台账号信息
-      url: "https://mp.toutiao.com/mp/agw/media/get_user_base_info",
+      // 创作者中心用户信息（同步链路同款端点，顶层就有 name/user_id）
+      url: "https://mp.toutiao.com/mp/agw/creator_center/user_info?app_id=1231",
       parse: (j) => {
-        const u = j?.data;
-        if (u && (u.name || u.screen_name || u.user_id)) {
-          return {
-            ok: true,
-            displayName: String(u.name || u.screen_name || "头条号创作者"),
-            externalId: String(u.user_id || u.uid || u.name || ""),
-          };
-        }
-        return null;
+        if (j?.code !== 0) return null;
+        const name = j.name || j.screen_name || j.nickname;
+        const uid = j.user_id_str || j.user_id || j.media_id || "";
+        return {
+          ok: true,
+          displayName: String(name || "头条号创作者"),
+          externalId: String(uid || name || ""),
+        };
       },
     },
     {
-      // 创作者主页信息（部分版本端点）
-      url: "https://mp.toutiao.com/mp/agw/user/base_info",
+      // 媒体基础信息：code=0 即登录态有效（无昵称字段，仅做兜底判定）
+      url: "https://mp.toutiao.com/mp/agw/media/get_user_base_info",
       parse: (j) => {
-        const u = j?.data?.user;
-        if (u && (u.name || u.user_id)) {
-          return {
-            ok: true,
-            displayName: String(u.name || "头条号创作者"),
-            externalId: String(u.user_id || u.uid || ""),
-          };
-        }
-        return null;
+        if (j?.code !== 0) return null;
+        const u = j?.data;
+        const name = u && (u.name || u.screen_name || u.nickname);
+        const uid = u && (u.user_id || u.uid);
+        return {
+          ok: true,
+          displayName: String(name || "头条号创作者"),
+          externalId: String(uid || name || ""),
+        };
       },
     },
   ];
@@ -166,6 +194,140 @@ async function verifyViaCandidates(
     }
   }
   return { ok: false, message: `${label}凭据验证未通过：${errors.join("；")}` };
+}
+
+/**
+ * 验证官网凭据：用域名 + 令牌真实请求，自动识别官网类型。
+ * 1) 和光万象官网「好物推荐」：GET /api/stats（Bearer）
+ * 2) AI回忆录官网「心灵驿站」：GET /api/healing/sync-log（Bearer，需令牌）
+ * 任一路径通过即判定有效；两者都不通时如实返回各自失败原因。
+ */
+export async function verifySiteCredential(domain: string, token: string): Promise<VerifyResult> {
+  const base = domain.replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(base)) return { ok: false, message: "官网域名需以 http(s):// 开头" };
+  let host = base;
+  try { host = new URL(base).host; } catch { /* 保留原串 */ }
+  const errors: string[] = [];
+
+  // 1) 和光万象官网（好物推荐）
+  try {
+    const res = await fetch(`${base}/api/stats`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(15000),
+    });
+    if (res.ok) {
+      const data = await res.json().catch(() => null);
+      if (data?.ok) return { ok: true, displayName: `${host}（好物推荐）`, externalId: "", siteKind: "hgwx" };
+      errors.push("和光万象 /api/stats 返回异常");
+    } else {
+      errors.push(`和光万象 /api/stats HTTP ${res.status}`);
+    }
+  } catch (e) {
+    errors.push(`和光万象连接失败：${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // 2) AI回忆录官网 · 心灵驿站（写入接口需令牌，用它验证令牌有效性）
+  try {
+    const res = await fetch(`${base}/api/healing/sync-log?limit=1`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(15000),
+    });
+    if (res.ok) {
+      const meta = await fetch(`${base}/api/healing/meta`, {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+        signal: AbortSignal.timeout(15000),
+      }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const total = typeof meta?.total === "number" ? `已收录 ${meta.total} 篇` : "";
+      return { ok: true, displayName: `${host} · 心灵驿站${total ? `（${total}）` : ""}`, externalId: "", siteKind: "healing" };
+    }
+    if (res.status === 401 || res.status === 403) errors.push("心灵驿站令牌无效");
+    else errors.push(`心灵驿站 /api/healing/sync-log HTTP ${res.status}`);
+  } catch (e) {
+    errors.push(`心灵驿站连接失败：${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  return { ok: false, message: `官网凭据验证未通过：${errors.join("；")}` };
+}
+
+/**
+ * 读取当前用户的官网凭据（域名 / 令牌 / 类型）。
+ * 兼容早先只存 {domain,token} 的老凭据：按域名推断类型。
+ */
+export async function loadSiteCredential(
+  userId: string
+): Promise<{ accountId: string; credential: SiteCredential } | null> {
+  const account = await prisma.platformAccount.findFirst({
+    where: { userId, platform: "site", status: { not: "expired" } },
+    orderBy: { createdAt: "asc" },
+  });
+  if (!account?.credentialEnc) return null;
+  const parsed = parseTokenCredential(account.credentialEnc);
+  if (!parsed) return null;
+  return { accountId: account.id, credential: parsed };
+}
+
+/** 解析 {domain,token,kind} 凭据（老数据缺 kind 时按域名推断） */
+function parseTokenCredential(credentialEnc: string): SiteCredential | null {
+  let parsed: { domain?: string; token?: string; kind?: string };
+  try {
+    parsed = JSON.parse(decryptCredential(credentialEnc));
+  } catch {
+    return null;
+  }
+  const domain = String(parsed.domain || "").replace(/\/+$/, "");
+  const token = String(parsed.token || "");
+  if (!domain || !token) return null;
+  const kind: SiteKind = parsed.kind === "healing" || parsed.kind === "hgwx" ? parsed.kind : inferSiteKind(domain);
+  return { domain, token, kind };
+}
+
+/**
+ * 读取「心灵驿站」推送用的凭据：
+ * 1) 优先取专用授权（platform = healing）
+ * 2) 回退到官网卡片里配置的 aimemory.cafe（kind = healing）
+ */
+export async function loadHealingCredential(
+  userId: string
+): Promise<{ accountId: string; credential: SiteCredential } | null> {
+  const dedicated = await prisma.platformAccount.findFirst({
+    where: { userId, platform: "healing", status: { not: "expired" } },
+  });
+  if (dedicated?.credentialEnc) {
+    const parsed = parseTokenCredential(dedicated.credentialEnc);
+    if (parsed) return { accountId: dedicated.id, credential: { ...parsed, kind: "healing" } };
+  }
+  const site = await loadSiteCredential(userId);
+  if (site && site.credential.kind === "healing") return site;
+  return null;
+}
+
+/** 验证「心灵驿站」专用授权：GET /api/healing/sync-log（需令牌）+ /meta 拿频道信息 */
+export async function verifyHealingCredential(domain: string, token: string): Promise<VerifyResult> {
+  const base = domain.replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(base)) return { ok: false, message: "官网域名需以 http(s):// 开头" };
+  let host = base;
+  try { host = new URL(base).host; } catch { /* 保留原串 */ }
+  try {
+    const res = await fetch(`${base}/api/healing/sync-log?limit=1`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(15000),
+    });
+    if (res.status === 401 || res.status === 403) return { ok: false, message: "心灵驿站令牌无效" };
+    if (!res.ok) return { ok: false, message: `心灵驿站接口 HTTP ${res.status}（请确认域名已部署心灵驿站频道）` };
+    const meta = await fetch(`${base}/api/healing/meta`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(15000),
+    }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const total = typeof meta?.total === "number" ? `已收录 ${meta.total} 篇` : "";
+    return { ok: true, displayName: `${host} · 心灵驿站${total ? `（${total}）` : ""}`, externalId: "", siteKind: "healing" };
+  } catch (e) {
+    return { ok: false, message: `心灵驿站连接失败：${e instanceof Error ? e.message : String(e)}` };
+  }
 }
 
 /** 验证平台凭据（绑定前调用） */
@@ -216,6 +378,7 @@ async function upsertContentMetric(row: {
   title: string;
   category?: string | null;
   accountId?: string | null;
+  userId: string;
   views: number;
   impressions?: number;
   clicks: number;
@@ -227,7 +390,8 @@ async function upsertContentMetric(row: {
   const metricDate = todayKey();
   await prisma.platformContentMetric.upsert({
     where: {
-      platform_contentKey_metricDate: {
+      userId_platform_contentKey_metricDate: {
+        userId: row.userId,
         platform: row.platform,
         contentKey: row.contentKey,
         metricDate,
@@ -249,6 +413,7 @@ async function upsertContentMetric(row: {
       platform: row.platform,
       contentKey: row.contentKey,
       metricDate,
+      userId: row.userId,
       title: row.title,
       category: row.category ?? null,
       accountId: row.accountId ?? null,
@@ -294,25 +459,63 @@ async function pruneStaleMetrics(platform: string, accountId: string | null, liv
   return removed;
 }
 
-/** 官网渠道：拉官网统计接口写入本地库（站点 PV/UV + 内容浏览/点击） */
-export async function syncSiteMetrics(): Promise<{ ok: boolean; message: string; items?: number }> {
-  const token = process.env.HGWX_PUBLISH_TOKEN;
-  if (!token) return { ok: false, message: "未配置 HGWX_PUBLISH_TOKEN" };
+/** 官网渠道：拉当前用户配置的官网统计接口写入本地库（站点 PV/UV + 内容浏览/点击） */
+export async function syncSiteMetrics(userId: string): Promise<{ ok: boolean; message: string; items?: number }> {
+  const account = await prisma.platformAccount.findFirst({
+    where: { userId, platform: "site", status: { not: "expired" } },
+  });
+  if (!account?.credentialEnc) {
+    return { ok: false, message: "官网尚未授权，请先在「平台授权管理」完成配置" };
+  }
+  const loaded = await loadSiteCredential(userId);
+  if (!loaded) {
+    await markAccountError(account.id, "官网凭据不完整或解密失败，请重新配置");
+    return { ok: false, message: "官网凭据不完整或解密失败" };
+  }
+  const { domain, token, kind } = loaded.credential;
+
+  // 心灵驿站官网：只有内容推送接口，没有流量统计 → 明确跳过，不当作失败。
+  if (kind === "healing") {
+    await prisma.platformAccount.update({
+      where: { id: account.id },
+      data: { lastSyncAt: new Date(), status: "active", statusMsg: "官网（心灵驿站）仅支持内容推送，暂无流量统计" },
+    });
+    return { ok: true, message: "官网（心灵驿站）仅支持内容推送，暂无流量统计接口，已跳过" };
+  }
+
   try {
-    const res = await fetch("https://hgwx.aimemory.cafe/api/stats", {
-      headers: { Authorization: `Bearer ${token}` },
+    const res = await fetch(`${domain}/api/stats`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
       cache: "no-store",
     });
     if (!res.ok) return { ok: false, message: `官网统计接口 HTTP ${res.status}` };
     const data = await res.json();
-    if (!data?.ok) return { ok: false, message: "官网统计接口返回异常" };
-    const metricDate = todayKey();
-    if (data.site) {
+    if (!data?.ok) return { ok: false, message: "官网统计接口返回异常，请检查令牌" };
+    // 官网统计接口只给 todayPv，没有 todayUv；site.uv 是**累计** UV。
+    // 早先把 todayPv 和累计 uv 一起写进当天的行，导致「今日 UV > 今日 PV」这种矛盾。
+    // 正确做法：按接口给的逐日数据（site.days[]）逐天写入，PV/UV 口径才能对齐。
+    const dayList: Array<{ date?: unknown; pv?: unknown; uv?: unknown }> = Array.isArray(data.site?.days) ? data.site.days : [];
+    let siteDays = 0;
+    for (const d of dayList) {
+      const date = String(d?.date || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+      const payload = { pv: Number(d.pv) || 0, uv: Number(d.uv) || 0 };
       await prisma.platformSiteMetric.upsert({
-        where: { platform_metricDate: { platform: "site", metricDate } },
-        update: { pv: data.site.todayPv ?? 0, uv: data.site.uv ?? 0 },
-        create: { platform: "site", metricDate, pv: data.site.todayPv ?? 0, uv: data.site.uv ?? 0 },
+        where: { userId_platform_metricDate: { userId, platform: "site", metricDate: date } },
+        update: payload,
+        create: { userId, platform: "site", metricDate: date, ...payload },
       });
+      siteDays++;
+    }
+    // 兜底：接口没返回 days 时，只补今日 PV（UV 未知，不要拿累计值冒充）
+    if (siteDays === 0 && typeof data.site?.todayPv === "number") {
+      const metricDate = todayKey();
+      await prisma.platformSiteMetric.upsert({
+        where: { userId_platform_metricDate: { userId, platform: "site", metricDate } },
+        update: { pv: data.site.todayPv },
+        create: { userId, platform: "site", metricDate, pv: data.site.todayPv, uv: 0 },
+      });
+      siteDays = 1;
     }
     const items: any[] = data.items || [];
     for (const it of items) {
@@ -323,6 +526,8 @@ export async function syncSiteMetrics(): Promise<{ ok: boolean; message: string;
         category: it.category || null,
         views: it.views || 0,
         clicks: it.clicks || 0,
+        userId,
+        accountId: account.id,
       });
     }
     // 原文入库：官网内容的正文在本地内容库（PublishRecord → ContentItem）
@@ -351,12 +556,21 @@ export async function syncSiteMetrics(): Promise<{ ok: boolean; message: string;
       });
       bodies++;
     }
+    await prisma.platformAccount.update({
+      where: { id: account.id },
+      data: {
+        lastSyncAt: new Date(),
+        status: "active",
+        statusMsg: `同步成功（${items.length} 条内容${siteDays ? `，站点流量 ${siteDays} 天` : ""}${bodies ? `，原文 ${bodies} 篇` : ""}）`,
+      },
+    });
     return {
       ok: true,
-      message: `官网数据同步完成：${items.length} 条内容${bodies ? `，原文 ${bodies} 篇` : ""}`,
+      message: `官网数据同步完成：${items.length} 条内容${siteDays ? `，站点流量 ${siteDays} 天` : ""}${bodies ? `，原文 ${bodies} 篇` : ""}`,
       items: items.length,
     };
   } catch (e) {
+    await markAccountError(account.id, `同步失败：${e instanceof Error ? e.message : String(e)}`).catch(() => {});
     return { ok: false, message: `官网数据同步失败：${e instanceof Error ? e.message : String(e)}` };
   }
 }
@@ -424,7 +638,7 @@ function triggerXhsCollector(cookie: string, accountId: string): boolean {
     const child = spawn(
       process.execPath,
       [path.join(root, "scripts", "xhs-collect.mjs")],
-      { cwd: root, detached: true, stdio: "ignore" }
+      { cwd: root, detached: true, stdio: "ignore", env: { ...process.env, ACCOUNT_ID: accountId } }
     );
     child.on("exit", () => {
       try { fs.unlinkSync(lockFile); } catch {}
@@ -543,7 +757,7 @@ export async function syncToutiaoMetrics(accountId: string): Promise<{ ok: boole
   }
 
   for (const [contentKey, row] of byId) {
-    await upsertContentMetric({ platform: "toutiao", contentKey, accountId, ...row });
+    await upsertContentMetric({ platform: "toutiao", contentKey, accountId, userId: account.userId, ...row });
   }
   // 原文入库：图文（微头条）的正文 feed 里就有，存下来供拆解使用；
   // 视频没有可拆解的文本，不写原文记录（前端据此禁用拆解）。
@@ -592,11 +806,13 @@ async function markAccountError(accountId: string, msg: string) {
     .catch(() => {});
 }
 
-/** 同步全部渠道：官网 + 所有已授权账号 */
-export async function syncAllPlatforms() {
+/** 同步当前用户全部渠道：官网 + 该用户已授权的账号 */
+export async function syncAllPlatforms(userId: string) {
   const results: Array<{ platform: string; ok: boolean; message: string; items?: number }> = [];
-  results.push({ platform: "site", ...(await syncSiteMetrics()) });
-  const accounts = await prisma.platformAccount.findMany({ where: { status: { not: "expired" } } });
+  results.push({ platform: "site", ...(await syncSiteMetrics(userId)) });
+  const accounts = await prisma.platformAccount.findMany({
+    where: { userId, platform: { in: ["xhs", "toutiao"] }, status: { not: "expired" } },
+  });
   for (const acc of accounts) {
     if (acc.platform === "xhs") results.push({ platform: "xhs", ...(await syncXhsMetrics(acc.id)) });
     if (acc.platform === "toutiao") results.push({ platform: "toutiao", ...(await syncToutiaoMetrics(acc.id)) });

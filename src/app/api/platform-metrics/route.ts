@@ -19,14 +19,20 @@ export async function GET(req: Request) {
 
   // 全量取回做「每内容最新一天」聚合（当前库量千级，安全；明细单独截 Top 100）
   const metrics = await prisma.platformContentMetric.findMany({
+    where: { userId: user.id },
     orderBy: { updatedAt: "desc" },
     take: 20000,
   });
-  const siteMetrics = await prisma.platformSiteMetric.findMany({
-    orderBy: { metricDate: "asc" },
+  // ⚠️ 要取「最近 N 天」必须 desc + take 再翻回升序：
+  // 直接 asc + take 拿到的是最旧的 N 天，天数一超上限「官网今日 PV/UV」就会停在旧日期上。
+  const siteRecent = await prisma.platformSiteMetric.findMany({
+    where: { userId: user.id },
+    orderBy: { metricDate: "desc" },
     take: days,
   });
+  const siteMetrics = siteRecent.reverse();
   const accounts = await prisma.platformAccount.findMany({
+    where: { userId: user.id },
     select: { id: true, platform: true, displayName: true, status: true, lastSyncAt: true },
   });
 

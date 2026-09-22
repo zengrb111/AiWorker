@@ -2099,6 +2099,11 @@ textarea:focus {
   color: #7c3aed;
 }
 
+.category-tag.tag-toutiao {
+  background: #e6f7f1;
+  color: #0d9373;
+}
+
 .category-tag.tag-other {
   background: #eef1f6;
   color: #64748b;
@@ -3076,6 +3081,20 @@ textarea:focus {
   font-size: 12px;
 }
 
+/* 列表为空时的重试入口（网关可能比页面晚起来） */
+.model-panel-retry {
+  margin-left: 8px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.model-panel-retry:hover { background: rgba(43, 124, 255, 0.08); }
+
 .model-option {
   display: flex;
   align-items: center;
@@ -3354,6 +3373,7 @@ textarea:focus {
 }
 
 .acct-plat-badge.site { background: linear-gradient(135deg, #4d94ff, #155bd4); }
+.acct-plat-badge.healing { background: linear-gradient(135deg, #14b8a6, #0d9488); }
 .acct-plat-badge.xhs { background: linear-gradient(135deg, #ff4d67, #d9163a); }
 .acct-plat-badge.toutiao { background: linear-gradient(135deg, #ff5f5f, #d92b2b); }
 
@@ -3436,6 +3456,7 @@ textarea:focus {
   background: #f6f9ff;
   border-radius: 10px;
   padding: 10px 12px;
+  white-space: pre-line;
 }
 
 .acct-cookie-input {
@@ -3450,6 +3471,22 @@ textarea:focus {
 }
 
 .acct-cookie-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(43, 124, 255, 0.15);
+}
+
+.acct-input {
+  width: 100%;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+}
+
+.acct-input:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(43, 124, 255, 0.15);
@@ -3850,6 +3887,17 @@ textarea:focus {
 .publish-site-button:disabled {
   opacity: 0.55;
   cursor: default;
+}
+
+/* 「推送心灵驿站」按钮：与「发布官网」区分，用青绿色 */
+.publish-healing-button {
+  border-color: #0f9d8f;
+  color: #0f9d8f;
+}
+
+.publish-healing-button:hover:not(:disabled) {
+  background: #0f9d8f;
+  color: #fff;
 }
 
 @media (max-width: 900px) {

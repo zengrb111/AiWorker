@@ -19,6 +19,9 @@ model User {
   contentItems   ContentItem[]
   openClawTasks  OpenClawTask[]
   knowledgeBases KnowledgeBase[]
+  platformAccounts       PlatformAccount[]
+  platformSiteMetrics    PlatformSiteMetric[]
+  platformContentMetrics PlatformContentMetric[]
 }
 
 model WechatBinding {
@@ -101,27 +104,31 @@ model PublishRecord {
   createdAt      DateTime    @default(now())
 }
 
-/// 平台授权账号（官网渠道免授权；小红书/头条号以创作者后台 Cookie 授权）
+/// 平台授权账号（按登录用户隔离；官网/小红书/头条号各自授权，凭据加密存储）
 model PlatformAccount {
   id            String    @id @default(cuid())
+  userId        String    // 归属登录用户
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   platform      String    // site | xhs | toutiao
-  displayName   String    // 平台侧账号昵称 / 名称
-  externalId    String?   // 平台侧用户/账号 ID
-  credentialEnc String?   // AES-256-GCM 加密的凭据（Cookie）
+  displayName   String    // 平台侧账号昵称 / 名称（官网为域名）
+  externalId    String?   // 平台侧用户/账号 ID（官网为 null）
+  credentialEnc String?   // AES-256-GCM 加密的凭据（小红书/头条号=Cookie；官网={domain,token} JSON）
   status        String    @default("active") // active | expired | error
   statusMsg     String?   // 最近一次校验/同步结果说明
-  boundBy       String?   // 绑定人（账号手机号）
+  boundBy       String?   // 绑定人（账号手机号，便于展示）
   lastSyncAt    DateTime?
   lastVerifyAt  DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   metrics       PlatformContentMetric[]
-  @@unique([platform, externalId])
+  @@unique([userId, platform])
 }
 
-/// 平台内容效果数据（按天、按内容；官网数据每日覆盖更新）
+/// 平台内容效果数据（按天、按内容；按登录用户隔离）
 model PlatformContentMetric {
   id         String           @id @default(cuid())
+  userId     String           // 归属登录用户（解绑账号时仍保留，避免效果数据丢失）
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   account    PlatformAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
   accountId  String?
   platform   String           // site | xhs | toutiao
@@ -139,7 +146,7 @@ model PlatformContentMetric {
   visible     Boolean          @default(true) // 该内容当前是否仍公开可见（同步时不在公开列表里的会被移除）
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
-  @@unique([platform, contentKey, metricDate])
+  @@unique([userId, platform, contentKey, metricDate])
   @@index([platform, metricDate])
 }
 
@@ -178,14 +185,16 @@ model ContentBreakdown {
   @@index([status])
 }
 
-/// 平台站点级流量（按天 PV/UV）
+/// 平台站点级流量（按天 PV/UV，按登录用户隔离）
 model PlatformSiteMetric {
   id         String @id @default(cuid())
+  userId     String // 归属登录用户
+  user       User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   platform   String // site | xhs | toutiao
   metricDate String // yyyy-MM-dd
   pv         Int    @default(0)
   uv         Int    @default(0)
-  @@unique([platform, metricDate])
+  @@unique([userId, platform, metricDate])
 }
 
 /// RAG 知识库
