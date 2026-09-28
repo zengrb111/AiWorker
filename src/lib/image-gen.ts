@@ -260,6 +260,8 @@ async function zhipuGenerateImage(prompt: string, width: number, height: number)
       model: ZHIPU_IMAGE_MODEL,
       prompt: prompt.slice(0, 1000),
       size: `${w}x${h}`,
+      // 智谱 CogView 默认在图片右下角加「AI生成」水印，生成内容图必须关掉。
+      watermark_enabled: false,
     }),
     signal: AbortSignal.timeout(120_000),
   });
