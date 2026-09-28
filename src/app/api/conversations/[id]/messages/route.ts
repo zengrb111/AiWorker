@@ -14,6 +14,12 @@ import {
   type ReferenceGroup
 } from "@/lib/kb-hot-topics";
 import { fetchXiaohongshuNote, formatXhsForPrompt } from "@/lib/xhs-parse";
+import {
+  PUBLISH_CHANNEL_LABEL,
+  loadPlatformAuthContext,
+  resolvePublishChannels,
+  type PlatformAuthEntry
+} from "@/lib/platform-auth-context";
 
 type MessageBody = {
   content?: string;
@@ -93,7 +99,11 @@ function isContentCreationRequest(content: string): boolean {
   );
 }
 
-function buildReferenceProcessMarkdown(groups: ReferenceGroup[], platformLabel: string): string {
+function buildReferenceProcessMarkdown(
+  groups: ReferenceGroup[],
+  platformLabel: string,
+  authEntries: PlatformAuthEntry[] = []
+): string {
   const lines: string[] = [];
   lines.push(`## 📚 创作参考（已读取你的知识库与 IP 人设）`);
   lines.push("");
@@ -123,7 +133,23 @@ function buildReferenceProcessMarkdown(groups: ReferenceGroup[], platformLabel: 
   if (!anyHit) {
     lines.push("_知识库中暂未检索到与本次选题强相关的片段，将基于通用经验并保持你已设定的人设一致性来写。_");
     lines.push("");
+  }
+
+  // 让用户看到这次创作「有哪些渠道可以发」——数据来自平台授权管理，不含任何密钥
+  const channels = resolvePublishChannels(authEntries);
+  lines.push("**发布渠道（来自「平台授权管理」）**");
+  if (channels.length > 0) {
+    lines.push(
+      `- 可自动发布：${channels.map((c) => PUBLISH_CHANNEL_LABEL[c]).join("、")}（内容入库后可在内容库详情页一键发布，定时任务也会按此授权自动发布）`
+    );
   } else {
+    lines.push(
+      "- 当前没有可自动发布的渠道：小红书 / 头条号仅用于数据采集。需要自动发布请先在「平台授权管理」授权官网（好物推荐）或官网-AI回忆录（心灵驿站）。"
+    );
+  }
+  lines.push("");
+
+  if (anyHit) {
     lines.push("下面据此组织人设语气与产品植入，生成正文 👇");
     lines.push("");
     lines.push("---");
@@ -132,7 +158,7 @@ function buildReferenceProcessMarkdown(groups: ReferenceGroup[], platformLabel: 
   return lines.join("\n");
 }
 
-function buildTaskPrompt(contextText: string, content: string, kbText?: string): string {
+function buildTaskPrompt(contextText: string, content: string, kbText?: string, authText?: string): string {
   // 图文/文案类请求：约定输出格式（# 一级标题开头），让自动入库判定稳定命中，
   // 也保证 generateArticleTitle 能提到干净的标题。
   const isArticleRequest = /(写一篇|写篇|写个?文案|写个?图文|生成一篇|生成篇|小红书(风格|文案|图文)|公众号(风格|文案|图文|文章)|文章正文|软文)/i.test(content);
@@ -154,7 +180,19 @@ function buildTaskPrompt(contextText: string, content: string, kbText?: string):
           kbText
         ]
       : []),
-    ...(isArticleRequest ? ["", articleFormatInstruction(content)] : []),
+    ...(authText
+      ? [
+          "",
+          "【当前账号已授权的发布渠道（来自「平台授权管理」，凭据由服务端加密保存）】",
+          authText,
+          "回答要求：涉及发布/分发的问题，只依据上面的渠道作答；不要在回答里输出、索要或猜测任何令牌、Cookie 或密钥；用户要求发布到未授权的渠道时，提示其先到「平台授权管理」完成授权。"
+        ]
+      : []),
+    // 所有内容创作类请求都约定「第一行必须是 # 标题」——既让自动入库判定稳定命中，
+    // 也保证 generateArticleTitle 能提到干净的标题。
+    ...(isArticleRequest || isContentCreationRequest(content)
+      ? ["", articleFormatInstruction(content)]
+      : []),
     ...(isHotTopicsRequest
       ? [
           "",
@@ -186,13 +224,23 @@ async function upgradeCoverInBackground(
   }
 }
 
+/**
+ * 成品图文的「标题行」形态：`# 标题` / `## 标题`，或老格式的 `**标题：xxx**`。
+ */
+const ARTICLE_TITLE_LINE = /^(?:#{1,6}\s+\S|\*\*\s*标题\s*[:：]\s*\S)/;
+
 function shouldAutoSave(userMessage: string, _conversationContext: string, assistantContent: string): boolean {
   // 内容创作类指令（小红书创作 / 公众号创作 / 头条号创作 / 写一篇…）+ 产出足够长
-  // → 直接入库，不再用「标题 / 结构特征」过滤。此前的结构启发式会把
-  // 「写一篇小红书风格的图文」这类正常产出误杀（如开头是"以下是"、没有 # 标题等），
-  // 导致创作结果没进内容库。
+  // → 入库。刻意不用「标题 / 结构特征」的细粒度启发式，避免把正常产出误杀。
   if (assistantContent.trim().length < 200) return false;
-  return isContentCreationRequest(userMessage);
+  if (!isContentCreationRequest(userMessage)) return false;
+  // 但产出必须真的是成品图文：首行是标题。否则「帮我改定时任务，让它写一篇公众号文章」
+  // 这类元操作对话（回复是英文前言 / 过程说明）会被误当成文章入库，产生垃圾条目。
+  const firstLine = assistantContent
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean) ?? "";
+  return ARTICLE_TITLE_LINE.test(firstLine);
 }
 
 /**
@@ -704,6 +752,9 @@ await prisma.message.create({
   // 用户没有可用知识库切片时 kbText 为空，prompt 不注入该段，行为等同此前。
   let kbText = "";
   let referenceProcess = "";
+  // 当前用户在「平台授权管理」里已授权的渠道（会话据此知道能发到哪、不能发到哪）
+  const authCtx = await loadPlatformAuthContext(user.id);
+  const isCreationRequest = isContentCreationRequest(content);
   const kbCtx = await loadUserKbContext(user.id);
   if (kbCtx) {
     kbText = await retrieveReferenceChunks(
@@ -711,23 +762,25 @@ await prisma.message.create({
       kbCtx,
       5
     );
-    // 内容创作类请求：先算出"参考了哪些知识库 / IP 人设"的过程，
-    // 生成正文前以可见段落展示，并随正文一起入库（持久化）。
-    if (isContentCreationRequest(content)) {
-      const platformLabel = detectCategory(content, conversationContext) === "小红书" ? "小红书" : "公众号";
-      const groups = await retrieveReferenceGroups(
-        [
-          { label: "IP 人设 / 调性", query: "账号人设 IP定位 风格 调性 语气 粉丝画像" },
-          { label: "产品卖点 / 用户痛点", query: "产品 卖点 参数 使用场景 用户痛点" },
-          { label: "本选题相关素材", query: content }
-        ],
-        kbCtx,
-        3
-      );
-      referenceProcess = buildReferenceProcessMarkdown(groups, platformLabel);
-    }
   }
-  const prompt = buildTaskPrompt(conversationContext, content, kbText);
+  // 内容创作类请求：先算出"参考了哪些知识库 / IP 人设 / 可发布渠道"的过程，
+  // 生成正文前以可见段落展示，并随正文一起入库（持久化）。
+  if (isCreationRequest) {
+    const platformLabel = detectCategory(content, conversationContext) === "小红书" ? "小红书" : "公众号";
+    const groups = kbCtx
+      ? await retrieveReferenceGroups(
+          [
+            { label: "IP 人设 / 调性", query: "账号人设 IP定位 风格 调性 语气 粉丝画像" },
+            { label: "产品卖点 / 用户痛点", query: "产品 卖点 参数 使用场景 用户痛点" },
+            { label: "本选题相关素材", query: content }
+          ],
+          kbCtx,
+          3
+        )
+      : [];
+    referenceProcess = buildReferenceProcessMarkdown(groups, platformLabel, authCtx.entries);
+  }
+  const prompt = buildTaskPrompt(conversationContext, content, kbText, authCtx.promptBlock);
 
   const task = await prisma.openClawTask.create({
     data: {

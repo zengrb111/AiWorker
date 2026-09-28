@@ -255,3 +255,89 @@ export async function publishContentToHealing(
     throw error;
   }
 }
+
+export type HealingDeleteResult = {
+  ok: boolean;
+  /** 线上频道侧的条目 id */
+  remoteId: string | null;
+  title: string | null;
+  /** 已经不在线上（可能是被手动删过） */
+  alreadyGone?: boolean;
+  message: string;
+};
+
+/**
+ * 从 AI回忆录官网「心灵驿站」频道删除一条已发布的图文。
+ *
+ * 删除依据是本地的发布记录（PublishRecord）：取这条内容在该频道最近一次
+ * 发布成功的 remoteId，调官网 `DELETE /api/healing/posts/{id}`。
+ * 成功/已不存在都会把记录状态标记为 DELETED，这样之后再点发布不会被幂等规则拦住。
+ */
+export async function deleteContentFromHealing(
+  contentItemId: string,
+  userId: string,
+  options: { remoteId?: string } = {}
+): Promise<HealingDeleteResult> {
+  const item = await prisma.contentItem.findFirst({
+    where: { id: contentItemId, userId },
+    select: { id: true, title: true },
+  });
+  if (!item) throw new Error("内容不存在。");
+
+  const loaded = await loadHealingCredential(userId);
+  if (!loaded) {
+    throw new Error(
+      "尚未配置心灵驿站授权。请到「平台授权管理」给「官网-AI回忆录」填写 https://aimemory.cafe 与令牌（或把官网卡片配置为 aimemory.cafe）。"
+    );
+  }
+
+  const record = await prisma.publishRecord.findFirst({
+    where: {
+      contentItemId: item.id,
+      channel: HEALING_CHANNEL,
+      status: "SUCCESS",
+      ...(options.remoteId ? { remoteId: options.remoteId } : {}),
+    },
+    orderBy: { publishedAt: "desc" },
+  });
+
+  const remoteId = options.remoteId || record?.remoteId || null;
+  if (!remoteId) {
+    return {
+      ok: false,
+      remoteId: null,
+      title: item.title,
+      message: "本地没有该内容的推送成功记录，无法确定线上条目；请到心灵驿站后台确认。",
+    };
+  }
+
+  const base = loaded.credential.domain.replace(/\/+$/, "");
+  const res = await fetch(`${base}/api/healing/posts/${encodeURIComponent(remoteId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${loaded.credential.token}` },
+    signal: AbortSignal.timeout(20_000),
+  });
+
+  if (res.ok) {
+    if (record) {
+      await prisma.publishRecord.update({ where: { id: record.id }, data: { status: "DELETED" } });
+    }
+    return { ok: true, remoteId, title: item.title, message: `已从心灵驿站删除（${remoteId}）` };
+  }
+
+  if (res.status === 404) {
+    if (record) {
+      await prisma.publishRecord.update({ where: { id: record.id }, data: { status: "DELETED" } });
+    }
+    return {
+      ok: true,
+      remoteId,
+      title: item.title,
+      alreadyGone: true,
+      message: `线上已不存在该条目（${remoteId}），本地记录已标记为已删除`,
+    };
+  }
+
+  const text = await res.text().catch(() => "");
+  throw new Error(`心灵驿站删除失败 HTTP ${res.status}${text ? `：${text.slice(0, 200)}` : ""}`);
+}

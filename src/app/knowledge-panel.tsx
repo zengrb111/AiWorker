@@ -144,6 +144,7 @@ function statusMeta(status: string, docCount: number) {
 function kindMeta(kind: string) {
   if (kind === "image") return { cls: "img", text: "图片" };
   if (kind === "rich") return { cls: "rich", text: "图文" };
+  if (kind === "url") return { cls: "url", text: "网页" };
   return { cls: "txt", text: "文本" };
 }
 
@@ -196,6 +197,8 @@ export default function KnowledgePanel({ resetToken = 0 }: { resetToken?: number
   const [notice, setNotice] = useState("");
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [urlInput, setUrlInput] = useState("");
+  const [fetchingUrl, setFetchingUrl] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const editTargetRef = useRef<string | null>(null);
 
@@ -390,6 +393,35 @@ export default function KnowledgePanel({ resetToken = 0 }: { resetToken?: number
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  async function addUrl() {
+    const url = urlInput.trim();
+    if (!url || !detail) {
+      setNotice(url ? "请稍候…" : "请粘贴网页链接。");
+      return;
+    }
+    setFetchingUrl(true);
+    setNotice("");
+    try {
+      const data = await kbApi<{ document: KbDocument; chunkCount: number }>(
+        `/api/knowledge/${detail.knowledgeBase.id}/fetch-url`,
+        { method: "POST", body: JSON.stringify({ url }) }
+      );
+      await loadDetail(detail.knowledgeBase.id);
+      await loadList();
+      setUrlInput("");
+      setNotice(
+        data.chunkCount > 0
+          ? `已获取网页并切片 ${data.chunkCount} 条（${data.document.filename}）。`
+          : `已获取网页，但未提取到正文（${data.document.filename}），可换一个链接试试。`
+      );
+      if (data.chunkCount > 0) setStep(2);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "获取失败");
+    } finally {
+      setFetchingUrl(false);
     }
   }
 
@@ -663,6 +695,21 @@ export default function KnowledgePanel({ resetToken = 0 }: { resetToken?: number
                     style={{ display: "none" }}
                     onChange={(event) => event.target.files && void uploadFiles(event.target.files)}
                   />
+
+                  <div className="kb-url-row">
+                    <span className="kb-url-ic" aria-hidden>🔗</span>
+                    <input
+                      className="kb-url-input"
+                      value={urlInput}
+                      placeholder="粘贴网页链接获取正文，例如 https://mp.weixin.qq.com/s/…"
+                      onChange={(event) => setUrlInput(event.target.value)}
+                      onKeyDown={(event) => { if (event.key === "Enter" && !fetchingUrl) void addUrl(); }}
+                    />
+                    <button className="kb-btn primary" disabled={fetchingUrl || !urlInput.trim()} onClick={() => void addUrl()}>
+                      {fetchingUrl ? "获取中…" : "获取网页并切片"}
+                    </button>
+                  </div>
+                  <span className="kb-url-hint">支持公开网页（公众号 / 知乎 / 新闻等），自动抓取正文并按当前切片策略分片，之后直接进入训练。</span>
 
                   {detail!.documents.length > 0 && (
                     <div className="kb-doc-list">

@@ -262,6 +262,53 @@ export function normalizeWhitespace(input: string): string {
     .trim();
 }
 
+/* ------------------------------- 网页正文提取 ----------------------------- */
+
+export type HtmlReading = { title: string; text: string };
+
+function stripTags(input: string): string {
+  return input.replace(/<[^>]+>/g, " ");
+}
+
+/** 从 HTML 中抽取标题与正文：去除脚本/样式/导航等样板，按语义容器优先取正文 */
+export function extractHtmlMainText(html: string, fallbackTitle = ""): HtmlReading {
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = titleMatch
+    ? normalizeWhitespace(decodeEntities(stripTags(titleMatch[1])))
+    : fallbackTitle;
+
+  // 1) 整体去掉样板标签块（保留正文结构）
+  const cleaned = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(
+      /<(script|style|noscript|svg|template|head|nav|header|footer|aside|form|button|iframe|link|meta|noscript|canvas|audio|video|path|symbol)[^>]*>[\s\S]*?<\/\1>/gi,
+      " "
+    );
+
+  // 2) 优先取 <article> / <main> 作为正文容器
+  const pick = (tag: string): string | null => {
+    const m = cleaned.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"));
+    return m ? m[1] : null;
+  };
+  const container = pick("article") ?? pick("main") ?? cleaned;
+
+  // 3) 块级标签换换行，其余标签剥离，解码实体
+  const toText = (raw: string): string =>
+    normalizeWhitespace(
+      decodeEntities(stripTags(raw.replace(/<\s*(p|div|br|h[1-6]|li|tr|section|article|blockquote|pre|td|th)[^>]*>/gi, "\n")))
+    );
+
+  let text = toText(container);
+
+  // 4) 正文过短（如首页/落地页）则退回到整页 body 文本再试一次
+  if (text.length < 120) {
+    const bodyMatch = cleaned.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+    text = toText(bodyMatch ? bodyMatch[1] : cleaned);
+  }
+
+  return { title, text };
+}
+
 /* ----------------------------------- 入口 ---------------------------------- */
 
 export async function extractDocumentText(buf: Buffer, filename: string): Promise<ExtractResult> {
