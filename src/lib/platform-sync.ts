@@ -575,6 +575,25 @@ export async function syncSiteMetrics(userId: string): Promise<{ ok: boolean; me
   }
 }
 
+/**
+ * 读取当前用户「小红书」授权 Cookie（用于浏览器通道读笔记原文等）。
+ * 解密失败 / 未授权返回 null，调用方应回退到本地 .xhs-cookie.txt。
+ */
+export async function loadXhsCookie(userId: string): Promise<string | null> {
+  const account = await prisma.platformAccount.findFirst({
+    where: { userId, platform: "xhs", status: { not: "expired" } },
+    orderBy: { createdAt: "asc" }
+  });
+  if (!account?.credentialEnc) return null;
+  try {
+    const { decryptCredential } = await import("./platform-creds");
+    const cookie = decryptCredential(account.credentialEnc).trim();
+    return cookie || null;
+  } catch {
+    return null;
+  }
+}
+
 /** 小红书渠道：用授权 Cookie 拉创作者中心笔记数据 */
 export async function syncXhsMetrics(accountId: string): Promise<{ ok: boolean; message: string; items?: number }> {
   const account = await prisma.platformAccount.findUnique({ where: { id: accountId } });

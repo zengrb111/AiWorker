@@ -14,6 +14,8 @@ import {
   type ReferenceGroup
 } from "@/lib/kb-hot-topics";
 import { fetchXiaohongshuNote, formatXhsForPrompt } from "@/lib/xhs-parse";
+import { fetchXhsNoteViaBrowser } from "@/lib/xhs-note-browser";
+import { loadXhsCookie } from "@/lib/platform-sync";
 import {
   PUBLISH_CHANNEL_LABEL,
   loadPlatformAuthContext,
@@ -352,7 +354,7 @@ function buildProductHotTopicReply(matched: HotTopicMatch[], reference: HotTopic
 }
 
 /** 阶段一：要求模型抓取并拆解爆款链接的结构。有 parsed 原文时直接基于真实内容拆解。 */
-function buildDecomposePrompt(url: string, parsed?: string | null): string {
+function buildDecomposePrompt(url: string, parsed?: string | null, failNote?: string | null): string {
   const head = [
     "请对以下爆款内容做结构拆解（只做结构分析，不要改写）：",
     "",
@@ -377,6 +379,17 @@ function buildDecomposePrompt(url: string, parsed?: string | null): string {
       "该链接已有系统解析出的原文内容（来自页面内嵌数据），请直接基于真实内容做拆解，不要再尝试抓取页面：",
       "",
       parsed,
+      ...tail
+    ].join("\n");
+  }
+  if (failNote) {
+    return [
+      ...head,
+      "",
+      "系统已经尝试读取该链接，但失败了。**请原样转述下面这个失败原因给用户，不要编造别的原因**（例如不要说是「未登录」或「平台限制」以外的猜测）：",
+      failNote,
+      "",
+      "然后基于你对该平台爆款内容的通用认知，给出上面 8 个维度的拆解框架，并明确标注「以下框架不含该篇真实原文」。",
       ...tail
     ].join("\n");
   }
@@ -605,20 +618,32 @@ export async function POST(request: Request, context: { params: { id: string } }
           });
           taskId = task.id;
 
-          // 对小红书链接：直接服务端解析页面内嵌的 INITIAL_STATE，拿到真实原文注入后续 prompt
+          // 对小红书链接：先试服务端直连解析，失败则走「已登录浏览器通道」（CDP）读原文。
+          // App 分享链接（xsec_source=app_share）被小红书限制为仅 App 内可看，会明确提示用户换链接。
           let xhsParsed: string | null = null;
-          if (/xiaohongshu\.com|xhslink\.com/i.test(url)) {
+          let xhsFailNote: string | null = null;
+          if (/xiaohongshu\.com|xhslink\.com|xhslink\.cn/i.test(url)) {
             try {
-              controller.enqueue(sseEncode({ type: "delta", text: "正在解析小红书页面数据（INITIAL_STATE）…\n" }));
-              const note = await fetchXiaohongshuNote(url);
+              controller.enqueue(sseEncode({ type: "delta", text: "正在读取小红书笔记原文…\n" }));
+              let note = await fetchXiaohongshuNote(url);
+              if (!note) {
+                controller.enqueue(sseEncode({ type: "delta", text: "直连拿不到（小红书要求登录态），改用本机浏览器通道读取…\n" }));
+                const cookie = await loadXhsCookie(user.id);
+                const result = await fetchXhsNoteViaBrowser(url, { cookie });
+                if (result.ok) {
+                  note = result.note;
+                } else {
+                  xhsFailNote = result.message;
+                  controller.enqueue(sseEncode({ type: "delta", text: `⚠️ 未能读取原文：${result.message}\n` }));
+                }
+              }
               if (note) {
                 xhsParsed = formatXhsForPrompt(note);
-                controller.enqueue(sseEncode({ type: "delta", text: `已解析到标题「${note.title || "（无标题）"}」${note.author ? ` · 作者 ${note.author}` : ""}，进入拆解。\n` }));
-              } else {
-                controller.enqueue(sseEncode({ type: "delta", text: "页面数据解析未成功，将改为让模型直接抓取链接。\n" }));
+                controller.enqueue(sseEncode({ type: "delta", text: `✅ 已读取到原文：标题「${note.title || "（无标题）"}」${note.author ? ` · 作者 ${note.author}` : ""}，进入拆解。\n` }));
               }
-            } catch {
+            } catch (error) {
               xhsParsed = null;
+              xhsFailNote = `读取小红书原文时出错：${error instanceof Error ? error.message : String(error)}`;
             }
           }
 
@@ -628,7 +653,7 @@ export async function POST(request: Request, context: { params: { id: string } }
           const decomposeResult = await openClawClient.sendTaskStream(
             {
               message: "一键仿写爆款-内容拆解",
-              prompt: buildDecomposePrompt(url, xhsParsed),
+              prompt: buildDecomposePrompt(url, xhsParsed, xhsFailNote),
               conversationId: conversation.id,
               userId: user.id
             },
