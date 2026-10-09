@@ -2156,6 +2156,7 @@ textarea:focus {
 
 .detail-title-row,
 .detail-body-row,
+.content-detail > .detail-image-block,
 .content-detail > span,
 .content-detail > .article-body,
 .content-detail > .content-edit-area,
@@ -2182,11 +2183,15 @@ textarea:focus {
 .detail-image-block {
   display: grid;
   gap: 8px;
-  justify-items: center;
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--panel);
+}
+
+/* 单封面场景保持居中；多图（master-grid）需要占满整行宽度 */
+.detail-image-block .detail-cover {
+  justify-self: center;
 }
 
 .detail-image-label {
@@ -2285,7 +2290,7 @@ textarea:focus {
 }
 
 .master-cell {
-  flex: 0 0 160px;
+  flex: 1 0 160px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2318,6 +2323,93 @@ textarea:focus {
 
 .master-acts button:hover {
   background: var(--panel-soft);
+}
+
+/* 详情页图片灯箱：点击主图放大，←/→ 切换，Esc 关闭 */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(13, 20, 33, 0.85);
+  animation: lightbox-fade 0.18s ease;
+}
+
+.lightbox-img {
+  max-width: 86vw;
+  max-height: 88vh;
+  object-fit: contain;
+  border-radius: 10px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+}
+
+.lightbox-close {
+  position: absolute;
+  top: 20px;
+  right: 26px;
+  width: 42px;
+  height: 42px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.lightbox-close:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.lightbox-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 48px;
+  height: 64px;
+  border: none;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 30px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.lightbox-nav:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+.lightbox-prev { left: 26px; }
+.lightbox-next { right: 26px; }
+
+.lightbox-counter {
+  position: absolute;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+@keyframes lightbox-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 可点击放大的图片给抓取手势 */
+.master-img,
+.detail-cover {
+  cursor: zoom-in;
 }
 
 /* 对话气泡里渲染的仿写主图 */

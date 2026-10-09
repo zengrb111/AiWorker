@@ -426,11 +426,46 @@ export default function PlatformClient() {
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [rewriteUrlModal, setRewriteUrlModal] = useState(false);
   const [rewriteUrl, setRewriteUrl] = useState("");
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === activeConversationId) ?? conversations[0],
     [activeConversationId, conversations]
   );
+
+  // 详情页灯箱图片列表：多主图优先，否则单封面
+  const detailLightboxImages = useMemo(() => {
+    if (!activeContent) return [] as string[];
+    const masters = parseInlineImages(activeContent.inlineImagesJson);
+    if (masters.length > 0) return masters;
+    return activeContent.coverImageUrl ? [activeContent.coverImageUrl] : [];
+  }, [activeContent]);
+
+  // 切换内容时关闭灯箱
+  useEffect(() => {
+    setLightboxIndex(null);
+  }, [activeContent?.id]);
+
+  // 灯箱键盘导航：← 上一张 / → 下一张 / Esc 关闭（首尾循环）
+  useEffect(() => {
+    if (lightboxIndex === null) return;
+    const count = detailLightboxImages.length;
+    if (count === 0) {
+      setLightboxIndex(null);
+      return;
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setLightboxIndex(null);
+      } else if (event.key === "ArrowLeft") {
+        setLightboxIndex((current) => (current === null ? null : (current - 1 + count) % count));
+      } else if (event.key === "ArrowRight") {
+        setLightboxIndex((current) => (current === null ? null : (current + 1) % count));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [lightboxIndex !== null, detailLightboxImages.length]);
 
   const userMessages = useMemo(
     () => (activeConversation?.messages ?? []).filter((message) => message.role === "USER"),
@@ -1123,6 +1158,29 @@ export default function PlatformClient() {
     setCopyHint(text);
     if (copyHintTimerRef.current) window.clearTimeout(copyHintTimerRef.current);
     copyHintTimerRef.current = window.setTimeout(() => setCopyHint(""), 2200);
+  }
+
+  /**
+   * 正文复制到外部平台（如小红书）前的纯文本化：
+   * 去掉 markdown 标记符号（标题 #、加粗 **、斜体 *、删除线 ~~、行内代码 `、分隔线 ---），
+   * 只保留文字本身——否则粘贴出去会带上「##」这类符号。
+   */
+  function toPlainTextForPublish(body: string): string {
+    return body
+      .split("\n")
+      .map((line) => {
+        // 去掉行首标题符号（## 标题 → 标题）
+        let l = line.replace(/^ {0,3}#{1,6}\s+/, "").replace(/ {0,3}#{1,6}\s+$/, "");
+        // 分隔线（--- / ***）整行去掉
+        if (/^ {0,3}(?:(?:-\s*){3,}|(?:\*\s*){3,}|(?:_\s*){3,})$/.test(l)) return "";
+        return l;
+      })
+      .join("\n")
+      .replace(/\*\*\s*([^*]+?)\s*\*\*/g, "$1")
+      .replace(/(^|[^*])\*\s*([^*\n]+?)\s*\*(?!\*)/g, "$1$2")
+      .replace(/~~\s*([^~]+?)\s*~~/g, "$1")
+      .replace(/`\s*([^`]+?)\s*`/g, "$1")
+      .replace(/\n{3,}/g, "\n\n");
   }
 
   async function copyText(text: string, buttonKey: string) {
@@ -2087,7 +2145,7 @@ export default function PlatformClient() {
                         <div className="master-grid">
                           {masterImages.map((img, i) => (
                             <div className="master-cell" key={`${activeContent.id}-${i}`}>
-                              <img className="master-img" src={img} alt={`主图${i + 1}`} loading="lazy" />
+                              <img className="master-img" src={img} alt={`主图${i + 1}`} loading="lazy" onClick={() => setLightboxIndex(i)} />
                               <div className="master-acts">
                                 <button onClick={() => void copyImage(activeContent.id, `master-${i}`, img)}>复制</button>
                               </div>
@@ -2100,7 +2158,12 @@ export default function PlatformClient() {
                   return (
                     <>
                       <span className="detail-image-label">主图</span>
-                      <img className="detail-cover" src={activeContent.coverImageUrl ?? fallbackImages[0]} alt="内容配图" />
+                      <img
+                        className="detail-cover"
+                        src={activeContent.coverImageUrl ?? fallbackImages[0]}
+                        alt="内容配图"
+                        onClick={() => { if (activeContent.coverImageUrl) setLightboxIndex(0); }}
+                      />
                       <div className="detail-image-actions">
                         <button
                           className={copiedButton === "image" ? "copied-button" : ""}
@@ -2136,7 +2199,7 @@ export default function PlatformClient() {
                     <>
                       <button
                         className={copiedButton === "body" ? "copied-button" : ""}
-                        onClick={() => copyText(activeContent.body, "body")}
+                        onClick={() => copyText(toPlainTextForPublish(activeContent.body), "body")}
                       >
                         {copiedButton === "body" ? "已复制" : "复制"}
                       </button>
@@ -2394,6 +2457,38 @@ export default function PlatformClient() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+      {lightboxIndex !== null && detailLightboxImages[lightboxIndex] && (
+        <div
+          className="lightbox-overlay"
+          onClick={(event) => { if (event.target === event.currentTarget) setLightboxIndex(null); }}
+        >
+          {detailLightboxImages.length > 1 && (
+            <>
+              <button
+                type="button"
+                className="lightbox-nav lightbox-prev"
+                title="上一张（←）"
+                onClick={() => setLightboxIndex((current) => (current === null ? null : (current - 1 + detailLightboxImages.length) % detailLightboxImages.length))}
+              >‹</button>
+              <button
+                type="button"
+                className="lightbox-nav lightbox-next"
+                title="下一张（→）"
+                onClick={() => setLightboxIndex((current) => (current === null ? null : (current + 1) % detailLightboxImages.length))}
+              >›</button>
+            </>
+          )}
+          <button type="button" className="lightbox-close" title="关闭（Esc）" onClick={() => setLightboxIndex(null)}>×</button>
+          <img
+            className="lightbox-img"
+            src={detailLightboxImages[lightboxIndex]}
+            alt={`大图 ${lightboxIndex + 1} / ${detailLightboxImages.length}`}
+          />
+          {detailLightboxImages.length > 1 && (
+            <div className="lightbox-counter">{lightboxIndex + 1} / {detailLightboxImages.length}</div>
+          )}
         </div>
       )}
     </main>

@@ -142,22 +142,20 @@ function buildSvg(card: Card, index: number, total: number): string {
   const pal = PALETTES[index % PALETTES.length];
   const isTitle = index === 0;
 
-  const kicker = isTitle ? "AI 回忆录 · 爆款仿写" : "仿写主图";
-  const headingLines = card.heading ? wrap(card.heading, 13) : [];
-  const bodyLines = isTitle ? wrap(card.text, 11) : wrap(card.text, 22);
+  // 图面只保留正文/标题本身与页码，不出现任何账号、产品或 AI/仿写相关字样；
+  // 行内 markdown 符号（**加粗** 等）也不能漏到图上。
+  const cleanText = card.text.replace(/\*\*/g, "").replace(/[*_`~#>]/g, " ").replace(/ {2,}/g, " ").trim();
+  const cleanHeading = card.heading.replace(/\*\*/g, "").replace(/[*_`~#>]/g, " ").replace(/ {2,}/g, " ").trim();
+  const headingLines = cleanHeading ? wrap(cleanHeading, 13) : [];
+  const bodyLines = isTitle ? wrap(cleanText, 11) : wrap(cleanText, 22);
 
   const headingSizes = isTitle ? 78 : 62;
   const headingLead = isTitle ? 98 : 82;
   const bodySize = isTitle ? 46 : 40;
   const bodyLead = isTitle ? 64 : 58;
 
-  let cursor = 250;
+  let cursor = 190;
   const parts: string[] = [];
-
-  // 顶部 kicker
-  parts.push(
-    `<text x="${MARGIN}" y="150" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="34" font-weight="600" fill="#ffffff" fill-opacity="0.78" letter-spacing="2">${escXml(kicker)}</text>`
-  );
 
   if (headingLines.length) {
     for (const ln of headingLines) {
@@ -180,15 +178,9 @@ function buildSvg(card: Card, index: number, total: number): string {
     cursor += bodyLead;
   }
 
-  if (isTitle) {
-    parts.push(
-      `<text x="${MARGIN}" y="${H - 150}" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="34" font-weight="500" fill="#ffffff" fill-opacity="0.82">本图由 AI 基于爆款原文改写生成</text>`
-    );
-  }
-
-  // 底部页码
+  // 底部页码（仅数字，不带任何品牌/账号信息）
   parts.push(
-    `<text x="${MARGIN}" y="${H - 90}" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="30" font-weight="600" fill="#ffffff" fill-opacity="0.6">金润瀚宇   ·   ${String(index + 1).padStart(2, "0")} / ${String(total).padStart(2, "0")}</text>`
+    `<text x="${MARGIN}" y="${H - 90}" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="30" font-weight="600" fill="#ffffff" fill-opacity="0.6">${String(index + 1).padStart(2, "0")} / ${String(total).padStart(2, "0")}</text>`
   );
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
@@ -198,7 +190,8 @@ function buildSvg(card: Card, index: number, total: number): string {
       <stop offset="100%" stop-color="${pal.to}" />
     </linearGradient>
   </defs>
-  <rect width="${W}" height="${H}" fill="url(#g${index})" />
+  <rect width="${W}" height="${H}" fill="#ffffff" />
+  <rect width="${W}" height="${H}" rx="48" fill="url(#g${index})" />
   <rect x="40" y="40" width="${W - 80}" height="${H - 80}" rx="28" fill="#ffffff" fill-opacity="0.06" />
   ${parts.join("\n  ")}
 </svg>`;
