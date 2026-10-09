@@ -3,6 +3,8 @@ import { openClawClient } from "@/lib/openclaw";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { generateCoverImage, generateImageUrls, coverPlatformOf, type CoverPlatform } from "@/lib/image-gen";
+import { ocrImageText } from "@/lib/ocr";
+import { generateRewriteImages } from "@/lib/rewrite-images";
 import {
   filterRelevantTopics,
   loadUserKbContext,
@@ -401,8 +403,8 @@ function buildDecomposePrompt(url: string, parsed?: string | null, failNote?: st
   ].join("\n");
 }
 
-/** 阶段二：基于拆解 + 知识库（产品知识 + 账号 IP 定位）仿写。有 parsed 原文时一并参考。 */
-function buildRewritePrompt(url: string, decompose: string, kbText: string, parsed?: string | null): string {
+/** 阶段二：基于拆解 + 知识库（产品知识 + 账号 IP 定位）仿写。有 parsed 原文 / OCR 主图文字时一并参考。 */
+function buildRewritePrompt(url: string, decompose: string, kbText: string, parsed?: string | null, ocrText?: string | null): string {
   return [
     "你是大彬（金润瀚宇）的内容创作助手，擅长把爆款结构复用到自家产品与账号上。请基于下面的「爆款内容拆解」，仿写一篇全新的爆款内容。",
     "",
@@ -419,6 +421,7 @@ function buildRewritePrompt(url: string, decompose: string, kbText: string, pars
     "【爆款内容拆解】",
     decompose || "（无可用拆解内容）",
     ...(parsed ? ["", "【爆款原文内容（页面解析，供你理解选题/语气/素材时参考）】", parsed] : []),
+    ...(ocrText ? ["", "【爆款主图 OCR 文字（图片上可见的文案，仿写时可作为选题/语气/金句的参考）】", ocrText] : []),
     "",
     "【产品知识与账号 IP 定位（来自知识库）】",
     kbText || "（当前知识库暂无相关内容，请基于通用经验，保持人设一致性）"
@@ -622,6 +625,7 @@ export async function POST(request: Request, context: { params: { id: string } }
           // App 分享链接（xsec_source=app_share）被小红书限制为仅 App 内可看，会明确提示用户换链接。
           let xhsParsed: string | null = null;
           let xhsFailNote: string | null = null;
+          let mainImage: string | null = null;
           if (/xiaohongshu\.com|xhslink\.com|xhslink\.cn/i.test(url)) {
             try {
               controller.enqueue(sseEncode({ type: "delta", text: "正在读取小红书笔记原文…\n" }));
@@ -639,11 +643,27 @@ export async function POST(request: Request, context: { params: { id: string } }
               }
               if (note) {
                 xhsParsed = formatXhsForPrompt(note);
+                mainImage = note.coverImages?.[0] ?? null;
                 controller.enqueue(sseEncode({ type: "delta", text: `✅ 已读取到原文：标题「${note.title || "（无标题）"}」${note.author ? ` · 作者 ${note.author}` : ""}，进入拆解。\n` }));
               }
             } catch (error) {
               xhsParsed = null;
               xhsFailNote = `读取小红书原文时出错：${error instanceof Error ? error.message : String(error)}`;
+            }
+          }
+
+          // 对小红书主图做 OCR：提取图片上的文字，供仿写时参考（失败不阻断流程）
+          let ocrText: string | null = null;
+          if (mainImage) {
+            try {
+              controller.enqueue(sseEncode({ type: "delta", text: "正在 OCR 识别主图文字…\n" }));
+              ocrText = await ocrImageText(mainImage);
+              if (ocrText) {
+                controller.enqueue(sseEncode({ type: "delta", text: `✅ 主图 OCR 文字：\n${ocrText}\n\n` }));
+              }
+            } catch (error) {
+              ocrText = null;
+              controller.enqueue(sseEncode({ type: "delta", text: `⚠️ 主图 OCR 失败（不影响仿写）：${error instanceof Error ? error.message : String(error)}\n` }));
             }
           }
 
@@ -679,7 +699,7 @@ export async function POST(request: Request, context: { params: { id: string } }
           const rewriteResult = await openClawClient.sendTaskStream(
             {
               message: "一键仿写爆款-仿写",
-              prompt: buildRewritePrompt(url, decomposeText, kbText, xhsParsed),
+              prompt: buildRewritePrompt(url, decomposeText, kbText, xhsParsed, ocrText),
               conversationId: conversation.id,
               userId: user.id
             },
@@ -696,20 +716,49 @@ export async function POST(request: Request, context: { params: { id: string } }
           });
           const category = /xiaohongshu|xhs|小红书|rednote/i.test(url) ? "小红书" : "公众号文章";
           const articleTitle = generateArticleTitle(rewriteText);
+
+          // 小红书链路 + 已识别到主图：OCR 后按文案拆分生成「仿写文字图」，
+          // 这些图同时作为内容库「主图」（首图即封面），跳过智谱封面升级。
+          let rewriteImages: string[] = [];
+          if (category === "小红书" && mainImage) {
+            try {
+              controller.enqueue(sseEncode({ type: "delta", text: "\n正在按文案拆分生成仿写主图…\n" }));
+              rewriteImages = await generateRewriteImages(articleTitle, rewriteText, "xhs");
+              controller.enqueue(sseEncode({ type: "delta", text: `✅ 已生成 ${rewriteImages.length} 张仿写主图，存入内容库「主图」区（可一键下载 zip）。\n` }));
+            } catch (error) {
+              rewriteImages = [];
+              console.error("[rewrite-images] 仿写图生成失败，回退智谱封面：", error);
+              controller.enqueue(sseEncode({ type: "delta", text: `⚠️ 仿写图生成失败（改用普通封面）：${error instanceof Error ? error.message : String(error)}\n` }));
+            }
+          }
+
+          const useRewriteImages = rewriteImages.length > 0;
           const saved = await prisma.contentItem.create({
             data: {
               userId: user.id,
               title: articleTitle,
               body: rewriteText,
               category,
-              // 入库不被生图阻塞：先用 pollinations 占位封面，智谱生图后台完成后升级为本地图
-              coverImageUrl: generateImageUrls(articleTitle, rewriteText, 0, coverPlatformOf(category)).coverImageUrl,
+              // 仿写图模式：首图作为封面，全部图写入 inlineImagesJson（内容库「主图」区平铺展示）
+              coverImageUrl: useRewriteImages
+                ? rewriteImages[0]
+                : generateImageUrls(articleTitle, rewriteText, 0, coverPlatformOf(category)).coverImageUrl,
+              ...(useRewriteImages ? { inlineImagesJson: JSON.stringify(rewriteImages) } : {}),
               sourceConversationId: conversation.id
             }
           });
-          void upgradeCoverInBackground(saved.id, articleTitle, rewriteText, coverPlatformOf(category));
+          if (!useRewriteImages) {
+            void upgradeCoverInBackground(saved.id, articleTitle, rewriteText, coverPlatformOf(category));
+          }
+          let rewriteMessageContent = `## 二、仿写爆款内容（结合你的产品与账号定位）\n${rewriteText}`;
+          if (useRewriteImages) {
+            rewriteMessageContent += `\n\n---\n\n### 🖼️ 仿写主图（共 ${rewriteImages.length} 张，已存入内容库「主图」区，可一键下载 zip）\n\n`;
+            rewriteImages.forEach((img, i) => {
+              rewriteMessageContent += `![主图${i + 1}](${img})\n`;
+            });
+          }
           const rewriteMessage = await prisma.message.create({
-            data: { conversationId: conversation.id, role: "ASSISTANT", content: `## 二、仿写爆款内容（结合你的产品与账号定位）\n${rewriteText}` }
+            data: { conversationId: conversation.id, role: "ASSISTANT", content: rewriteMessageContent }
           });
 
           await prisma.openClawTask.update({ where: { id: task.id }, data: { status: "SUCCEEDED" } });

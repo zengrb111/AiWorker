@@ -2251,6 +2251,86 @@ textarea:focus {
   object-fit: cover;
 }
 
+/* 主图区：标题行（含一键下载）+ 横向平铺多图 */
+.detail-image-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 10px;
+}
+
+.dl-all-btn {
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), #17bfff);
+  border: none;
+  border-radius: 999px;
+  padding: 8px 16px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dl-all-btn:hover {
+  filter: brightness(1.05);
+}
+
+.master-grid {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+
+.master-cell {
+  flex: 0 0 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.master-img {
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.master-acts {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+}
+
+.master-acts button {
+  font-size: 12px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--accent-dark);
+  border-radius: 7px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.master-acts button:hover {
+  background: var(--panel-soft);
+}
+
+/* 对话气泡里渲染的仿写主图 */
+.chat-figure {
+  display: block;
+  max-width: 100%;
+  width: 280px;
+  height: auto;
+  border-radius: 10px;
+  margin: 10px 0;
+  border: 1px solid var(--line-soft);
+}
+
 .article-body {
   display: grid;
   gap: 14px;

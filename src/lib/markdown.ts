@@ -26,6 +26,19 @@ export function renderMarkdown(text: string): string {
       continue;
     }
 
+    // 图片：![alt](url) —— 仅支持同源相对路径或以 http(s) 开头的链接
+    const imgMatch = line.match(/^!\[(.*?)\]\(([^)]+)\)$/);
+    if (imgMatch) {
+      closeList();
+      const alt = escapeHtml(imgMatch[1]);
+      const rawUrl = imgMatch[2].trim();
+      const safeUrl = /^(https?:\/\/|\/)/i.test(rawUrl) ? escapeHtml(rawUrl) : "";
+      if (safeUrl) {
+        htmlParts.push(`<img src="${safeUrl}" alt="${alt}" class="chat-figure" />`);
+      }
+      continue;
+    }
+
     // Headings
     const headingMatch = line.match(/^(#{1,3})\s+(.*)$/);
     if (headingMatch) {

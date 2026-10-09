@@ -1410,6 +1410,29 @@ export default function PlatformClient() {
     }
   }
 
+  async function downloadAllImages(contentId: string) {
+    try {
+      const res = await fetch(`/api/content/${contentId}/images-zip`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: "下载失败" }));
+        showCopyHint(err.error || "主图下载失败");
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${((activeContent?.title || "主图").replace(/[\\/:*?"<>|]/g, "_") || "主图")}_主图.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showCopyHint("已开始下载主图 zip");
+    } catch {
+      showCopyHint("主图下载失败，请重试");
+    }
+  }
+
   async function regenerateImage(imageType: "cover" | "inline", imageIndex: number) {
     if (!activeContent) return;
     const key = `${imageType}-${imageIndex}`;
@@ -2050,26 +2073,55 @@ export default function PlatformClient() {
               ) : (
                 <>
               <div className="detail-image-block">
-                <span className="detail-image-label">推荐标题图</span>
-                <img className="detail-cover" src={activeContent.coverImageUrl ?? fallbackImages[0]} alt="内容配图" />
-                <div className="detail-image-actions">
-                  <button
-                    className={copiedButton === "image" ? "copied-button" : ""}
-                    onClick={() => copyImage(activeContent.id, "image", activeContent.coverImageUrl)}
-                  >
-                    {copiedButton === "image" ? "已复制" : "复制"}
-                  </button>
-                  <button
-                    className="regen-image-button"
-                    disabled={regeneratingImage === "cover-0"}
-                    onClick={() => regenerateImage("cover", 0)}
-                  >
-                    {regeneratingImage === "cover-0" ? "生成中..." : "重新生成"}
-                  </button>
-                </div>
-                {regeneratingImage === "cover-0" && (
-                  <p className="detail-image-progress">正在生成新图，完成后自动替换...</p>
-                )}
+                {(() => {
+                  const masterImages = parseInlineImages(activeContent.inlineImagesJson);
+                  if (masterImages.length > 0) {
+                    return (
+                      <>
+                        <div className="detail-image-head">
+                          <span className="detail-image-label">主图</span>
+                          <button className="dl-all-btn" onClick={() => void downloadAllImages(activeContent.id)}>
+                            ⬇ 一键下载全部图片（zip）
+                          </button>
+                        </div>
+                        <div className="master-grid">
+                          {masterImages.map((img, i) => (
+                            <div className="master-cell" key={`${activeContent.id}-${i}`}>
+                              <img className="master-img" src={img} alt={`主图${i + 1}`} loading="lazy" />
+                              <div className="master-acts">
+                                <button onClick={() => void copyImage(activeContent.id, `master-${i}`, img)}>复制</button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    );
+                  }
+                  return (
+                    <>
+                      <span className="detail-image-label">主图</span>
+                      <img className="detail-cover" src={activeContent.coverImageUrl ?? fallbackImages[0]} alt="内容配图" />
+                      <div className="detail-image-actions">
+                        <button
+                          className={copiedButton === "image" ? "copied-button" : ""}
+                          onClick={() => copyImage(activeContent.id, "image", activeContent.coverImageUrl)}
+                        >
+                          {copiedButton === "image" ? "已复制" : "复制"}
+                        </button>
+                        <button
+                          className="regen-image-button"
+                          disabled={regeneratingImage === "cover-0"}
+                          onClick={() => regenerateImage("cover", 0)}
+                        >
+                          {regeneratingImage === "cover-0" ? "生成中..." : "重新生成"}
+                        </button>
+                      </div>
+                      {regeneratingImage === "cover-0" && (
+                        <p className="detail-image-progress">正在生成新图，完成后自动替换...</p>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
 
               <div className="detail-body-row">
