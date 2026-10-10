@@ -32,9 +32,17 @@ export type TTSResult = {
   captions: WordCaption[];
 };
 
-const PYTHON_PATH =
-  process.env.PYTHON_PATH ||
-  "C:\\Users\\zengr\\.workbuddy\\binaries\\python\\versions\\3.13.12\\python.exe";
+/** edge-tts 运行所需的 Python：优先 PYTHON_PATH，其次托管 venv（已装 edge-tts），最后 base。 */
+function resolvePythonPath(): string {
+  const candidates = [
+    process.env.PYTHON_PATH,
+    "C:\\Users\\zengr\\.workbuddy\\binaries\\python\\envs\\default\\Scripts\\python.exe",
+    "C:\\Users\\zengr\\.workbuddy\\binaries\\python\\versions\\3.13.12\\python.exe",
+  ].filter((p): p is string => Boolean(p));
+  return candidates.find((p) => existsSync(p)) || candidates[0] || "python";
+}
+
+const PYTHON_PATH = resolvePythonPath();
 
 const DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"; // female, natural, warm
 const FALLBACK_VOICE = "zh-CN-YunxiNeural";    // male, young, energetic
@@ -99,7 +107,8 @@ asyncio.run(main())
     const args = [scriptPath, text, outputPath, voice];
     const child = spawn(PYTHON_PATH, args, {
       shell: false,
-      env: { ...process.env },
+      // Windows 下 Python stdout 默认 GBK，必须显式设为 UTF-8，否则中文时间戳 JSON 会乱码。
+      env: { ...process.env, PYTHONIOENCODING: "utf-8" },
     });
 
     let stdout = "";
@@ -180,4 +189,19 @@ export async function generateNarration(
   result.audioPublicPath = `generated/${audioFileName}`;
 
   return result;
+}
+
+/**
+ * 「一键生成视频」用：把旁白文本合成为 mp3（默认女声晓晓），输出到指定目录。
+ * 返回绝对路径、时长与句级时间戳（captions 可直接生成字幕）。
+ * 调用方负责容错：失败应降级为「无配音」版本，不阻断出片。
+ */
+export async function synthesizeNarration(
+  text: string,
+  outDir: string,
+  voice: string = DEFAULT_VOICE
+): Promise<TTSResult> {
+  if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+  const audioPath = join(outDir, `narration-${Date.now()}.mp3`);
+  return generateTTS(text, audioPath, voice);
 }

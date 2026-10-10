@@ -377,8 +377,11 @@ export default function PlatformClient() {
   const [humanizingMessageId, setHumanizingMessageId] = useState<string | null>(null);
   const [lastVideoUrl, setLastVideoUrl] = useState<string | null>(null);
   const [montagePanelOpen, setMontagePanelOpen] = useState(false);
-  const [montageVideoFile, setMontageVideoFile] = useState<File | null>(null);
+  const [montageVideoFiles, setMontageVideoFiles] = useState<File[]>([]);
   const [remakePanelOpen, setRemakePanelOpen] = useState(false);
+  const [genVideoPanelOpen, setGenVideoPanelOpen] = useState(false);
+  const [genVideoImages, setGenVideoImages] = useState<File[]>([]);
+  const [genVideoRequirement, setGenVideoRequirement] = useState("");
   const [referenceVideoUrl, setReferenceVideoUrl] = useState("");
   const [referenceVideoFile, setReferenceVideoFile] = useState<File | null>(null);
   const [remakeMaterials, setRemakeMaterials] = useState<File[]>([]);
@@ -873,7 +876,7 @@ export default function PlatformClient() {
 
     if (hotTopicPrompts.includes(content.trim())) {
       setMontagePanelOpen(false);
-      setMontageVideoFile(null);
+      setMontageVideoFiles([]);
       setRemakePanelOpen(false);
       setReferenceVideoUrl("");
       setReferenceVideoFile(null);
@@ -963,6 +966,9 @@ export default function PlatformClient() {
             if (content === "一键剪视频") {
               setMontagePanelOpen(true);
             }
+            if (content === "一键生成视频") {
+              setGenVideoPanelOpen(true);
+            }
             if (content === "一键复刻爆款视频") {
               setRemakePanelOpen(true);
             }
@@ -1018,9 +1024,9 @@ export default function PlatformClient() {
   }
 
   async function createMontageEdit() {
-    const file = montageVideoFile;
+    const files = montageVideoFiles;
     const conversationId = activeConversation?.id;
-    if (!file || !conversationId || sending) return;
+    if (!files.length || !conversationId || sending) return;
 
     setSending(true);
     setIsThinking(true);
@@ -1031,7 +1037,8 @@ export default function PlatformClient() {
     abortControllerRef.current = controller;
     try {
       const form = new FormData();
-      form.append("video", file);
+      // 多段视频按选择顺序提交，服务端会先拼接再剪辑。
+      for (const file of files) form.append("video", file);
       const response = await fetch(`/api/conversations/${conversationId}/montage`, { method: "POST", body: form, signal: controller.signal });
       if (!response.ok) {
         const payload = (await response.json().catch(() => ({ error: "视频剪辑请求失败。" }))) as ApiResponse<unknown>;
@@ -1056,7 +1063,7 @@ export default function PlatformClient() {
             setStreamingContent((previous) => previous + data.text);
           } else if (data.type === "final") {
             setLastVideoUrl(data.videoUrl || null);
-            setMontageVideoFile(null);
+            setMontageVideoFiles([]);
             await Promise.all([refreshConversations(), refreshContent()]);
           } else if (data.type === "error") {
             throw streamError(data.error, data.soft === true);
@@ -1067,6 +1074,73 @@ export default function PlatformClient() {
       if (!controller.signal.aborted) {
         setChatErrorSoft(isSoftError(error));
         setChatError(error instanceof Error ? error.message : "视频剪辑失败。");
+      }
+    } finally {
+      setStreamingContent("");
+      setIsThinking(false);
+      setSending(false);
+      abortControllerRef.current = null;
+    }
+  }
+
+  async function createGenVideo() {
+    const files = genVideoImages;
+    const conversationId = activeConversation?.id;
+    const requirement = genVideoRequirement.trim();
+    if (!files.length || !conversationId || sending) return;
+
+    setSending(true);
+    setIsThinking(true);
+    setChatError("");
+    setStreamingContent("");
+    setGenVideoPanelOpen(false);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    try {
+      const form = new FormData();
+      for (const file of files) form.append("image", file);
+      if (requirement) form.append("requirement", requirement);
+      const response = await fetch(`/api/conversations/${conversationId}/gen-video`, { method: "POST", body: form, signal: controller.signal });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({ error: "视频生成请求失败。" }))) as ApiResponse<unknown>;
+        throw new Error(payload.ok ? "视频生成请求失败。" : payload.error);
+      }
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("视频生成未返回进度流。");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+        for (const eventBlock of events) {
+          const dataLine = eventBlock.split("\n").find((line) => line.startsWith("data: "));
+          if (!dataLine) continue;
+          const data = JSON.parse(dataLine.slice(6));
+          if (data.type === "delta") {
+            setIsThinking(false);
+            setStreamingContent((previous) => previous + data.text);
+          } else if (data.type === "final") {
+            setLastVideoUrl(data.videoUrl || null);
+            setGenVideoImages([]);
+            setGenVideoRequirement("");
+            if (data.contentSaved) {
+              const all = await refreshContent();
+              const saved = all.find((c) => c.id === data.contentSaved.id);
+              if (saved) setLastSavedContent(saved);
+            }
+            await refreshConversations();
+          } else if (data.type === "error") {
+            throw streamError(data.error, data.soft === true);
+          }
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setChatErrorSoft(isSoftError(error));
+        setChatError(error instanceof Error ? error.message : "视频生成失败。");
       }
     } finally {
       setStreamingContent("");
@@ -1952,10 +2026,16 @@ export default function PlatformClient() {
                     {montagePanelOpen && (
                       <div className="viral-remake-panel montage-upload-panel">
                         <div className="viral-remake-title">一键剪视频</div>
-                        <p>请选择要剪辑的视频。上传后会在当前会话中展示完整的分析、字幕、音频、画面和成片制作进度。</p>
-                        <label className="viral-remake-file">上传待剪视频<input type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v" onChange={(event) => setMontageVideoFile(event.target.files?.[0] ?? null)} /></label>
-                        <div className="viral-remake-summary">{montageVideoFile ? `已选择：${montageVideoFile.name}` : "暂未选择视频"}</div>
-                        <div className="viral-remake-actions"><button type="button" onClick={() => setMontagePanelOpen(false)}>取消</button><button type="button" disabled={!montageVideoFile || sending} onClick={() => void createMontageEdit()}>开始剪辑</button></div>
+                        <p>请选择要剪辑的视频，支持一次选择多段（按选择顺序拼接为一条成片）。上传后会在当前会话中展示完整的分析、字幕、音频、画面和成片制作进度。</p>
+                        <label className="viral-remake-file">上传待剪视频（可多选）<input type="file" multiple accept="video/mp4,video/quicktime,video/webm,video/x-m4v" onChange={(event) => setMontageVideoFiles(Array.from(event.target.files ?? []))} /></label>
+                        <div className="viral-remake-summary">
+                          {montageVideoFiles.length === 0
+                            ? "暂未选择视频"
+                            : montageVideoFiles.length === 1
+                              ? `已选择：${montageVideoFiles[0].name}`
+                              : `已选择 ${montageVideoFiles.length} 段视频：${montageVideoFiles.map((file) => file.name).join("、")}`}
+                        </div>
+                        <div className="viral-remake-actions"><button type="button" onClick={() => setMontagePanelOpen(false)}>取消</button><button type="button" disabled={!montageVideoFiles.length || sending} onClick={() => void createMontageEdit()}>开始剪辑</button></div>
                       </div>
                     )}
                     {remakePanelOpen && (
@@ -1969,11 +2049,21 @@ export default function PlatformClient() {
                         <div className="viral-remake-actions"><button type="button" onClick={() => setRemakePanelOpen(false)}>取消</button><button type="button" disabled={sending} onClick={() => void createViralRemake()}>开始制作</button></div>
                       </div>
                     )}
+                    {genVideoPanelOpen && (
+                      <div className="viral-remake-panel">
+                        <div className="viral-remake-title">一键生成视频</div>
+                        <p>上传多张参考图，并在下方统一填写整体创作要求。点击开始生成后，系统会自动配文、合成女声配音与字幕，并调用 Remotion 视频技能渲染画面，全程在当前会话中实时展示。</p>
+                        <label className="viral-remake-file">上传参考图（可多选）<input type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={(event) => setGenVideoImages(Array.from(event.target.files ?? []))} /></label>
+                        <div className="viral-remake-summary">{genVideoImages.length === 0 ? "暂未选择参考图" : `已选择 ${genVideoImages.length} 张参考图：${genVideoImages.map((file) => file.name).join("、")}`}</div>
+                        <label className="viral-remake-file" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>整体创作要求（多行）<textarea value={genVideoRequirement} onChange={(event) => setGenVideoRequirement(event.target.value)} placeholder={"例如：竖版 1080×1920，时长 30 秒左右，轻松治愈口播风\n第一张图做开场封面，配文案「爸，我又想你了」\n第二张图做正文，强调一个温暖细节\n结尾引导关注 + 品牌落版"} style={{ minHeight: 88, resize: "vertical", border: "1px solid var(--line)", borderRadius: 7, padding: "8px 10px", fontSize: 12, fontFamily: "inherit", lineHeight: 1.6 }} /></label>
+                        <div className="viral-remake-actions"><button type="button" onClick={() => setGenVideoPanelOpen(false)}>取消</button><button type="button" disabled={!genVideoImages.length || sending} onClick={() => void createGenVideo()}>开始生成</button></div>
+                      </div>
+                    )}
                     <div className="chat-input-topbar">
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("今日产品热点")}>今日产品热点</button>
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("今日全网热点")}>今日全网热点</button>
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => setRewriteUrlModal(true)}>一键仿写爆款</button>
-                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键制作课件")}>一键制作课件</button>
+                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键生成视频")}>一键生成视频</button>
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键剪视频")}>一键剪视频</button>
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键复刻爆款视频")}>一键复刻爆款视频</button>
                     </div>

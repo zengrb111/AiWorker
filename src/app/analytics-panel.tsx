@@ -48,6 +48,8 @@ type MetricItem = {
   shares: number;
   /** 是否已抓到原文（拆解必须基于原文，没原文不能拆） */
   hasSource?: boolean;
+  /** 平台原文链接（标题可点击新标签打开查看实际作品） */
+  url?: string | null;
 };
 
 type MetricsData = {
@@ -548,7 +550,11 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
                       <span className={`acct-plat-badge ${it.platform}`}>{it.platformName}</span>
                     </span>
                     <span className="col-title">
-                      <span className="pub-row-title" title={it.title}>{it.title}</span>
+                      {it.url ? (
+                        <a className="pub-row-title" href={it.url} target="_blank" rel="noreferrer" title={`${it.title}（点击查看原文）`}>{it.title}</a>
+                      ) : (
+                        <span className="pub-row-title" title={it.title}>{it.title}</span>
+                      )}
                       {it.hasSource ? (
                         <button
                           className={done ? "ana-decomp-btn done" : "ana-decomp-btn"}

@@ -484,6 +484,42 @@ export async function POST(request: Request, context: { params: { id: string } }
     });
   }
 
+  if (content === "一键生成视频") {
+    const userMessage = await prisma.message.create({
+      data: { conversationId: conversation.id, role: "USER", content }
+    });
+    const assistantMessage = await prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        role: "ASSISTANT",
+        content: "请在下方上传多张参考图，并填写整体创作要求。点击开始生成后，我会调用 Remotion 视频技能，在当前会话中实时展示视频脚本、分镜渲染、配音字幕与成片合成的完整过程。"
+      }
+    });
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(sseEncode({
+          type: "final",
+          message: {
+            id: assistantMessage.id,
+            role: "ASSISTANT",
+            content: assistantMessage.content,
+            createdAt: assistantMessage.createdAt.toISOString()
+          },
+          userMessage
+        }));
+        controller.close();
+      }
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no"
+      }
+    });
+  }
+
   if (content === "一键复刻爆款视频") {
     const userMessage = await prisma.message.create({ data: { conversationId: conversation.id, role: "USER", content } });
     const assistantMessage = await prisma.message.create({

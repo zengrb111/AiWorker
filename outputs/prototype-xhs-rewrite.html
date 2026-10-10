@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>原型图 · 一键仿写爆款（小红书）OCR + 仿写图</title>
+<style>
+  :root{
+    --bg:#eef3f7; --bg-page:#eaf3ff; --bg-page-2:#f4f8ff; --panel:#fff;
+    --panel-soft:#f6f9fc; --ink:#151a24; --muted:#687482; --muted-2:#8c9aa9;
+    --line:#d9e3ec; --line-soft:#e6eef5; --accent:#2b7cff; --accent-dark:#155bd4;
+    --accent-cyan:#17d5ff; --success:#16a34a; --success-bg:#e7f6ec; --danger:#b0443e;
+    --shadow:0 24px 70px rgba(21,32,54,.18);
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:linear-gradient(180deg,var(--bg-page) 0%,var(--bg-page-2) 60%,var(--bg) 100%);
+    color:var(--ink); padding:18px;
+  }
+  .proto-banner{
+    max-width:1080px;margin:0 auto 18px;background:#fff7e6;border:1px solid #ffe1a8;
+    color:#9a6816;border-radius:10px;padding:10px 14px;font-size:13px;font-weight:600;
+  }
+  .screen{
+    max-width:1080px;margin:0 auto 26px;background:var(--panel);border:1px solid var(--line);
+    border-radius:16px;box-shadow:var(--shadow);overflow:hidden;
+  }
+  .screen-head{
+    display:flex;align-items:center;gap:10px;padding:12px 18px;background:var(--panel-soft);
+    border-bottom:1px solid var(--line-soft);
+  }
+  .screen-head .tag{
+    font-size:11px;font-weight:700;color:#fff;background:var(--accent);border-radius:6px;padding:3px 8px;
+  }
+  .screen-head h2{font-size:15px;font-weight:700;}
+  .screen-head .sub{font-size:12px;color:var(--muted);margin-left:auto;}
+
+  /* layout */
+  .body2{display:flex;min-height:520px;}
+  .sidebar{width:178px;background:var(--panel-soft);border-right:1px solid var(--line-soft);padding:14px 10px;}
+  .sidebar .nav{font-size:13px;color:var(--muted);padding:9px 10px;border-radius:8px;margin-bottom:4px;}
+  .sidebar .nav.active{background:#e6f0ff;color:var(--accent-dark);font-weight:700;}
+  .main{flex:1;display:flex;flex-direction:column;min-width:0;}
+
+  /* quickbar */
+  .quickbar{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line-soft);}
+  .qbtn{
+    height:30px;padding:0 12px;border:1px solid var(--line);background:#fff;color:var(--accent-dark);
+    font-size:13px;font-weight:600;border-radius:999px;cursor:pointer;white-space:nowrap;
+  }
+  .qbtn.primary{background:linear-gradient(135deg,var(--accent),#17bfff);color:#fff;border:none;}
+
+  /* chat */
+  .chat{flex:1;padding:16px;overflow:auto;display:flex;flex-direction:column;gap:14px;}
+  .bubble{max-width:78%;padding:10px 13px;border-radius:12px;font-size:14px;line-height:1.55;}
+  .bubble.me{align-self:flex-end;background:linear-gradient(135deg,var(--accent),#17bfff);color:#fff;border-bottom-right-radius:4px;}
+  .bubble.ai{align-self:flex-start;background:var(--panel-soft);border:1px solid var(--line-soft);border-bottom-left-radius:4px;}
+
+  .card{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#fff;}
+  .card-h{display:flex;align-items:center;gap:8px;padding:10px 14px;background:#f6f9ff;border-bottom:1px solid var(--line-soft);font-size:13px;font-weight:700;color:var(--accent-dark);}
+  .card-h .step{font-size:11px;background:var(--accent);color:#fff;border-radius:6px;padding:2px 7px;}
+  .card-b{padding:13px 14px;}
+
+  .ocr-box{background:#fbfdff;border:1px dashed var(--line);border-radius:10px;padding:11px 13px;font-size:13px;color:var(--ink);line-height:1.7;}
+  .ocr-box .src{color:var(--muted-2);font-size:12px;margin-bottom:6px;}
+  .field-label{font-size:12px;font-weight:700;color:var(--muted);margin:14px 0 6px;}
+  .title-out{font-size:17px;font-weight:800;line-height:1.5;}
+  .body-out{font-size:14px;line-height:1.75;color:#2a3340;white-space:pre-wrap;}
+  .tags{margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;}
+  .tags span{font-size:12px;color:var(--accent-dark);background:#eef4ff;border-radius:6px;padding:3px 8px;}
+
+  .img-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:6px;}
+  .ph{
+    aspect-ratio:3/4;border-radius:10px;display:flex;flex-direction:column;justify-content:flex-end;
+    padding:8px;color:#fff;font-size:12px;font-weight:700;position:relative;overflow:hidden;
+  }
+  .ph span{background:rgba(0,0,0,.32);padding:3px 6px;border-radius:6px;align-self:flex-start;}
+  .ph.a{background:linear-gradient(160deg,#ff9a9e,#fad0c4);}
+  .ph.b{background:linear-gradient(160deg,#a1c4fd,#c2e9fb);}
+  .ph.c{background:linear-gradient(160deg,#ffecd2,#fcb69f);}
+  .ph.d{background:linear-gradient(160deg,#d4fc79,#96e6a1);}
+  .ph .badge{position:absolute;top:8px;left:8px;background:rgba(255,255,255,.9);color:#155bd4;font-size:10px;font-weight:700;border-radius:6px;padding:2px 6px;}
+
+  .stored-note{margin-top:12px;font-size:12px;color:var(--muted);background:var(--success-bg);border:1px solid #c7ebd2;color:var(--success);border-radius:8px;padding:8px 11px;}
+
+  .chat-input{border-top:1px solid var(--line-soft);padding:12px 16px;display:flex;gap:10px;align-items:flex-end;}
+  .chat-input textarea{flex:1;resize:none;height:42px;border:1px solid var(--line);border-radius:10px;padding:9px 11px;font-size:14px;font-family:inherit;}
+  .send{height:42px;padding:0 18px;border:none;border-radius:10px;background:linear-gradient(135deg,var(--accent),#17bfff);color:#fff;font-weight:700;cursor:pointer;}
+
+  /* content library detail */
+  .lib-wrap{padding:18px;}
+  .lib-title{font-size:18px;font-weight:800;margin-bottom:4px;}
+  .lib-meta{font-size:12px;color:var(--muted);margin-bottom:16px;}
+  .cover-block{border:1px solid var(--line);border-radius:12px;padding:14px;background:#fff;}
+  .cover-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+  .cover-head .label{font-size:13px;font-weight:700;color:var(--accent-dark);}
+  .dl-all{font-size:13px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),#17bfff);border:none;border-radius:999px;padding:8px 16px;cursor:pointer;}
+  .cover-row{display:flex;gap:12px;overflow-x:auto;padding-bottom:6px;}
+  .cover-cell{flex:0 0 160px;display:flex;flex-direction:column;gap:8px;}
+  .cover-cell .ph{aspect-ratio:3/4;width:100%;}
+  .cover-cell .cap{font-size:12px;color:var(--muted);text-align:center;}
+  .cover-acts{display:flex;gap:6px;justify-content:center;}
+  .cover-acts button{font-size:12px;border:1px solid var(--line);background:#fff;color:var(--accent-dark);border-radius:7px;padding:4px 10px;cursor:pointer;}
+  .body-sec{margin-top:18px;}
+  .body-sec h3{font-size:14px;margin-bottom:8px;}
+  .body-sec .body-out{border:1px solid var(--line-soft);border-radius:10px;padding:12px;background:var(--panel-soft);}
+</style>
+</head>
+<body>
+
+<div class="proto-banner">⚠️ 原型图（仅供确认布局与交互，非最终代码实现）。确认后我再落地开发。</div>
+
+<!-- ============ SCREEN A: 对话中的仿写结果 ============ -->
+<section class="screen">
+  <div class="screen-head">
+    <span class="tag">界面 A</span>
+    <h2>对话 · 一键仿写爆款（小红书链接）</h2>
+    <span class="sub">粘贴小红书链接 → OCR 识别图文 → 生成仿写图 + 标题 + 正文</span>
+  </div>
+  <div class="body2">
+    <div class="sidebar">
+      <div class="nav">内容库</div>
+      <div class="nav">效果分析</div>
+      <div class="nav active">对话</div>
+      <div class="nav">平台授权</div>
+      <div class="nav">发布</div>
+    </div>
+    <div class="main">
+      <div class="quickbar">
+        <button class="qbtn">今日产品热点</button>
+        <button class="qbtn">今日全网热点</button>
+        <button class="qbtn primary">一键仿写爆款</button>
+        <button class="qbtn">一键制作课件</button>
+        <button class="qbtn">一键剪视频</button>
+        <button class="qbtn">一键复刻爆款视频</button>
+      </div>
+      <div class="chat">
+        <div class="bubble me">帮我仿写这个：https://www.xiaohongshu.com/explore/xxxxx?xsec_source=pc_feed</div>
+
+        <div class="bubble ai">
+          <div class="card">
+            <div class="card-h"><span class="step">1</span> OCR 识别主图文字</div>
+            <div class="card-b">
+              <div class="ocr-box">
+                <div class="src">来源：小红书笔记主图（浏览器通道 OCR，已脱敏）</div>
+                33岁才开始学拍照，原来生活可以这么治愈。退休后我给自己买了第一台相机，记录楼下的猫、清晨的菜场、老伴泡的茶。慢下来才发现，日子本身就是最好的滤镜。
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:14px;">
+            <div class="card-h"><span class="step">2</span> 生成仿写文案</div>
+            <div class="card-b">
+              <div class="field-label">仿写标题</div>
+              <div class="title-out">42岁送走父亲后，我用照片把日子重新拼了回来</div>
+              <div class="field-label">仿写正文</div>
+              <div class="body-out">很多人问我怎么走出那段日子。我的答案是：先按下快门。
+
+父亲走的那年我42岁，突然觉得时间变得很轻。后来我拿起手机，拍清晨的光、拍书桌上的旧茶杯、拍他最爱坐的那把椅子。
+
+AI帮我把这些碎片整理成一本回忆录，我才发现——原来他留给我的，从来不是遗憾，是教我怎样好好生活。
+
+如果你也有想留住的人，评论区告诉我，我教你怎么做。</div>
+              <div class="tags"><span>#AI回忆录</span><span>#父母故事</span><span>#银发生活</span><span>#治愈系</span></div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top:14px;">
+            <div class="card-h"><span class="step">3</span> 生成仿写图片（数量按文案自动拆分，已存入内容库）</div>
+            <div class="card-b">
+              <div class="img-grid">
+                <div class="ph a"><span class="badge">图1</span><span>晨光 · 旧茶杯</span></div>
+                <div class="ph b"><span class="badge">图2</span><span>父亲的椅子</span></div>
+                <div class="ph c"><span class="badge">图3</span><span>回忆录封面</span></div>
+                <div class="ph d"><span class="badge">图4</span><span>治愈金句卡</span></div>
+              </div>
+              <div class="stored-note">✓ 已自动存入内容库，可在「主图」区横向查看并一键下载全部图片（zip）。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="chat-input">
+        <textarea placeholder="输入内容，或粘贴小红书链接后点「一键仿写爆款」…"></textarea>
+        <button class="send">发送</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SCREEN B: 内容库详情 · 推荐标题图横向平铺 ============ -->
+<section class="screen">
+  <div class="screen-head">
+    <span class="tag">界面 B</span>
+    <h2>内容库 · 详情（主图区改造）</h2>
+    <span class="sub">仿写图横向平铺 + 一键下载全部图片</span>
+  </div>
+  <div class="lib-wrap">
+    <div class="lib-title">42岁送走父亲后，我用照片把日子重新拼了回来</div>
+    <div class="lib-meta">来源：一键仿写爆款 · 小红书 · 2026-10-09 · 状态：草稿</div>
+
+    <div class="cover-block">
+      <div class="cover-head">
+        <span class="label">主图</span>
+        <button class="dl-all">⬇ 一键下载全部图片（zip）</button>
+      </div>
+      <div class="cover-row">
+        <div class="cover-cell">
+          <div class="ph a"><span class="badge">图1</span><span>晨光 · 旧茶杯</span></div>
+          <div class="cover-acts"><button>复制</button></div>
+        </div>
+        <div class="cover-cell">
+          <div class="ph b"><span class="badge">图2</span><span>父亲的椅子</span></div>
+          <div class="cover-acts"><button>复制</button></div>
+        </div>
+        <div class="cover-cell">
+          <div class="ph c"><span class="badge">图3</span><span>回忆录封面</span></div>
+          <div class="cover-acts"><button>复制</button></div>
+        </div>
+        <div class="cover-cell">
+          <div class="ph d"><span class="badge">图4</span><span>治愈金句卡</span></div>
+          <div class="cover-acts"><button>复制</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="body-sec">
+      <h3>正文</h3>
+      <div class="body-out">很多人问我怎么走出那段日子。我的答案是：先按下快门。
+
+父亲走的那年我42岁，突然觉得时间变得很轻。后来我拿起手机，拍清晨的光、拍书桌上的旧茶杯、拍他最爱坐的那把椅子。
+
+AI帮我把这些碎片整理成一本回忆录，我才发现——原来他留给我的，从来不是遗憾，是教我怎样好好生活。</div>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

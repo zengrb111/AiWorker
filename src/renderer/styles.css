@@ -4014,6 +4014,17 @@ textarea:focus {
   font-weight: 600;
 }
 
+/* 效果明细标题作为原文链接：默认继承文字色，hover 变红加下划线 */
+a.pub-row-title {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+a.pub-row-title:hover {
+  color: #e64340;
+  text-decoration: underline;
+}
+
 .pub-channel-tag {
   display: inline-flex;
   align-items: center;
