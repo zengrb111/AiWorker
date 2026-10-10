@@ -36,3 +36,8 @@ public/videos/
 *.tmp
 *.out
 *.err
+
+# OpenMontage 第三方 Python 工程（AGPLv3，含 .venv / remotion-composer/node_modules / .env）
+# 不以 submodule 纳入主仓库：github.com 直连在此环境被限，且原 .gitmodules 已缺失。
+# 重新获取与初始化见 scripts/fetch-openmontage.ps1
+/OpenMontage/

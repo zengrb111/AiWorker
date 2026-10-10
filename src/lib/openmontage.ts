@@ -93,8 +93,8 @@ export function createMontageEdit(inputPath: string, outputPath: string, onProgr
     const child = spawn(python, ["-c", runner, inputPath, outputPath], {
       cwd: montageRoot,
       shell: false,
-      env: { ...process.env }
-    });
+      env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" }
+      });
     let stdout = "";
     let stdoutBuffer = "";
     let stderr = "";

@@ -1,3 +1,138 @@
+.montage-studio {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 28px 24px 64px;
+}
+.montage-header h2 {
+  margin: 0 0 6px;
+  font-size: 22px;
+  color: var(--ink);
+}
+.montage-sub {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.montage-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+.montage-tabs button {
+  border: none;
+  background: transparent;
+  padding: 10px 16px;
+  font-size: 14px;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.montage-tabs button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.montage-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 6px 20px rgba(20, 40, 80, 0.05);
+}
+.montage-card h3 {
+  margin: 0 0 8px;
+  font-size: 17px;
+  color: var(--ink);
+}
+.montage-hint {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.montage-label {
+  display: block;
+  margin: 14px 0 6px;
+  font-size: 13px;
+  color: var(--ink);
+}
+.montage-card input[type="file"],
+.montage-card textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: 13px;
+}
+.montage-card textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  resize: vertical;
+  font-family: inherit;
+}
+.montage-file {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--accent-dark);
+}
+.montage-run {
+  margin-top: 18px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 11px 22px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.montage-run:disabled {
+  background: var(--muted-2);
+  cursor: not-allowed;
+}
+.montage-error {
+  margin: 16px 0 0;
+  color: #d23a3a;
+  font-size: 13px;
+}
+.montage-progress {
+  margin-top: 20px;
+  background: var(--panel-soft);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  padding: 14px 18px;
+}
+.montage-progress h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--ink);
+}
+.montage-progress ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.montage-result {
+  margin-top: 20px;
+}
+.montage-result h4 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  color: var(--ink);
+}
+.montage-video {
+  width: 100%;
+  max-height: 520px;
+  border-radius: 12px;
+  background: #000;
+}
+.montage-result a {
+  font-size: 13px;
+  color: var(--accent);
+}
+
 :root {
   color-scheme: light;
   --bg: #eef3f7;

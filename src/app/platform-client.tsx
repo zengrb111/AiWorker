@@ -8,6 +8,7 @@ import PublishPanel from "./publish-panel";
 import AnalyticsPanel from "./analytics-panel";
 import AccountsPanel from "./accounts-panel";
 import ModelPicker, { type ModelOption, type CurrentModel } from "./model-picker";
+import MontageStudio from "./montage-studio";
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -36,7 +37,8 @@ type Section =
   | "accounts"
   | "settings"
   | "users"
-  | "profile";
+  | "profile"
+  | "montage";
 
 /** 侧栏菜单（顺序即展示顺序） */
 const navItems: Array<[Section, string, string]> = [
@@ -46,6 +48,7 @@ const navItems: Array<[Section, string, string]> = [
   ["analytics", "效果分析", "◫"],
   ["knowledge", "知识库", "▤"],
   ["accounts", "平台授权管理", "◈"],
+  ["montage", "视频剪辑", "▷"],
   ["settings", "系统配置", "⚙"],
   ["users", "账号管理", "◍"],
   ["profile", "个人中心", "◌"]
@@ -60,7 +63,8 @@ const sectionTitles: Record<Section, string> = {
   accounts: "平台授权管理",
   settings: "系统配置",
   users: "账号管理",
-  profile: "个人中心"
+  profile: "个人中心",
+  montage: "视频剪辑"
 };
 
 /** 尚未落地实现、以静态原型（iframe）方式引入平台的分区 */
@@ -2280,6 +2284,7 @@ export default function PlatformClient() {
         {section === "publish" && <PublishPanel resetToken={publishResetToken} />}
         {section === "analytics" && <AnalyticsPanel resetToken={analyticsResetToken} />}
         {section === "accounts" && <AccountsPanel resetToken={accountsResetToken} />}
+        {section === "montage" && <MontageStudio />}
 
         {prototypeSections.includes(section) && (
           <div className="prototype-frame">
