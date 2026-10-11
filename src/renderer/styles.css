@@ -2888,7 +2888,9 @@ textarea:focus {
 
 /* ===== Video player ===== */
 .video-player-wrap {
-  margin-top: 12px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 12px auto 0;
   border-radius: 10px;
   overflow: hidden;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
@@ -2896,8 +2898,9 @@ textarea:focus {
 
 .inline-video-player {
   display: block;
-  width: 100%;
-  max-height: 400px;
+  width: auto;
+  max-width: 100%;
+  max-height: 460px;
   border-radius: 10px;
   background: #000;
 }
@@ -3020,16 +3023,15 @@ textarea:focus {
 }
 
 .content-detail--video .detail-video-block {
-  width: 100%;
-  max-width: 960px;
+  width: fit-content;
+  max-width: 100%;
   margin-top: 4px;
 }
 
 .content-detail--video .detail-video-player {
-  width: 100%;
-  max-height: none;
-  max-width: 960px;
-  aspect-ratio: 16 / 9;
+  width: auto;
+  max-width: 100%;
+  max-height: 78vh;
   border-radius: 12px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2);
 }
@@ -4147,6 +4149,17 @@ textarea:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
+}
+
+/* 效果明细标题作为原文链接：默认继承文字色，hover 变红加下划线 */
+a.pub-row-title {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+a.pub-row-title:hover {
+  color: #e64340;
+  text-decoration: underline;
 }
 
 .pub-channel-tag {

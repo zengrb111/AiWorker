@@ -530,6 +530,10 @@ export async function syncSiteMetrics(userId: string): Promise<{ ok: boolean; me
         accountId: account.id,
       });
     }
+    // 官网文章下架 / 删除后，接口不再返回，但库里历史 metric 会残留，
+    // 导致效果数据虚高、且展示已不再公开展示的作品。这里按 contentKey 差集真删，
+    // 与小红书 / 头条号同步保持一致，确保效果分析只保留「当前仍公开」的作品。
+    const removed = await pruneStaleMetrics("site", account.id, items.map((it) => it.id));
     // 原文入库：官网内容的正文在本地内容库（PublishRecord → ContentItem）
     const records = await prisma.publishRecord.findMany({
       where: { status: "SUCCESS" },
@@ -561,12 +565,12 @@ export async function syncSiteMetrics(userId: string): Promise<{ ok: boolean; me
       data: {
         lastSyncAt: new Date(),
         status: "active",
-        statusMsg: `同步成功（${items.length} 条内容${siteDays ? `，站点流量 ${siteDays} 天` : ""}${bodies ? `，原文 ${bodies} 篇` : ""}）`,
+        statusMsg: `同步成功（${items.length} 条内容${siteDays ? `，站点流量 ${siteDays} 天` : ""}${bodies ? `，原文 ${bodies} 篇` : ""}${removed > 0 ? `；清理 ${removed} 条已下架残留` : ""}）`,
       },
     });
     return {
       ok: true,
-      message: `官网数据同步完成：${items.length} 条内容${siteDays ? `，站点流量 ${siteDays} 天` : ""}${bodies ? `，原文 ${bodies} 篇` : ""}`,
+      message: `官网数据同步完成：${items.length} 条内容${siteDays ? `，站点流量 ${siteDays} 天` : ""}${bodies ? `，原文 ${bodies} 篇` : ""}${removed > 0 ? `；清理 ${removed} 条已下架残留` : ""}`,
       items: items.length,
     };
   } catch (e) {
@@ -718,13 +722,18 @@ export async function syncToutiaoMetrics(accountId: string): Promise<{ ok: boole
   >();
   let consecutiveEmpty = 0;
   let skippedNotPublic = 0;
+  // 翻页游标必须是「已拉取的 API 条目总数」，与是否公开无关。
+  // 之前用 byId.size（仅公开数）当游标，一旦列表中出现一段非公开文章，
+  // 游标不前进 → 后续所有公开文章整段漏拉，最终被 prune 当成「下架」误删。
+  let fetched = 0;
   for (let i = 0; i < 200; i++) {
-    const res = await fetchJson(base.replace("REPLACE_PAGE", String(i + 1)) + `&offset=${byId.size}`);
+    const res = await fetchJson(base.replace("REPLACE_PAGE", String(i + 1)) + `&offset=${fetched}`);
     if (res.expired) {
       await markAccountError(accountId, "凭据已失效，请重新授权");
       return { ok: false, message: "凭据失效，请重新授权" };
     }
     const cells = (res.json?.data || []).map((d: any) => d?.assembleCell?.itemCell).filter(Boolean);
+    fetched += cells.length;
     let added = 0;
     for (const cell of cells) {
       // 只统计「当前公开可见」的内容：itemStatus=20 为已发布且对外可见，
@@ -734,7 +743,9 @@ export async function syncToutiaoMetrics(accountId: string): Promise<{ ok: boole
         continue;
       }
       const urls = [cell?.shareInfo?.shareURL, cell?.articleBase?.articleURL].filter(Boolean).join(" ");
-      const m = /\/(?:a|i)(\d{10,})\/?/.exec(urls) || /thread\/(\d{10,})/.exec(urls);
+      // 兼容三种 URL 形态：/a{id}（图文/视频）、/i{id}、/item/{id}（长文）、
+      // /thread/{id}（微头条）。之前漏了 /item/ 导致图文长文被整篇丢弃。
+      const m = /\/(?:a|i|item|thread)\/?(\d{10,})/.exec(urls);
       if (!m || byId.has(m[1])) continue;
       const c = cell.itemCounter || {};
       const title = String(
@@ -761,7 +772,9 @@ export async function syncToutiaoMetrics(accountId: string): Promise<{ ok: boole
       });
       added++;
     }
-    if (cells.length === 0 || added === 0 || !res.json?.has_more) {
+    // 仅以「整页为空」或「无更多」作为翻页终止条件；added===0 仅代表本页公开文章
+    // 都被去重/过滤，不代表翻页结束，不能作为终止条件（否则会漏拉后续公开内容）。
+    if (cells.length === 0 || !res.json?.has_more) {
       consecutiveEmpty++;
       if (consecutiveEmpty >= 3 || !res.json?.has_more) break;
     } else {

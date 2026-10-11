@@ -1,10 +1,23 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
-import { PLATFORM_META } from "@/lib/platform-sync";
+import { PLATFORM_META, loadSiteCredential } from "@/lib/platform-sync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/**
+ * 构造某条平台作品的「原文」链接（新标签页打开，查看实际发布的作品）。
+ * - 小红书：笔记网页版 explore/{id}（标准链接）
+ * - 头条号：toutiao.com/a{id}（文章/图文标准链接）
+ * - 官网：需域名，{domain}/recommend/{id}（好物推荐条目页；格式待与官网对齐确认）
+ */
+function originalContentUrl(platform: string, contentKey: string, siteDomain?: string | null): string | null {
+  if (platform === "xhs") return `https://www.xiaohongshu.com/explore/${contentKey}`;
+  if (platform === "toutiao") return `https://www.toutiao.com/a${contentKey}`;
+  if (platform === "site" && siteDomain) return `${siteDomain.replace(/\/+$/, "")}/recommend/${contentKey}`;
+  return null;
+}
 
 /**
  * GET /api/platform-metrics —— 效果分析聚合数据
@@ -23,6 +36,9 @@ export async function GET(req: Request) {
     orderBy: { updatedAt: "desc" },
     take: 20000,
   });
+  // 官网内容原文链接需要域名（从授权凭据取）；小红书/头条号用各自标准作品页。
+  const siteCred = await loadSiteCredential(user.id).catch(() => null);
+  const siteDomain = siteCred?.credential?.domain ?? null;
   // ⚠️ 要取「最近 N 天」必须 desc + take 再翻回升序：
   // 直接 asc + take 拿到的是最旧的 N 天，天数一超上限「官网今日 PV/UV」就会停在旧日期上。
   const siteRecent = await prisma.platformSiteMetric.findMany({
@@ -95,6 +111,7 @@ export async function GET(req: Request) {
       collects: m.collects,
       shares: m.shares,
       hasSource: withSource.has(`${m.platform}:${m.contentKey}`),
+      url: originalContentUrl(m.platform, m.contentKey, siteDomain),
     }));
 
   return NextResponse.json({

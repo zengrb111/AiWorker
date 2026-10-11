@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>原型 · 一键生成视频（Remotion）</title>
+<style>
+  :root {
+    --accent: #2f6bff;
+    --accent-weak: #e8efff;
+    --line: #e3e8f0;
+    --ink: #1c2333;
+    --muted: #7a8499;
+    --bg: #f4f6fb;
+    --panel: #f6f9ff;
+    --ok: #18a058;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; overflow: hidden; display: flex; }
+
+  /* ===== 左侧导航（还原截图） ===== */
+  .sidebar { width: 150px; background: linear-gradient(180deg,#f7f9ff,#eef2fb); border-right: 1px solid var(--line); padding: 14px 10px; flex-shrink: 0; }
+  .logo { display: flex; align-items: center; gap: 8px; margin-bottom: 22px; }
+  .logo-badge { width: 34px; height: 34px; border-radius: 9px; background: var(--accent); color: #fff; font-weight: 800; font-size: 15px; display: grid; place-items: center; }
+  .logo-name { font-weight: 700; font-size: 13px; }
+  .logo-sub { font-size: 10px; color: var(--muted); }
+  .nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; color: #4a5568; margin-bottom: 4px; }
+  .nav-item.active { background: var(--accent); color: #fff; font-weight: 600; }
+  .nav-item .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .6; }
+
+  /* ===== 历史列表 ===== */
+  .history { width: 230px; background: #fff; border-right: 1px solid var(--line); padding: 16px 12px; flex-shrink: 0; display: flex; flex-direction: column; }
+  .history-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+  .history-head h3 { font-size: 14px; }
+  .btn-new { background: var(--accent); color: #fff; border: none; border-radius: 7px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
+  .hist-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin-bottom: 10px; cursor: pointer; }
+  .hist-card.active { border-color: var(--accent); background: var(--accent-weak); }
+  .hist-card b { font-size: 13px; }
+  .hist-card p { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .hist-card time { font-size: 10px; color: #a6afc2; }
+
+  /* ===== 主聊天区 ===== */
+  .chat { flex: 1; display: flex; flex-direction: column; background: #fff; min-width: 0; }
+  .chat-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 22px 10px; }
+  .chat-head h2 { font-size: 16px; }
+  .chat-head .meta { font-size: 11px; color: var(--muted); }
+  .tag-resume { font-size: 11px; color: var(--ok); background: #e9f8ef; border-radius: 20px; padding: 3px 10px; }
+  .chat-body { flex: 1; overflow-y: auto; padding: 6px 22px 12px; }
+
+  .msg-assist-btn { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; margin: 10px 0 18px; }
+  .msg-text { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; font-size: 13px; line-height: 1.7; color: #333; max-width: 760px; margin-bottom: 16px; }
+
+  /* ===== 快捷按钮条 ===== */
+  .quick-bar { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 22px 8px; position: relative; }
+  .quick-btn { border: 1px solid var(--line); background: #fff; border-radius: 18px; padding: 6px 14px; font-size: 12px; cursor: pointer; color: #333; }
+  .quick-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .quick-btn.hot { border-color: var(--accent); color: var(--accent); font-weight: 700; background: var(--accent-weak); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(47,107,255,.25)} 50%{box-shadow:0 0 0 6px rgba(47,107,255,0)} }
+
+  /* ===== 生成视频面板（同款 viral-remake-panel 风格） ===== */
+  .gen-panel { margin: 4px 22px 8px; border: 1px solid #bfd4ff; border-radius: 10px; background: var(--panel); padding: 12px; display: none; }
+  .gen-panel.open { display: block; }
+  .gen-title { font-weight: 800; color: var(--accent); font-size: 13px; }
+  .gen-desc { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 6px 0 10px; }
+  .img-rows { display: grid; gap: 8px; margin-bottom: 8px; max-height: 260px; overflow-y: auto; }
+  .img-row { display: flex; gap: 10px; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 8px; align-items: flex-start; animation: slideIn .25s ease; }
+  @keyframes slideIn { from { opacity: 0; transform: translateY(4px);} to { opacity: 1; transform: none;} }
+  .thumb { width: 72px; height: 72px; border-radius: 8px; object-fit: cover; background: #edf1f8; flex-shrink: 0; display: grid; place-items: center; color: #a6afc2; font-size: 11px; }
+  .row-main { flex: 1; min-width: 0; }
+  .row-name { font-size: 11px; color: var(--muted); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-req { width: 100%; min-height: 46px; resize: vertical; border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; font-size: 12px; font-family: inherit; line-height: 1.5; }
+  .row-req:focus { outline: none; border-color: var(--accent); }
+  .row-del { border: none; background: none; color: #c0c8d8; font-size: 16px; cursor: pointer; padding: 2px 6px; flex-shrink: 0; }
+  .row-del:hover { color: #e5484d; }
+  .add-img { display: inline-flex; align-items: center; gap: 6px; border: 1px dashed #9db8f5; color: var(--accent); border-radius: 8px; padding: 7px 14px; font-size: 12px; cursor: pointer; background: #fff; margin-bottom: 10px; }
+  .add-img:hover { background: var(--accent-weak); }
+  .gen-global-col { margin-bottom: 10px; }
+  .gen-global-col label { display: block; font-size: 12px; color: var(--ink); margin-bottom: 5px; }
+  .gen-req-area { width: 100%; min-height: 88px; resize: vertical; border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; font-size: 12px; font-family: inherit; line-height: 1.6; }
+  .gen-req-area:focus { outline: none; border-color: var(--accent); }
+  .gen-summary { color: var(--muted); font-size: 12px; margin-bottom: 8px; min-height: 16px; }
+  .gen-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .gen-actions button { min-height: 30px; padding: 0 14px; border-radius: 7px; font-size: 12px; cursor: pointer; border: 1px solid var(--line); background: #fff; }
+  .gen-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+  .gen-actions button:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* ===== 输入框 ===== */
+  .input-wrap { padding: 0 22px 16px; }
+  .input-box { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+  .input-box textarea { width: 100%; border: none; resize: none; font-size: 13px; font-family: inherit; min-height: 44px; outline: none; }
+  .input-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+  .model-chip { font-size: 11px; color: var(--muted); background: #f1f4fa; border-radius: 14px; padding: 4px 10px; }
+  .send-btn { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 6px 18px; font-size: 12px; cursor: pointer; }
+
+  /* ===== 会话中的生成过程卡片 ===== */
+  .gen-msg { border: 1px solid #d6e2ff; border-radius: 12px; padding: 14px; max-width: 780px; margin: 6px 0 16px; background: linear-gradient(180deg,#fbfdff,#f5f8ff); }
+  .gen-msg h4 { font-size: 13px; color: var(--accent); margin-bottom: 4px; }
+  .gen-msg .imgs-line { display: flex; gap: 6px; margin: 8px 0; }
+  .gen-msg .imgs-line img { width: 52px; height: 52px; border-radius: 6px; object-fit: cover; border: 1px solid var(--line); }
+  .stream-log { font-size: 12px; line-height: 1.9; color: #333; font-family: "Cascadia Code", Consolas, monospace; }
+  .stream-log .step { opacity: 0; animation: fadeIn .3s forwards; display: flex; gap: 6px; }
+  @keyframes fadeIn { to { opacity: 1; } }
+  .stream-log .t { color: #9aa6bd; flex-shrink: 0; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #c6d6ff; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .progress-track { height: 6px; background: #e6ecf8; border-radius: 4px; margin: 10px 0 4px; overflow: hidden; }
+  .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg,#2f6bff,#6f9bff); border-radius: 4px; transition: width .6s ease; }
+  .gen-done { margin-top: 10px; display: none; }
+  .gen-done video { width: 100%; max-width: 300px; border-radius: 10px; background: #10131a; display: block; }
+  .gen-done .done-row { display: flex; gap: 8px; margin-top: 8px; }
+  .gen-done .done-row button { font-size: 12px; border-radius: 7px; padding: 6px 12px; cursor: pointer; border: 1px solid var(--line); background: #fff; }
+  .gen-done .done-row button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .done-badge { color: var(--ok); font-weight: 700; }
+
+  /* ===== 原型标注 ===== */
+  .note { position: fixed; background: #fff8e6; border: 1px dashed #e0b95a; color: #7a5b12; font-size: 12px; line-height: 1.6; padding: 10px 12px; border-radius: 10px; width: 250px; z-index: 50; box-shadow: 0 4px 14px rgba(0,0,0,.06); }
+  .note b { display: block; margin-bottom: 3px; }
+  .note-toggle { position: fixed; right: 16px; top: 16px; z-index: 60; border: 1px solid #e0b95a; background: #fff8e6; color: #7a5b12; border-radius: 16px; padding: 5px 14px; font-size: 12px; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<button class="note-toggle" onclick="document.querySelectorAll('.note').forEach(n=>n.style.display=n.style.display==='none'?'block':'none')">隐藏/显示 原型标注</button>
+
+<!-- 标注1：按钮改名 -->
+<div class="note" style="left: 300px; bottom: 130px;">
+  <b>① 按钮改名</b>
+  快捷按钮「一键制作课件」改为「一键生成视频」，点击不再发消息，而是弹出下方同款面板（与一键剪视频一致的交互与样式）。
+</div>
+<!-- 标注2：面板 -->
+<div class="note" style="right: 30px; top: 110px;">
+  <b>② 面板能力</b>
+  · 可上传<b>多张参考图</b>（缩略图 + 文件名 + 可删行）<br>
+  · 下方<b>一个多行输入框</b>统一写整体创作要求（风格/分镜/文案/时长）<br>
+  · 点「开始生成」→ 调龙虾(OpenClaw)已装的 Remotion 技能
+</div>
+<!-- 标注3：流式 -->
+<div class="note" style="right: 30px; bottom: 140px;">
+  <b>③ 会话内流式输出</b>
+  生成过程以消息卡片形式在当前会话流式打印（接收图片→分析→脚本→Remotion 渲染→成片），完成后附视频预览与「存入内容库」。
+</div>
+
+<!-- 侧边栏 -->
+<aside class="sidebar">
+  <div class="logo">
+    <div class="logo-badge">AI</div>
+    <div><div class="logo-name">创星云</div><div class="logo-sub">AI数字员工平台</div></div>
+  </div>
+  <div class="nav-item active"><span class="dot"></span>对话</div>
+  <div class="nav-item"><span class="dot"></span>内容库</div>
+  <div class="nav-item"><span class="dot"></span>发布管理</div>
+  <div class="nav-item"><span class="dot"></span>效果分析</div>
+  <div class="nav-item"><span class="dot"></span>知识库</div>
+  <div class="nav-item"><span class="dot"></span>平台授权管理</div>
+  <div class="nav-item"><span class="dot"></span>系统配置</div>
+  <div class="nav-item"><span class="dot"></span>账号管理</div>
+  <div class="nav-item"><span class="dot"></span>个人中心</div>
+</aside>
+
+<!-- 历史列表 -->
+<section class="history">
+  <div class="history-head"><h3>历史列表</h3><button class="btn-new">+ 新建</button></div>
+  <div class="hist-card active">
+    <b>今日全网热点</b>
+    <p>请在下方上传需要剪辑的视频，开始剪辑后，我会在会话中实时展示视频分析、字幕生成、音…</p>
+    <time>10/8 14:55</time>
+  </div>
+</section>
+
+<!-- 聊天主区 -->
+<main class="chat">
+  <div class="chat-head">
+    <div><h2>今日全网热点</h2><div class="meta">10/8 14:55</div></div>
+    <span class="tag-resume">● 可继续对话</span>
+  </div>
+
+  <div class="chat-body" id="chatBody">
+    <button class="msg-assist-btn">一键剪视频</button>
+    <div class="msg-text">请在下方上传需要剪辑的视频，开始剪辑后，我会在会话中实时展示视频分析、字幕生成、音频优化、画面特效、转场和成片渲染的完整过程。</div>
+
+    <!-- 生成过程卡片（点开始生成后插入到这里） -->
+    <div id="genMsgHost"></div>
+  </div>
+
+  <!-- 生成视频面板：默认隐藏，点「一键生成视频」显示 -->
+  <div class="gen-panel" id="genPanel">
+    <div class="gen-title">一键生成视频</div>
+    <p class="gen-desc">上传多张参考图，然后在下方<b>统一填写多行整体创作要求</b>（整体风格、分镜、文案、时长等）。提交后我会调用 Remotion 视频技能，在当前会话中实时展示脚本生成、分镜渲染、配音字幕与成片合成的完整过程。</p>
+
+    <label class="add-img">＋ 上传参考图（可多选）<input type="file" id="imgInput" multiple accept="image/jpeg,image/png,image/webp" hidden></label>
+
+    <div class="img-rows" id="imgRows"></div>
+
+    <div class="gen-global-col">
+      <label>整体创作要求（多行）</label>
+      <textarea id="globalReq" class="gen-req-area" placeholder="例如：&#10;竖版 1080×1920，时长 30 秒左右，轻松治愈口播风&#10;第一张图做开场封面，配文案「爸，我又想你了」停留3秒&#10;第二张图做正文，强调一个温暖细节&#10;结尾引导关注 + 品牌落版"></textarea>
+    </div>
+
+    <div class="gen-summary" id="genSummary">暂未选择参考图</div>
+    <div class="gen-actions">
+      <button onclick="closePanel()">取消</button>
+      <button class="primary" id="startBtn" disabled onclick="startGenerate()">开始生成</button>
+    </div>
+  </div>
+
+  <!-- 快捷按钮条 -->
+  <div class="quick-bar">
+    <button class="quick-btn">今日产品热点</button>
+    <button class="quick-btn">今日全网热点</button>
+    <button class="quick-btn">一键仿写爆款</button>
+    <button class="quick-btn hot" id="genVideoBtn">一键生成视频</button>
+    <button class="quick-btn">一键剪视频</button>
+    <button class="quick-btn">一键复刻爆款视频</button>
+  </div>
+
+  <div class="input-wrap">
+    <div class="input-box">
+      <textarea placeholder="你可以直接发送你的问题即可（Enter 发送，Shift+Enter 换行）"></textarea>
+      <div class="input-foot">
+        <span class="model-chip">● DeepSeek Chat</span>
+        <button class="send-btn">发送</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+const rows = []; // { file, name, url, req }
+const imgRows = document.getElementById("imgRows");
+const summary = document.getElementById("genSummary");
+const startBtn = document.getElementById("startBtn");
+const panel = document.getElementById("genPanel");
+const host = document.getElementById("genMsgHost");
+const DEMO_IMAGES = [
+  "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"><rect width="72" height="72" fill="#dce7ff"/><text x="36" y="40" font-size="11" text-anchor="middle" fill="#5b7bd5">参考图A</text></svg>'),
+  "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"><rect width="72" height="72" fill="#ffe4d6"/><text x="36" y="40" font-size="11" text-anchor="middle" fill="#d57b5b">参考图B</text></svg>'),
+  "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"><rect width="72" height="72" fill="#ddf3e4"/><text x="36" y="40" font-size="11" text-anchor="middle" fill="#4d9b6a">参考图C</text></svg>')
+];
+
+document.getElementById("genVideoBtn").onclick = () => { panel.classList.toggle("open"); };
+function closePanel() { panel.classList.remove("open"); }
+
+document.getElementById("imgInput").onchange = (e) => {
+  for (const f of e.target.files) {
+    rows.push({ name: f.name, url: DEMO_IMAGES[rows.length % 3], req: "" });
+  }
+  e.target.value = "";
+  render();
+};
+
+function render() {
+  imgRows.innerHTML = "";
+  rows.forEach((r, i) => {
+    const row = document.createElement("div");
+    row.className = "img-row";
+    row.innerHTML =
+      '<img class="thumb" src="' + r.url + '">' +
+      '<div class="row-main"><div class="row-name">图 ' + (i+1) + ' · ' + r.name + '</div></div>' +
+      '<button class="row-del" title="移除">✕</button>';
+    row.querySelector(".row-del").onclick = () => { rows.splice(i, 1); render(); };
+    imgRows.appendChild(row);
+  });
+  refresh();
+}
+function refresh() {
+  const n = rows.length;
+  summary.textContent = n === 0 ? "暂未选择参考图" : "已选择 " + n + " 张参考图";
+  startBtn.disabled = n === 0;
+}
+
+const SCRIPT = [
+  "📤 已接收 {N} 张参考图，开始解析创作要求…",
+  "🧠 正在分析参考图内容与逐图要求（构图 / 主体 / 文案位置）…",
+  "🦞 调用龙虾(OpenClaw)已安装的 Remotion 技能，规划视频脚本…",
+  "📝 脚本就绪：共 {N} 个分镜 · 竖版 1080×1920 · 预计时长 30s",
+  "🎬 分镜 1/{N} 渲染中：开场封面 + 标题字幕动效…",
+  "🎬 分镜 2/{N} 渲染中：图片转场 + 重点文案强调…",
+  "🎬 分镜 {N}/{N} 渲染中：结尾引导关注 + 品牌落版…",
+  "🔊 合成配音与背景音乐，烧录字幕…",
+  "🎞️ Remotion 最终渲染与编码（H.264 / 30fps）…"
+];
+let busy = false;
+function startGenerate() {
+  if (busy) return;
+  busy = true;
+  const n = rows.length;
+  const globalReq = document.getElementById("globalReq").value.trim();
+
+  closePanel();
+  const card = document.createElement("div");
+  card.className = "gen-msg";
+  card.innerHTML =
+    '<h4>🎬 一键生成视频（Remotion）</h4>' +
+    '<div class="imgs-line">' + rows.map(r => '<img src="' + r.url + '">').join("") + '</div>' +
+    '<div class="stream-log" style="color:#7a8499;font-size:11px;margin-bottom:6px;">整体创作要求：<br>' + escapeHtml(globalReq || "（未填写，按通用风格生成）") + '</div>' +
+    '<div class="stream-log" id="streamLog"></div>' +
+    '<div class="progress-track"><div class="progress-fill" id="progFill"></div></div>' +
+    '<div id="genDone" class="gen-done">' +
+      '<span class="done-badge">✅ 视频生成完成</span> <span style="color:var(--muted);font-size:12px;">demo-video-<b style="color:var(--ink)">20261010</b>.mp4 · 00:30 · 1080×1920</span>' +
+      '<video controls poster=""><source src="" type="video/mp4"></video>' +
+      '<div class="done-row"><button class="primary">存入内容库</button><button>重新生成</button></div>' +
+    '</div>';
+  host.prepend(card);
+  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+  const log = card.querySelector("#streamLog");
+  const fill = card.querySelector("#progFill");
+  let i = 0;
+  const timer = setInterval(() => {
+    log.querySelectorAll(".step.pending").forEach(el => el.remove());
+    if (i < SCRIPT.length) {
+      const step = document.createElement("div");
+      step.className = "step";
+      step.innerHTML = '<span class="t">[' + String(3 + i * 4).padStart(2, "0") + ':' + String((i * 7) % 60).padStart(2, "0") + ']</span><span>' + SCRIPT[i].replace(/\{N\}/g, n) + ' <span class="spinner"></span></span>';
+      log.appendChild(step);
+      fill.style.width = Math.round(((i + 1) / (SCRIPT.length + 1)) * 100) + "%";
+      i++;
+    } else {
+      clearInterval(timer);
+      log.querySelectorAll(".pending").forEach(el => el.remove());
+      const last = document.createElement("div");
+      last.className = "step";
+      last.innerHTML = '<span class="t">[01:10]</span><span>✅ 成片已生成并回传到当前会话</span>';
+      log.appendChild(last);
+      fill.style.width = "100%";
+      card.querySelector("#genDone").style.display = "block";
+      busy = false;
+    }
+  }, 900);
+}
+function escapeHtml(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+render();
+</script>
+</body>
+</html>
