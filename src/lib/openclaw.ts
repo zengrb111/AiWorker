@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { sign, createPublicKey } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import QRCode from "qrcode";
 
@@ -408,9 +408,121 @@ type DeviceCredentials = {
 
 let cachedDeviceCreds: DeviceCredentials | null = null;
 
+function pubKeyB64UrlFromPem(publicKeyPem: string): string {
+  const pubObj = createPublicKey({
+    key: publicKeyPem,
+    format: "pem",
+    type: "spki",
+  });
+  const pubDer = pubObj.export({ type: "spki", format: "der" });
+  return pubDer.subarray(pubDer.length - 32).toString("base64url");
+}
+
+/**
+ * OpenClaw >= 2026.10 keeps the device identity keypair in the shared-state
+ * SQLite database (`device_identities`) and the paired-device operator token in
+ * `device_pairing_paired.tokens_json`; it retires the legacy
+ * `identity/device.json` + `identity/device-auth.json` files (and actually
+ * refuses to start when those legacy files reappear). Prefer SQLite, and fall
+ * back to the legacy files only for older OpenClaw versions.
+ */
+function readDeviceCredentialsFromStateSqlite(
+  home: string
+): DeviceCredentials | null {
+  const candidates = [
+    `${home}/.openclaw/state/openclaw.sqlite`,
+    process.env.OPENCLAW_STATE_DIR
+      ? `${process.env.OPENCLAW_STATE_DIR}/state/openclaw.sqlite`
+      : "",
+  ].filter(Boolean);
+
+  for (const dbPath of candidates) {
+    if (!existsSync(dbPath)) continue;
+    let db:
+      | {
+          prepare: (sql: string) => { get: (...args: unknown[]) => unknown };
+          close: () => void;
+        }
+      | null = null;
+    try {
+      const { DatabaseSync } = nodeRequire("node:sqlite") as {
+        DatabaseSync: new (
+          path: string,
+          opts?: { readOnly?: boolean }
+        ) => {
+          prepare: (sql: string) => { get: (...args: unknown[]) => unknown };
+          close: () => void;
+        };
+      };
+      db = new DatabaseSync(dbPath, { readOnly: true });
+
+      const identity = db
+        .prepare(
+          "SELECT device_id, public_key_pem, private_key_pem FROM device_identities WHERE identity_key = ?"
+        )
+        .get("primary") as
+        | {
+            device_id?: string;
+            public_key_pem?: string;
+            private_key_pem?: string;
+          }
+        | undefined;
+      if (
+        !identity?.device_id ||
+        !identity.public_key_pem ||
+        !identity.private_key_pem
+      ) {
+        continue;
+      }
+
+      const pairing = db
+        .prepare(
+          "SELECT tokens_json FROM device_pairing_paired WHERE device_id = ?"
+        )
+        .get(identity.device_id) as { tokens_json?: string } | undefined;
+      let operatorToken = "";
+      if (pairing?.tokens_json) {
+        try {
+          operatorToken = String(
+            JSON.parse(pairing.tokens_json)?.operator?.token ?? ""
+          );
+        } catch {
+          operatorToken = "";
+        }
+      }
+      if (!operatorToken) continue;
+
+      return {
+        deviceId: identity.device_id,
+        privateKeyPem: identity.private_key_pem,
+        publicKeyB64Url: pubKeyB64UrlFromPem(identity.public_key_pem),
+        operatorToken,
+      };
+    } catch {
+      // Try the next candidate path; otherwise fall back to the legacy files.
+    } finally {
+      try {
+        db?.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return null;
+}
+
 function loadDeviceCredentials(): DeviceCredentials {
   if (cachedDeviceCreds) return cachedDeviceCreds;
   const home = homedir();
+
+  // Preferred source: OpenClaw shared-state SQLite (>= 2026.10).
+  const fromSqlite = readDeviceCredentialsFromStateSqlite(home);
+  if (fromSqlite) {
+    cachedDeviceCreds = fromSqlite;
+    return cachedDeviceCreds;
+  }
+
+  // Legacy fallback: identity/device.json + identity/device-auth.json.
   const dev = JSON.parse(
     readFileSync(`${home}/.openclaw/identity/device.json`, "utf8")
   ) as {
@@ -428,18 +540,10 @@ function loadDeviceCredentials(): DeviceCredentials {
     throw new Error("OpenClaw 设备认证文件中未找到 operator token。");
   }
 
-  const pubObj = createPublicKey({
-    key: dev.publicKeyPem,
-    format: "pem",
-    type: "spki",
-  });
-  const pubDer = pubObj.export({ type: "spki", format: "der" });
-  const pubB64Url = pubDer.subarray(pubDer.length - 32).toString("base64url");
-
   cachedDeviceCreds = {
     deviceId: dev.deviceId,
     privateKeyPem: dev.privateKeyPem,
-    publicKeyB64Url: pubB64Url,
+    publicKeyB64Url: pubKeyB64UrlFromPem(dev.publicKeyPem),
     operatorToken: opToken,
   };
   return cachedDeviceCreds;

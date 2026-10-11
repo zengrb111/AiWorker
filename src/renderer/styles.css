@@ -2753,7 +2753,9 @@ textarea:focus {
 
 /* ===== Video player ===== */
 .video-player-wrap {
-  margin-top: 12px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 12px auto 0;
   border-radius: 10px;
   overflow: hidden;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
@@ -2761,8 +2763,9 @@ textarea:focus {
 
 .inline-video-player {
   display: block;
-  width: 100%;
-  max-height: 400px;
+  width: auto;
+  max-width: 100%;
+  max-height: 460px;
   border-radius: 10px;
   background: #000;
 }
@@ -2885,16 +2888,15 @@ textarea:focus {
 }
 
 .content-detail--video .detail-video-block {
-  width: 100%;
-  max-width: 960px;
+  width: fit-content;
+  max-width: 100%;
   margin-top: 4px;
 }
 
 .content-detail--video .detail-video-player {
-  width: 100%;
-  max-height: none;
-  max-width: 960px;
-  aspect-ratio: 16 / 9;
+  width: auto;
+  max-width: 100%;
+  max-height: 78vh;
   border-radius: 12px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2);
 }

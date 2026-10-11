@@ -1094,6 +1094,8 @@ export default function PlatformClient() {
     setChatError("");
     setStreamingContent("");
     setGenVideoPanelOpen(false);
+    // 一键生成视频不展示「已保存到内容库」提示条，先清掉可能残留的旧值。
+    setLastSavedContent(null);
     const controller = new AbortController();
     abortControllerRef.current = controller;
     try {
@@ -1126,10 +1128,9 @@ export default function PlatformClient() {
             setLastVideoUrl(data.videoUrl || null);
             setGenVideoImages([]);
             setGenVideoRequirement("");
+            // 内容仍正常入库并刷新内容库列表，但不弹「已保存到内容库」提示条。
             if (data.contentSaved) {
-              const all = await refreshContent();
-              const saved = all.find((c) => c.id === data.contentSaved.id);
-              if (saved) setLastSavedContent(saved);
+              await refreshContent();
             }
             await refreshConversations();
           } else if (data.type === "error") {

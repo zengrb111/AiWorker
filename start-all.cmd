@@ -3,9 +3,9 @@ REM ===== 创星云 AI 数字员工平台 - 开机自启动脚本 =====
 REM 同时启动 OpenClaw 网关 (端口 18789) 和 Next.js 服务 (端口 3000)
 
 set PROJECT_DIR=D:\OPCProjects\AiWorker
-set NODE_EXE=C:\Users\zengr\AppData\Local\hermes\node\node.exe
-set NPM_CMD=C:\Users\zengr\AppData\Local\hermes\node\npm.cmd
-set OPENCLAW_CMD=C:\Users\zengr\AppData\Local\hermes\node\openclaw.cmd
+set NODE_EXE=C:\Program Files\nodejs\node.exe
+set NPM_CMD=C:\Program Files\nodejs\npm.cmd
+set OPENCLAW_CMD=D:\OpenClaw\openclaw.cmd
 
 cd /d "%PROJECT_DIR%"
 

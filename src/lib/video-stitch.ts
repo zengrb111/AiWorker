@@ -40,7 +40,8 @@ export async function burnSubtitles(
   const fontfile = existsSync("C:/Windows/Fonts/msyh.ttc")
     ? "fontfile=C\\:/Windows/Fonts/msyh.ttc"
     : "fontfile=C\\:/Windows/Fonts/arial.ttf";
-  const filter = `subtitles='${escaped}':charenc=UTF-8:force_style='${fontfile},FontSize=20,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,Alignment=2,MarginV=64'`;
+  // PlayRes 固定为竖版 1080x1920：字幕置于画面下方安全区（距底约 17%），白字黑边、逐句显示。
+  const filter = `subtitles='${escaped}':charenc=UTF-8:force_style='${fontfile},PlayResX=1080,PlayResY=1920,FontSize=58,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=330'`;
   onProgress?.("正在烧录字幕...");
   const r = await runTool(FFMPEG, [
     "-y", "-i", inputPath, "-vf", filter,
@@ -118,33 +119,100 @@ export async function muxNarration(
   videoPath: string,
   audioPath: string,
   outputPath: string,
-  onProgress?: (t: string) => void
+  opts: { bgmPath?: string; bgmVolume?: number; onProgress?: (t: string) => void } = {}
 ): Promise<StitchResult> {
+  const { bgmPath, bgmVolume = 0.16, onProgress } = opts;
   if (!existsSync(videoPath)) return { ok: false, reason: `视频不存在：${videoPath}` };
   if (!existsSync(audioPath)) return { ok: false, reason: `配音不存在：${audioPath}` };
   const vDur = await probeDuration(videoPath);
   const aDur = await probeDuration(audioPath);
-  onProgress?.(`正在合成配音（画面 ${vDur.toFixed(1)}s / 配音 ${aDur.toFixed(1)}s）...`);
+  const bgmOk = !!bgmPath && existsSync(bgmPath);
+  onProgress?.(
+    `正在合成配音${bgmOk ? " + 背景音乐" : ""}（画面 ${vDur.toFixed(1)}s / 配音 ${aDur.toFixed(1)}s）...`
+  );
 
-  let args: string[];
-  if (aDur > vDur + 0.2) {
+  const extend = aDur > vDur + 0.2;
+  const inputs = ["-i", videoPath, "-i", audioPath];
+  if (bgmOk) inputs.push("-stream_loop", "-1", "-i", bgmPath as string);
+
+  const filters: string[] = [];
+  if (extend) {
     const extra = (aDur - vDur + 0.3).toFixed(2);
-    args = [
-      "-y", "-i", videoPath, "-i", audioPath,
-      "-filter_complex", `[0:v]tpad=stop_mode=clone:stop_duration=${extra}[v]`,
-      "-map", "[v]", "-map", "1:a",
-      "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p",
-      "-c:a", "aac", "-b:a", "192k", "-shortest", outputPath,
-    ];
-  } else {
-    args = [
-      "-y", "-i", videoPath, "-i", audioPath,
-      "-filter_complex", "[1:a]apad[a]",
-      "-map", "0:v", "-map", "[a]",
-      "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", outputPath,
-    ];
+    filters.push(`[0:v]tpad=stop_mode=clone:stop_duration=${extra}[v]`);
   }
+  if (bgmOk) {
+    // 配音补静音 + 背景音乐循环降音量，两者混合；时长以视频（-shortest）为准。
+    filters.push(
+      "[1:a]apad[v1]",
+      `[2:a]volume=${bgmVolume}[b1]`,
+      "[v1][b1]amix=inputs=2:duration=longest:dropout_transition=0[a]"
+    );
+  } else {
+    filters.push("[1:a]apad[a]");
+  }
+
+  const args = [
+    "-y", ...inputs,
+    "-filter_complex", filters.join(";"),
+    "-map", extend ? "[v]" : "0:v", "-map", "[a]",
+    ...(extend ? ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"] : ["-c:v", "copy"]),
+    "-c:a", "aac", "-b:a", "192k", "-shortest", outputPath,
+  ];
   const r = await runTool(FFMPEG, args, { timeoutMs: 300_000 });
   if (!r.ok || !existsSync(outputPath)) return { ok: false, reason: `配音合成失败：${r.stderr.slice(0, 200)}` };
+  return { ok: true, outputPath };
+}
+
+/**
+ * 在视频前 N 秒叠加标题（片头标题卡）：半透明底 + 白色大标题，居中偏上。
+ * 通过 drawtext 的 textfile 读取标题，避免中文/标点转义问题。
+ */
+export async function addTitleOverlay(
+  inputPath: string,
+  title: string,
+  outputPath: string,
+  opts: { durationSec?: number; onProgress?: (t: string) => void } = {}
+): Promise<StitchResult> {
+  if (!existsSync(inputPath)) return { ok: false, reason: `输入不存在：${inputPath}` };
+  const clean = title.replace(/\r?\n/g, " ").trim();
+  if (!clean) return { ok: true, outputPath: inputPath };
+  const dur = opts.durationSec ?? 3;
+
+  const titleFile = join(dirname(outputPath), `title-${Date.now()}.txt`);
+  writeFileSync(titleFile, clean, "utf-8");
+  const escTxt = titleFile.replace(/\\/g, "/").replace(/:/g, "\\:");
+  const fontfile = existsSync("C:/Windows/Fonts/msyh.ttc")
+    ? "C\\:/Windows/Fonts/msyh.ttc"
+    : "C\\:/Windows/Fonts/arial.ttf";
+
+  const filter =
+    `drawtext=fontfile='${fontfile}':textfile='${escTxt}':` +
+    `fontsize=76:fontcolor=white:borderw=6:bordercolor=black@0.85:` +
+    `box=1:boxcolor=black@0.35:boxborderw=34:` +
+    `x=(w-text_w)/2:y=h*0.26:enable='lt(t\\,${dur})'`;
+
+  opts.onProgress?.(`正在添加片头标题（前 ${dur}s）...`);
+  const r = await runTool(
+    FFMPEG,
+    ["-y", "-i", inputPath, "-vf", filter, "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "copy", outputPath],
+    { timeoutMs: 300_000 }
+  );
+  if (!r.ok || !existsSync(outputPath)) return { ok: false, reason: `片头标题叠加失败：${r.stderr.slice(0, 200)}` };
+  return { ok: true, outputPath };
+}
+
+/** 从视频某一时间点截取一帧作为封面（JPEG）。 */
+export async function extractCoverFrame(
+  inputPath: string,
+  outputPath: string,
+  atSec: number
+): Promise<StitchResult> {
+  if (!existsSync(inputPath)) return { ok: false, reason: `输入不存在：${inputPath}` };
+  const r = await runTool(
+    FFMPEG,
+    ["-y", "-ss", atSec.toFixed(2), "-i", inputPath, "-frames:v", "1", "-q:v", "2", outputPath],
+    { timeoutMs: 60_000 }
+  );
+  if (!r.ok || !existsSync(outputPath)) return { ok: false, reason: `封面截图失败：${r.stderr.slice(0, 150)}` };
   return { ok: true, outputPath };
 }
