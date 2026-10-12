@@ -1294,12 +1294,13 @@ export const openClawClient = {
 
   async sendTaskStream(
     input: string | OpenClawTaskRequest,
-    onDelta: (deltaText: string) => void
+    onDelta: (deltaText: string) => void,
+    timeoutMs?: number
   ): Promise<OpenClawTaskResult> {
     const request = typeof input === "string" ? { message: input } : input;
     const message = request.prompt ?? request.message;
 
-    const result = await requestGatewayChat(message, undefined, onDelta);
+    const result = await requestGatewayChat(message, timeoutMs, onDelta);
 
     if (!result.content) {
       throw new Error("OpenClaw 未返回任务内容。");
