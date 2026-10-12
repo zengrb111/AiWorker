@@ -1830,6 +1830,19 @@ textarea:focus {
 .viral-remake-actions button { min-height: 30px; padding: 0 12px; border-radius: 7px; font-size: 12px; }
 .viral-remake-actions button:last-child { background: var(--accent); color: #fff; }
 
+/* 一键生成视频：参考图缩略图网格 */
+.gen-video-thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.gen-video-thumb { position: relative; width: 76px; height: 76px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); background: var(--bg-2); cursor: pointer; }
+.gen-video-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gen-video-thumb-remove { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; line-height: 16px; text-align: center; border: none; border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 14px; cursor: pointer; padding: 0; }
+.gen-video-thumb-remove:hover { background: rgba(220, 38, 38, 0.9); }
+
+/* 一键生成视频：大图预览 lightbox */
+.gen-video-lightbox { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.78); cursor: zoom-out; }
+.gen-video-lightbox img { max-width: 90vw; max-height: 90vh; border-radius: 8px; box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5); cursor: default; }
+.gen-video-lightbox-close { position: absolute; top: 18px; right: 22px; width: 36px; height: 36px; line-height: 32px; text-align: center; border: none; border-radius: 50%; background: rgba(255, 255, 255, 0.15); color: #fff; font-size: 22px; cursor: pointer; }
+.gen-video-lightbox-close:hover { background: rgba(255, 255, 255, 0.3); }
+
 /* Mode chip inside textarea wrap */
 .chat-input-wrap {
   position: relative;

@@ -8,7 +8,6 @@ import PublishPanel from "./publish-panel";
 import AnalyticsPanel from "./analytics-panel";
 import AccountsPanel from "./accounts-panel";
 import ModelPicker, { type ModelOption, type CurrentModel } from "./model-picker";
-import MontageStudio from "./montage-studio";
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -37,8 +36,7 @@ type Section =
   | "accounts"
   | "settings"
   | "users"
-  | "profile"
-  | "montage";
+  | "profile";
 
 /** 侧栏菜单（顺序即展示顺序） */
 const navItems: Array<[Section, string, string]> = [
@@ -48,7 +46,6 @@ const navItems: Array<[Section, string, string]> = [
   ["analytics", "效果分析", "◫"],
   ["knowledge", "知识库", "▤"],
   ["accounts", "平台授权管理", "◈"],
-  ["montage", "视频剪辑", "▷"],
   ["settings", "系统配置", "⚙"],
   ["users", "账号管理", "◍"],
   ["profile", "个人中心", "◌"]
@@ -63,8 +60,7 @@ const sectionTitles: Record<Section, string> = {
   accounts: "平台授权管理",
   settings: "系统配置",
   users: "账号管理",
-  profile: "个人中心",
-  montage: "视频剪辑"
+  profile: "个人中心"
 };
 
 /** 尚未落地实现、以静态原型（iframe）方式引入平台的分区 */
@@ -384,10 +380,26 @@ export default function PlatformClient() {
   const [montageVideoFiles, setMontageVideoFiles] = useState<File[]>([]);
   const [remakePanelOpen, setRemakePanelOpen] = useState(false);
   const [genVideoPanelOpen, setGenVideoPanelOpen] = useState(false);
-  const [genVideoImages, setGenVideoImages] = useState<File[]>([]);
+  const [genVideoImages, setGenVideoImages] = useState<Array<{ file: File; url: string }>>([]);
   const [genVideoRequirement, setGenVideoRequirement] = useState("");
   const [referenceVideoUrl, setReferenceVideoUrl] = useState("");
   const [referenceVideoFile, setReferenceVideoFile] = useState<File | null>(null);
+  const [genVideoPreviewUrl, setGenVideoPreviewUrl] = useState<string | null>(null);
+
+  function removeGenVideoImage(index: number) {
+    setGenVideoImages((previous) => {
+      const target = previous[index];
+      if (target) URL.revokeObjectURL(target.url);
+      return previous.filter((_, i) => i !== index);
+    });
+  }
+
+  function clearGenVideoImages() {
+    setGenVideoImages((previous) => {
+      previous.forEach((item) => URL.revokeObjectURL(item.url));
+      return [];
+    });
+  }
   const [remakeMaterials, setRemakeMaterials] = useState<File[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
@@ -1088,7 +1100,7 @@ export default function PlatformClient() {
   }
 
   async function createGenVideo() {
-    const files = genVideoImages;
+    const files = genVideoImages.map((item) => item.file);
     const conversationId = activeConversation?.id;
     const requirement = genVideoRequirement.trim();
     if (!files.length || !conversationId || sending) return;
@@ -1130,7 +1142,7 @@ export default function PlatformClient() {
             setStreamingContent((previous) => previous + data.text);
           } else if (data.type === "final") {
             setLastVideoUrl(data.videoUrl || null);
-            setGenVideoImages([]);
+            clearGenVideoImages();
             setGenVideoRequirement("");
             // 内容仍正常入库并刷新内容库列表，但不弹「已保存到内容库」提示条。
             if (data.contentSaved) {
@@ -2058,10 +2070,24 @@ export default function PlatformClient() {
                       <div className="viral-remake-panel">
                         <div className="viral-remake-title">一键生成视频</div>
                         <p>上传多张参考图，并在下方统一填写整体创作要求。点击开始生成后，系统会自动配文、合成女声配音与字幕，并调用 Remotion 视频技能渲染画面，全程在当前会话中实时展示。</p>
-                        <label className="viral-remake-file">上传参考图（可多选）<input type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={(event) => setGenVideoImages(Array.from(event.target.files ?? []))} /></label>
-                        <div className="viral-remake-summary">{genVideoImages.length === 0 ? "暂未选择参考图" : `已选择 ${genVideoImages.length} 张参考图：${genVideoImages.map((file) => file.name).join("、")}`}</div>
+                        <label className="viral-remake-file">上传参考图（可多选）<input type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={(event) => setGenVideoImages((previous) => [...previous, ...Array.from(event.target.files ?? []).map((file) => ({ file, url: URL.createObjectURL(file) }))])} /></label>
+                        <div className="gen-video-thumbs">
+                          {genVideoImages.map((item, index) => (
+                            <div className="gen-video-thumb" key={item.url}>
+                              <img src={item.url} alt={item.file.name} title={item.file.name} onClick={() => setGenVideoPreviewUrl(item.url)} />
+                              <button type="button" className="gen-video-thumb-remove" onClick={() => removeGenVideoImage(index)} aria-label="删除这张图">×</button>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="viral-remake-summary">{genVideoImages.length === 0 ? "暂未选择参考图（点击缩略图可看大图）" : `已选择 ${genVideoImages.length} 张参考图：点击缩略图看大图，右上角 × 可删除`}</div>
                         <label className="viral-remake-file" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>整体创作要求（多行）<textarea value={genVideoRequirement} onChange={(event) => setGenVideoRequirement(event.target.value)} placeholder={"例如：竖版 1080×1920，时长 30 秒左右，轻松治愈口播风\n第一张图做开场封面，配文案「爸，我又想你了」\n第二张图做正文，强调一个温暖细节\n结尾引导关注 + 品牌落版"} style={{ minHeight: 88, resize: "vertical", border: "1px solid var(--line)", borderRadius: 7, padding: "8px 10px", fontSize: 12, fontFamily: "inherit", lineHeight: 1.6 }} /></label>
-                        <div className="viral-remake-actions"><button type="button" onClick={() => setGenVideoPanelOpen(false)}>取消</button><button type="button" disabled={!genVideoImages.length || sending} onClick={() => void createGenVideo()}>开始生成</button></div>
+                        <div className="viral-remake-actions"><button type="button" onClick={() => { setGenVideoPanelOpen(false); setGenVideoPreviewUrl(null); }}>取消</button><button type="button" disabled={!genVideoImages.length || sending} onClick={() => void createGenVideo()}>开始生成</button></div>
+                      </div>
+                    )}
+                    {genVideoPreviewUrl && (
+                      <div className="gen-video-lightbox" onClick={() => setGenVideoPreviewUrl(null)}>
+                        <img src={genVideoPreviewUrl} alt="参考图预览" onClick={(event) => event.stopPropagation()} />
+                        <button type="button" className="gen-video-lightbox-close" onClick={() => setGenVideoPreviewUrl(null)} aria-label="关闭预览">×</button>
                       </div>
                     )}
                     <div className="chat-input-topbar">
@@ -2375,7 +2401,6 @@ export default function PlatformClient() {
         {section === "publish" && <PublishPanel resetToken={publishResetToken} />}
         {section === "analytics" && <AnalyticsPanel resetToken={analyticsResetToken} />}
         {section === "accounts" && <AccountsPanel resetToken={accountsResetToken} />}
-        {section === "montage" && <MontageStudio />}
 
         {prototypeSections.includes(section) && (
           <div className="prototype-frame">
