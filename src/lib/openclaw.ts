@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { sign, createPublicKey } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import QRCode from "qrcode";
 
@@ -118,11 +118,103 @@ function gatewayOrigin(): string {
   return process.env.OPENCLAW_GATEWAY_ORIGIN || requireBaseUrl();
 }
 
-const DEFAULT_WEIXIN_LOGIN_MODULE =
-  "C:\\Users\\zengr\\.openclaw\\npm\\projects\\tencent-weixin-openclaw-weixin-7783ac86ba\\node_modules\\@tencent-weixin\\openclaw-weixin\\dist\\src\\auth\\login-qr.js";
+const WEIXIN_PLUGIN_PACKAGE_SEGMENT = path.join(
+  "node_modules",
+  "@tencent-weixin",
+  "openclaw-weixin"
+);
+const WEIXIN_PROJECTS_DIR = path.join(homedir(), ".openclaw", "npm", "projects");
+/** 兜底：全新的动态解析失败时，仍回退到历史 base 目录（可能已过旧）。 */
+const LEGACY_WEIXIN_LOGIN_MODULE = path.join(
+  WEIXIN_PROJECTS_DIR,
+  "tencent-weixin-openclaw-weixin-7783ac86ba",
+  WEIXIN_PLUGIN_PACKAGE_SEGMENT,
+  "dist",
+  "src",
+  "auth",
+  "login-qr.js"
+);
+
+function parseVersionRank(version: string): number[] {
+  return version
+    .split(/[.\-+]/)
+    .map((segment) => Number.parseInt(segment, 10))
+    .map((value) => (Number.isFinite(value) ? value : 0));
+}
+
+function compareVersionRank(a: string, b: string): number {
+  const left = parseVersionRank(a);
+  const right = parseVersionRank(b);
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (left[index] ?? 0) - (right[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+/**
+ * 解析当前激活的微信插件登录模块路径。
+ *
+ * OpenClaw 2026.10 起改为「代际目录」安装插件：
+ *   ~/.openclaw/npm/projects/<name>__openclaw-generation__<hash>/…
+ * 旧的 base 目录（<name>/）会停留在升级前的旧版本。插件升级后若继续加载
+ * 写死的 base 路径，会拿到过旧插件（例如 2.4.6 仍 import 已被核心移除的
+ * `openclaw/plugin-sdk/infra-runtime`）而报错。
+ *
+ * 因此这里扫描全部候选目录，取版本最高者（版本相同则优先代际目录）。
+ */
+function resolveWeixinLoginModulePath(): string | null {
+  let dirNames: string[];
+  try {
+    dirNames = readdirSync(WEIXIN_PROJECTS_DIR);
+  } catch {
+    return null;
+  }
+
+  const candidates = dirNames.filter((name) =>
+    name.startsWith("tencent-weixin-openclaw-weixin")
+  );
+
+  let best: {
+    modulePath: string;
+    version: string;
+    isGeneration: boolean;
+  } | null = null;
+
+  for (const name of candidates) {
+    const pluginDir = path.join(WEIXIN_PROJECTS_DIR, name, WEIXIN_PLUGIN_PACKAGE_SEGMENT);
+    const modulePath = path.join(pluginDir, "dist", "src", "auth", "login-qr.js");
+    if (!existsSync(modulePath)) continue;
+
+    let version = "0.0.0";
+    try {
+      const pkg = JSON.parse(
+        readFileSync(path.join(pluginDir, "package.json"), "utf8")
+      ) as { version?: string };
+      if (typeof pkg.version === "string") version = pkg.version;
+    } catch {
+      // 读不到版本号时按最低优先级处理，但不丢弃该候选。
+    }
+
+    const isGeneration = name.includes("__openclaw-generation__");
+    const versionCmp = best ? compareVersionRank(version, best.version) : 1;
+    if (
+      !best ||
+      versionCmp > 0 ||
+      (versionCmp === 0 && isGeneration && !best.isGeneration)
+    ) {
+      best = { modulePath, version, isGeneration };
+    }
+  }
+
+  return best ? best.modulePath : null;
+}
 
 function weixinLoginModulePath(): string {
-  return process.env.OPENCLAW_WEIXIN_LOGIN_MODULE || DEFAULT_WEIXIN_LOGIN_MODULE;
+  const override = process.env.OPENCLAW_WEIXIN_LOGIN_MODULE;
+  if (override) return override;
+  return resolveWeixinLoginModulePath() ?? LEGACY_WEIXIN_LOGIN_MODULE;
 }
 
 async function importWeixinLoginModule(): Promise<WeixinLoginModule> {
