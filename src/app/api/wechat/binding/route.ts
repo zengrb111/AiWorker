@@ -32,7 +32,24 @@ export async function DELETE() {
       data: { status: "UNBOUND", boundAt: null }
     });
 
-    return jsonOk({ unbound: true });
+    /**
+     * 兜底：清理不再被任何活跃绑定引用的残留通道。
+     * 历史上 wechatOpenId 为空的绑定解绑时定位不到具体通道，通道会留在网关里
+     * 持续长轮询（token 过期的还会反复重试），最终拖死网关事件循环导致反复重启。
+     * 注意必须放在状态改成 UNBOUND 之后执行，否则本通道仍会被判为活跃。
+     */
+    const prunedOrphans = await openClawClient
+      .pruneOrphanWechatAccounts()
+      .catch((error) => {
+        console.warn(
+          `[wechat/binding] 孤儿通道清理失败（不影响解绑结果）：${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        return [] as string[];
+      });
+
+    return jsonOk({ unbound: true, prunedOrphans });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "解除微信绑定失败。", 502);
   }

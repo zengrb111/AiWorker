@@ -1229,6 +1229,54 @@ export const openClawClient = {
     await bumpWeixinChannelConfig();
   },
 
+  /**
+   * 清理「没有任何活跃绑定引用」的微信通道（解绑后残留的孤儿通道）。
+   *
+   * 为什么需要：历史绑定记录的 wechatOpenId 可能为空，解绑时定位不到具体通道就跳过了清理；
+   * 残留通道会持续对微信服务器做长轮询（其中 token 过期的还会反复重试），把网关的
+   * Node 事件循环拖死 → 心跳超时 → 健康检查失败 → 网关反复重启（2026-10-13 实测故障）。
+   *
+   * 判据：OpenClaw 侧已注册、但不在任何「BOUND 绑定」引用集合里的通道。
+   * 返回被清理掉的 accountId 列表。
+   */
+  async pruneOrphanWechatAccounts(): Promise<string[]> {
+    const accounts = await loadWeixinAccountsModule();
+    const indexed = accounts.listIndexedWeixinAccountIds();
+    if (!indexed.length) return [];
+
+    const { prisma } = await import("./prisma");
+    const bindings = await prisma.wechatBinding.findMany({
+      where: { status: "BOUND" },
+      select: { wechatOpenId: true, wechatNo: true }
+    });
+    const active = new Set<string>();
+    for (const b of bindings) {
+      for (const ref of [b.wechatOpenId, b.wechatNo]) {
+        const value = (ref || "").trim();
+        if (value) active.add(resolveBoundWeixinAccountId(value, accounts));
+      }
+    }
+
+    const orphans = indexed.filter((id) => !active.has(id));
+    for (const id of orphans) {
+      // 先停通道（本来就没在跑时忽略失败），再清本地凭据与索引
+      try {
+        await requestGateway("channels.stop", { channel: "openclaw-weixin", accountId: id });
+      } catch (error) {
+        console.warn(
+          `[openclaw] 停止孤儿微信通道失败（继续清理）：${id} ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+      accounts.clearWeixinAccount(id);
+      accounts.unregisterWeixinAccountId(id);
+    }
+    // 有清理动作才需要让网关重载配置
+    if (orphans.length) await bumpWeixinChannelConfig();
+    return orphans;
+  },
+
   // -------------------------------------------------------------------------
   // 模型管理：查询当前模型 / 可用模型 / 切换 / 添加自定义 provider
   // -------------------------------------------------------------------------
