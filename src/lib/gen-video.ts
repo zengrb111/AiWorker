@@ -30,6 +30,11 @@ const TITLE_SECONDS = 3;
 export type GenerateContentVideoInput = {
   /** 归属用户（决定 OpenClaw 会话路由） */
   userId: string;
+  /**
+   * 指定渲染会话（可选）。后台批量成片应传独立会话，
+   * 避免与用户实时对话抢同一会话而超时；不传则退回默认用户会话。
+   */
+  sessionKey?: string;
   /** 内容标题 */
   title: string;
   /** 内容正文（用作创作要求的主体） */
@@ -190,7 +195,7 @@ export async function generateContentVideo(
 
     report("正在调用 OpenClaw Remotion 技能渲染画面…");
     const result = await openClawClient.sendTaskStream(
-      { message: prompt, prompt, userId: input.userId },
+      { message: prompt, prompt, userId: input.userId, sessionKey: input.sessionKey },
       () => {}
     );
     const rawUrl = extractVideoUrl(result.content, outputUrl);

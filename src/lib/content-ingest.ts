@@ -100,6 +100,19 @@ function isVideoCategory(category: string): boolean {
 }
 
 /**
+ * 短视频渲染走**独立会话**，不占用用户实时对话会话（agent:main:user-<id>）。
+ *
+ * 成因（2026-10-13 排查）：视频渲染任务被派发到用户自己的聊天会话里，与用户在平台的
+ * 实时对话抢同一 agent 会话 —— 会话忙时渲染任务排到队尾，最终撞上 15 分钟超时
+ * （OpenClawTask FAILED「等待 AI 回复超时」），成片虽渲染成功却没能回填 videoUrl，
+ * 于是内容库里的「视频」条目看起来只有图文、没有成片。
+ * 独立会话与聊天会话互不阻塞，后台渲染稳定产出并回填。
+ */
+function videoSessionKey(userId: string): string {
+  return `agent:main:user-${userId}-video`;
+}
+
+/**
  * 确保条目有本地封面图（视频生成的参考图必须是本地文件）。
  * 已有本地封面直接用；否则现场生成一张并落库。
  */
@@ -154,6 +167,7 @@ function generateVideoInBackground(
       }
       const result = await generateContentVideo({
         userId,
+        sessionKey: videoSessionKey(userId),
         title,
         body,
         imagePaths: [coverAbs],
