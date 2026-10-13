@@ -946,10 +946,12 @@ function isGatewayTransientError(err: unknown): boolean {
 export function friendlyGatewayError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (/gateway starting|startup-sidecars/i.test(msg)) {
-    return "AI 网关正在启动中（通常需要 1-3 分钟），请稍后重试。";
+    return "AI 网关正在启动中（通常需要 1-3 分钟），系统已自动等待，请稍后重试。";
   }
   if (/ECONNREFUSED|socket hang up|ECONNRESET/i.test(msg)) {
-    return "AI 网关未运行或连接中断，请确认网关已启动后重试。";
+    // 注意：走到这里说明已按预算自动重试过（默认约 150 秒），网关确实还没就绪，
+    // 而不是「用户没启动网关」，所以不要写成让用户去检查网关。
+    return "AI 网关正在重启或暂时不可用（重启通常需要 1-3 分钟）。系统已自动等待重试仍未就绪，请 1 分钟后再发送一次。";
   }
   return msg;
 }
@@ -983,18 +985,24 @@ async function requestGatewayChat(
 ): Promise<{ runId: string; content: string; raw: unknown }> {
   const effectiveTimeout =
     timeoutMs ?? Number(process.env.OPENCLAW_CHAT_TIMEOUT_MS ?? 120000);
-  // 网关可能正在启动（startup-sidecars）或尚未起来：先按间隔重试连接，再转成中文提示。
+  // 网关可能正在启动（startup-sidecars）或尚未起来。
+  // 实测：网关重启一次约需 100~120 秒才 ready（bootstrap 22s → config.auth 46s →
+  // channels/sidecars 61s，累计 total≈117s），期间端口完全无监听（ECONNREFUSED）。
+  // 因此连接阶段按「总时间预算」重试，覆盖整个重启窗口，而不是固定试几次。
   let conn: Awaited<ReturnType<typeof connectGateway>> | null = null;
-  const connectDelays = [0, 15000, 30000];
+  const connectBudgetMs = Number(process.env.OPENCLAW_CONNECT_BUDGET_MS ?? 150000);
+  const retryIntervalMs = 10000;
+  const connectStart = Date.now();
   let connectErr: unknown;
-  for (const delay of connectDelays) {
-    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+  for (;;) {
     try {
       conn = await connectGateway();
       break;
     } catch (e) {
       connectErr = e;
       if (!isGatewayTransientError(e)) break;
+      if (Date.now() - connectStart + retryIntervalMs >= connectBudgetMs) break;
+      await new Promise((r) => setTimeout(r, retryIntervalMs));
     }
   }
   if (!conn) throw new Error(friendlyGatewayError(connectErr));
