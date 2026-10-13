@@ -41,9 +41,10 @@ export async function burnSubtitles(
     ? "fontfile=C\\:/Windows/Fonts/msyh.ttc"
     : "fontfile=C\\:/Windows/Fonts/arial.ttf";
   // .ass 自带样式（卡拉OK 高亮由文件内 Style 控制），不加 force_style；.srt 才用 force_style。
+  // SRT 样式（B 大字加粗）：80 号加粗 + 4px 黑描边 + 阴影，底部安全区，远看也清晰。
   const filter = /\.ass$/i.test(srtPath)
     ? `subtitles='${escaped}'`
-    : `subtitles='${escaped}':charenc=UTF-8:force_style='${fontfile},PlayResX=1080,PlayResY=1920,FontSize=58,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=330'`;
+    : `subtitles='${escaped}':charenc=UTF-8:force_style='${fontfile},PlayResX=1080,PlayResY=1920,FontSize=80,Bold=1,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=1,Alignment=2,MarginV=380'`;
   onProgress?.("正在烧录字幕...");
   const r = await runTool(FFMPEG, [
     "-y", "-i", inputPath, "-vf", filter,
