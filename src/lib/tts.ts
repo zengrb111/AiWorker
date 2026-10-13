@@ -286,16 +286,8 @@ export async function generateNarration(
   const remotionPublicDir = join(montageRoot, "remotion-composer", "public", "generated");
   if (!existsSync(remotionPublicDir)) mkdirSync(remotionPublicDir, { recursive: true });
 
-  const audioFileName = `narration-${Date.now()}.mp3`;
-  const audioPath = join(remotionPublicDir, audioFileName);
-
-  let result: TTSResult;
-  try {
-    result = await generateTTS(narrationText, audioPath);
-  } catch {
-    // edge-tts 失败（如微软端点 403）→ 降级本地 SAPI，保证仍有配音。
-    result = await synthesizeWithWindowsSapi(narrationText, audioPath.replace(/\.mp3$/i, ".wav"));
-  }
+  const audioFileName = `narration-${Date.now()}`;
+  const result = await synthesizeWithFallback(narrationText, remotionPublicDir, audioFileName);
 
   // Return relative path for Remotion staticFile()
   // staticFile() reads from public/ directory, so we use "generated/<filename>"
@@ -304,8 +296,85 @@ export async function generateNarration(
   return result;
 }
 
+/** 智谱 TTS 配置：默认启用，作为解说首选（音质自然稳定）；可用环境变量覆盖/关闭。 */
+const ZHIPU_TTS_ENABLED = process.env.ZHIPU_TTS_ENABLED !== "0";
+const ZHIPU_TTS_MODEL = process.env.ZHIPU_TTS_MODEL || "cogtts";
+const ZHIPU_TTS_SAMPLE_RATE = Number(process.env.ZHIPU_TTS_SAMPLE_RATE || 24000); // cogtts 返回 24kHz s16le mono
+const ZHIPU_TTS_API = process.env.ZHIPU_TTS_API || "https://open.bigmodel.cn/api/paas/v4/audio/speech";
+
+/** 把智谱返回的裸 PCM（s16le mono）包装成标准 WAV（补 44 字节头），便于 ffmpeg/时长解析。 */
+function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
+  const channels = 1;
+  const bitsPerSample = 16;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16); // PCM fmt chunk size
+  header.writeUInt16LE(1, 20); // audioFormat = PCM
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE((sampleRate * channels * bitsPerSample) / 8, 28); // byteRate
+  header.writeUInt16LE((channels * bitsPerSample) / 8, 32); // blockAlign
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
 /**
- * 「一键生成视频」用：把旁白文本合成为 mp3（默认女声晓晓），输出到指定目录。
+ * 首选通道：智谱 TTS（cogtts）。返回 audio/pcm（24kHz s16le mono），
+ * 这里封装成 WAV 并按句估算字幕（智谱不返回时间戳）。
+ */
+async function generateZhipuTTS(text: string, outputWavPath: string): Promise<TTSResult> {
+  const apiKey = process.env.ZHIPU_API_KEY ?? "";
+  if (!apiKey) throw new Error("ZHIPU_API_KEY 未配置");
+
+  const res = await fetch(ZHIPU_TTS_API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model: ZHIPU_TTS_MODEL, input: text }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`智谱TTS失败 HTTP ${res.status}: ${detail.slice(0, 200)}`);
+  }
+
+  const pcm = Buffer.from(await res.arrayBuffer());
+  if (pcm.length < 100) throw new Error("智谱TTS返回空音频");
+
+  writeFileSync(outputWavPath, pcmToWav(pcm, ZHIPU_TTS_SAMPLE_RATE));
+  const duration = pcm.length / (ZHIPU_TTS_SAMPLE_RATE * 2); // s16le mono => *2 bytes/sample
+  return { audioPath: outputWavPath, audioPublicPath: "", durationSeconds: duration, captions: buildEstimatedCaptions(text, duration) };
+}
+
+/** 依次尝试：智谱TTS → edge-tts → 本地SAPI。任一成功即返回，保证有配音。 */
+async function synthesizeWithFallback(text: string, outDir: string, baseName: string): Promise<TTSResult> {
+  const errors: string[] = [];
+  if (ZHIPU_TTS_ENABLED) {
+    try {
+      return await generateZhipuTTS(text, join(outDir, `${baseName}.wav`));
+    } catch (e) {
+      errors.push(`zhipu:${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  try {
+    return await generateTTS(text, join(outDir, `${baseName}.mp3`));
+  } catch (e) {
+    errors.push(`edge:${e instanceof Error ? e.message : String(e)}`);
+  }
+  try {
+    return await synthesizeWithWindowsSapi(text, join(outDir, `${baseName}.wav`));
+  } catch (e) {
+    errors.push(`sapi:${e instanceof Error ? e.message : String(e)}`);
+  }
+  throw new Error(`所有TTS通道均失败：${errors.join(" | ")}`);
+}
+
+/**
+ * 「一键生成视频」用：把旁白文本合成为音频（默认女声晓晓），输出到指定目录。
  * 返回绝对路径、时长与句级时间戳（captions 可直接生成字幕）。
  * 调用方负责容错：失败应降级为「无配音」版本，不阻断出片。
  */
@@ -315,11 +384,5 @@ export async function synthesizeNarration(
   voice: string = DEFAULT_VOICE
 ): Promise<TTSResult> {
   if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
-  const audioPath = join(outDir, `narration-${Date.now()}.mp3`);
-  try {
-    return await generateTTS(text, audioPath, voice);
-  } catch {
-    // edge-tts 失败（如微软端点 403）→ 降级本地 SAPI（微软惠惠 zh-CN），保证视频仍有配音。
-    return await synthesizeWithWindowsSapi(text, audioPath.replace(/\.mp3$/i, ".wav"));
-  }
+  return synthesizeWithFallback(text, outDir, `narration-${Date.now()}`);
 }
