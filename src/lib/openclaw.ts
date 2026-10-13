@@ -1280,15 +1280,16 @@ export const openClawClient = {
     const message = request.prompt ?? request.message;
 
     // 按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
-    const result = await requestGatewayChat(
-      message,
-      undefined,
-      undefined,
-      deriveUserSessionKey(request.userId)
-    );
+    const sessionKey = deriveUserSessionKey(request.userId);
+    // agent 冷启动/偶发空返回时自动重试一次，避免整轮对话白跑。
+    let result = await requestGatewayChat(message, undefined, undefined, sessionKey);
+    if (!result.content?.trim()) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      result = await requestGatewayChat(message, undefined, undefined, sessionKey);
+    }
 
-    if (!result.content) {
-      throw new Error("OpenClaw 未返回任务内容。");
+    if (!result.content?.trim()) {
+      throw new Error("OpenClaw 未返回任务内容（已自动重试一次），请稍后重试。");
     }
 
     return {
@@ -1307,15 +1308,16 @@ export const openClawClient = {
     const message = request.prompt ?? request.message;
 
     // 按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
-    const result = await requestGatewayChat(
-      message,
-      timeoutMs,
-      onDelta,
-      deriveUserSessionKey(request.userId)
-    );
+    const sessionKey = deriveUserSessionKey(request.userId);
+    // 同上：空返回（冷启动/偶发）自动重试一次。
+    let result = await requestGatewayChat(message, timeoutMs, onDelta, sessionKey);
+    if (!result.content?.trim()) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      result = await requestGatewayChat(message, timeoutMs, onDelta, sessionKey);
+    }
 
-    if (!result.content) {
-      throw new Error("OpenClaw 未返回任务内容。");
+    if (!result.content?.trim()) {
+      throw new Error("OpenClaw 未返回任务内容（已自动重试一次），请稍后重试。");
     }
 
     return {
