@@ -159,24 +159,33 @@ export function buildKaraokeAss(
     "ScriptType: v4.00+",
     "PlayResX: 1080",
     "PlayResY: 1920",
-    "WrapStyle: 2",
+    // 0=智能换行（允许自动折行），避免长句被截断到画面外。
+    "WrapStyle: 0",
     "ScaledBorderAndShadow: yes",
     "YCbCr Matrix: TV.709",
     "",
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     // Primary=已读高亮(亮黄)，Secondary=未读(暗灰)，黑描边；底部居中，竖版安全区。
-    "Style: Karaoke,Microsoft YaHei,60,&H0000FFFF,&H00999999,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,300,1",
+    "Style: Karaoke,Microsoft YaHei,56,&H0000FFFF,&H00999999,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,300,1",
     "",
     "[Events]",
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
   ].join("\n");
 
+  // 1080 宽、字号 56 时单行约 14 字不溢出，超出则折行（\N）。
+  const MAX_CHARS_PER_LINE = 14;
   const dialogues = lines.map((c) => {
     const text = (c.word || "").replace(/\s+/g, "");
     const per = Math.max(0, c.endMs - c.startMs) / Math.max(1, text.length);
-    const karaoked = Array.from(text)
-      .map((ch) => `{\\k${Math.max(1, Math.round(per / 10))}}${ch}`)
+    const chars = Array.from(text);
+    // 逐字 \k 高亮；每行满 MAX_CHARS_PER_LINE 字插入 \N 折行，防止超出画面。
+    const karaoked = chars
+      .map((ch, i) => {
+        const token = `{\\k${Math.max(1, Math.round(per / 10))}}${ch}`;
+        const shouldWrap = (i + 1) % MAX_CHARS_PER_LINE === 0 && i < chars.length - 1;
+        return shouldWrap ? `${token}\\N` : token;
+      })
       .join("");
     return `Dialogue: 0,${assTime(c.startMs)},${assTime(c.endMs)},Karaoke,,0,0,0,,${karaoked}`;
   });
