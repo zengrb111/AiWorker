@@ -37,7 +37,7 @@ export async function POST(req: Request) {
   const contentKey = String(body?.contentKey || "").trim();
   const title = String(body?.title || "").trim();
   const views = Number(body?.views || 0);
-  if (!["xhs", "toutiao", "site"].includes(platform) || !contentKey || !title) {
+  if (!["xhs", "toutiao", "site", "wechat", "channels"].includes(platform) || !contentKey || !title) {
     return NextResponse.json({ ok: false, message: "缺少 platform / contentKey / title" }, { status: 400 });
   }
   let aiBreakdown: string;

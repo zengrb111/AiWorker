@@ -2,6 +2,7 @@ import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { publishContentToHgwx, HGWX_CHANNEL } from "@/lib/hgwx-publish";
 import { publishContentToHealing, HEALING_CHANNEL } from "@/lib/healing-publish";
+import { publishContentToFrontier, FRONTIER_CHANNEL } from "@/lib/frontier-publish";
 import {
   PUBLISH_CHANNEL_LABEL,
   loadUserPlatformAuth,
@@ -44,12 +45,13 @@ type PublishItem = {
   category?: string;
 };
 
-const KNOWN_CHANNELS = new Set<string>(["hgwx", HGWX_CHANNEL, "healing", HEALING_CHANNEL, "xinling"]);
+const KNOWN_CHANNELS = new Set<string>(["hgwx", HGWX_CHANNEL, "healing", HEALING_CHANNEL, "xinling", "aiworker", FRONTIER_CHANNEL]);
 
 function normalizeChannel(input: string): PublishChannelKey | null {
   const channel = input.trim();
   if (channel === "hgwx" || channel === HGWX_CHANNEL) return "hgwx";
   if (channel === "healing" || channel === HEALING_CHANNEL || channel === "xinling") return "healing";
+  if (channel === "aiworker" || channel === FRONTIER_CHANNEL) return "aiworker";
   return null;
 }
 
@@ -173,6 +175,17 @@ export async function POST(request: Request) {
         if (channel === "healing") {
           const result = await publishContentToHealing(target.contentId, target.userId, target.phone || "", {
             category: target.category
+          });
+          results.push({
+            ok: true,
+            channel,
+            channelLabel: PUBLISH_CHANNEL_LABEL[channel],
+            phone: target.phone,
+            ...result
+          });
+        } else if (channel === "aiworker") {
+          const result = await publishContentToFrontier(target.contentId, target.userId, target.phone || "", {
+            tag: target.category
           });
           results.push({
             ok: true,

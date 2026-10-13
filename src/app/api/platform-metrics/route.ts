@@ -11,10 +11,13 @@ export const dynamic = "force-dynamic";
  * - 小红书：笔记网页版 explore/{id}（标准链接）
  * - 头条号：toutiao.com/a{id}（文章/图文标准链接）
  * - 官网：需域名，{domain}/recommend/{id}（好物推荐条目页；格式待与官网对齐确认）
+ * - 公众号：mp.weixin.qq.com/s/{sn}（公开文章短链）
+ * - 视频号：无公开 Web 链接，返回 null
  */
 function originalContentUrl(platform: string, contentKey: string, siteDomain?: string | null): string | null {
   if (platform === "xhs") return `https://www.xiaohongshu.com/explore/${contentKey}`;
   if (platform === "toutiao") return `https://www.toutiao.com/a${contentKey}`;
+  if (platform === "wechat") return `https://mp.weixin.qq.com/s/${contentKey}`;
   if (platform === "site" && siteDomain) return `${siteDomain.replace(/\/+$/, "")}/recommend/${contentKey}`;
   return null;
 }
@@ -36,17 +39,23 @@ export async function GET(req: Request) {
     orderBy: { updatedAt: "desc" },
     take: 20000,
   });
-  // 官网内容原文链接需要域名（从授权凭据取）；小红书/头条号用各自标准作品页。
+  // 官网内容原文链接需要域名（从授权凭据取）；小红书/头条号/公众号用各自标准作品页。
   const siteCred = await loadSiteCredential(user.id).catch(() => null);
   const siteDomain = siteCred?.credential?.domain ?? null;
   // ⚠️ 要取「最近 N 天」必须 desc + take 再翻回升序：
   // 直接 asc + take 拿到的是最旧的 N 天，天数一超上限「官网今日 PV/UV」就会停在旧日期上。
   const siteRecent = await prisma.platformSiteMetric.findMany({
-    where: { userId: user.id },
+    where: { userId: user.id, platform: "site" },
     orderBy: { metricDate: "desc" },
     take: days,
   });
   const siteMetrics = siteRecent.reverse();
+  // 公众号 / 视频号的账号级日指标（涨粉）：单独取，前端「微信生态数据」区块用。
+  const dailyRecent = await prisma.platformSiteMetric.findMany({
+    where: { userId: user.id, platform: { in: ["wechat", "channels"] } },
+    orderBy: { metricDate: "desc" },
+    take: days * 2,
+  });
   const accounts = await prisma.platformAccount.findMany({
     where: { userId: user.id },
     select: { id: true, platform: true, displayName: true, status: true, lastSyncAt: true },
@@ -65,7 +74,7 @@ export async function GET(req: Request) {
   }
   const perPlatform: Record<
     string,
-    { platform: string; name: string; contents: number; views: number; impressions: number; clicks: number; likes: number; comments: number; collects: number; shares: number }
+    { platform: string; name: string; contents: number; views: number; impressions: number; clicks: number; likes: number; comments: number; collects: number; shares: number; readers: number; wows: number }
   > = {};
   for (const m of latestByContent.values()) {
     const p = (perPlatform[m.platform] = perPlatform[m.platform] || {
@@ -79,6 +88,8 @@ export async function GET(req: Request) {
       comments: 0,
       collects: 0,
       shares: 0,
+      readers: 0,
+      wows: 0,
     });
     p.contents += 1;
     p.views += m.views;
@@ -88,6 +99,8 @@ export async function GET(req: Request) {
     p.comments += m.comments;
     p.collects += m.collects;
     p.shares += m.shares;
+    p.readers += m.readers;
+    p.wows += m.wows;
   }
 
   // 官网站点 PV/UV 天序列
@@ -110,6 +123,8 @@ export async function GET(req: Request) {
       comments: m.comments,
       collects: m.collects,
       shares: m.shares,
+      readers: m.readers,
+      wows: m.wows,
       hasSource: withSource.has(`${m.platform}:${m.contentKey}`),
       url: originalContentUrl(m.platform, m.contentKey, siteDomain),
     }));
@@ -119,6 +134,20 @@ export async function GET(req: Request) {
     perPlatform: Object.values(perPlatform),
     siteDays,
     items,
+    dailyMetrics: dailyRecent
+      .slice()
+      .reverse()
+      .map((d) => ({
+        platform: d.platform,
+        metricDate: d.metricDate,
+        pv: d.pv,
+        uv: d.uv,
+        fans: d.fans,
+        reads: d.reads,
+        shares: d.shares,
+        likes: d.likes,
+        wows: d.wows,
+      })),
     accounts,
     syncedAt: metrics[0]?.updatedAt ?? null,
   });

@@ -1,21 +1,23 @@
 /**
- * Image generation utility.
+ * Image generation utility —— 全免费方案（不再依赖任何收费生图接口）。
  *
- * Primary: Zhipu CogView-4 (https://open.bigmodel.cn) — the generated image is
- * downloaded and stored locally under public/uploads/covers/, so the DB only
- * ever keeps a stable local path (no dependency on expiring remote URLs).
+ * 封面（主图）两步走，保证「图上的文字永远正确」：
+ *   1. 背景：pollinations.ai 免费生图（无需任何 Key），简约风格、纯图像不含文字；
+ *      生成失败时退化为程序绘制的极简渐变背景（完全离线，必定成功）。
+ *   2. 文字：用 @napi-rs/canvas + 随仓库内置的中文字体（assets/fonts/simhei.ttf）
+ *      把正确的标题绘制到图上。AI 模型只画背景不画字，文字由程序渲染，
+ *      因此不存在 AI 画错字的问题。
  *
- * Fallback: pollinations.ai free URL API (kept for resilience when the Zhipu
- * call fails — returns a remote URL that is generated on demand).
+ * 输出一律是本地 PNG（/uploads/covers/*.png），hgwx / healing 发布链路
+ * 「封面必须本地图」的约束不受影响。
+ *
+ * 内联配图（非主图）：pollinations 直接出图（无文字叠加），失败退化为程序化极简背景。
  */
 
 import { randomUUID } from "node:crypto";
 import { mkdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-
-const ZHIPU_API_KEY = process.env.ZHIPU_API_KEY ?? "";
-const ZHIPU_IMAGE_MODEL = process.env.ZHIPU_IMAGE_MODEL ?? "cogview-4-250304";
-const ZHIPU_IMAGE_API = "https://open.bigmodel.cn/api/paas/v4/images/generations";
+import { createCanvas, GlobalFonts, loadImage, type SKRSContext2D } from "@napi-rs/canvas";
 
 /** Local storage directory for generated covers / inline images. */
 export const LOCAL_IMAGES_DIR = path.join(process.cwd(), "public", "uploads", "covers");
@@ -44,7 +46,7 @@ function isReasoningNoise(line: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// 平台调性：小红书封面要「爆款笔记」的钩子感，公众号封面要「专业文章」的质感
+// 平台与尺寸
 // ---------------------------------------------------------------------------
 
 export type CoverPlatform = "xhs" | "wechat";
@@ -62,113 +64,13 @@ export function coverSizeOf(platform: CoverPlatform): { width: number; height: n
   return platform === "xhs" ? { width: 1152, height: 1536 } : { width: 1280, height: 800 };
 }
 
-type PlatformVisual = {
-  /** 构图语言 */
-  layout: string;
-  /** 配色倾向 */
-  palette: string;
-  /** 氛围与设计手法 */
-  mood: string;
-  /** 明确要规避的方向 */
-  avoid: string;
-};
+// ---------------------------------------------------------------------------
+// pollinations.ai 免费生图（无需 API Key）
+// ---------------------------------------------------------------------------
 
-const PLATFORM_VISUAL: Record<CoverPlatform, PlatformVisual> = {
-  xhs: {
-    layout:
-      "竖版满幅构图，视觉主体超大特写并居中，画面上方或下方保留大面积干净的净空区域（纯色或虚化背景）",
-    palette:
-      "高饱和撞色（如玫红×明黄、克莱因蓝×橙、荧光绿×黑），明快通透、亮度高、对比强烈",
-    mood:
-      "爆款笔记主视觉的钩子感：夸张、有戏剧性、情绪外放，一眼就想点开；可加入几何色块、撞色描边、贴纸式元素强化设计感",
-    avoid: "避免暗沉色调、性冷淡风、商务感、灰蒙蒙的滤镜，以及平淡无奇的中景构图"
-  },
-  wechat: {
-    layout:
-      "横版构图，主体明确、或居中或偏置，四周讲究留白与呼吸感，画面一侧保留干净的净空区域",
-    palette:
-      "高级质感配色（深蓝×金、墨绿×米白、暗红×暖灰），层次丰富、明暗对比讲究、色彩克制",
-    mood:
-      "专业级的视觉隐喻：克制但有张力，像高端商业品牌的视觉大片，有观点感和权威感",
-    avoid: "避免廉价素材感、花哨堆砌、过度卡通化、元素杂乱无主次"
-  }
-};
-
-
-/**
- * 从正文里提炼 2~3 个核心观点，供标题图 prompt 使用。
- * 优先取小标题 / 加粗短语（作者提炼过、信息密度高），不够再退回正文关键句。
- */
-function extractKeyPoints(body: string, maxPoints = 3): string[] {
-  const lines = body.split("\n").map((l) => l.trim()).filter(Boolean);
-  const points: string[] = [];
-
-  const pushPoint = (raw: string) => {
-    if (points.length >= maxPoints) return;
-    const clean = sanitizePrompt(raw)
-      .replace(/^[\d一二三四五六七八九十]+[.、．)）]\s*/, "")
-      .replace(/[：:。，,；;！!]$/, "")
-      .trim();
-    if (clean.length >= 6 && clean.length <= 48 && !points.includes(clean)) {
-      points.push(clean);
-    }
-  };
-
-  // 1) 小标题 / 加粗小标题
-  for (const line of lines) {
-    if (points.length >= maxPoints) break;
-    const heading = line.match(/^#{2,4}\s+(.+)$/);
-    if (heading) {
-      pushPoint(heading[1]);
-      continue;
-    }
-    const bold = line.match(/^\*\*(.+?)\*\*/);
-    if (bold) pushPoint(bold[1]);
-  }
-
-  // 2) 兜底：正文每行的首个句子
-  if (points.length < maxPoints) {
-    for (const line of lines) {
-      if (points.length >= maxPoints) break;
-      if (line.startsWith("#") || isReasoningNoise(line)) continue;
-      pushPoint(line.split(/[。！？!?]/)[0]);
-    }
-  }
-
-  return points.slice(0, maxPoints);
-}
-
-/**
- * 标题图（封面）prompt，按平台调性区分。
- *
- * 三个要点：
- * 1. 不能只用标题 —— 必须把文章**核心观点**一起给模型，否则画面与内容脱节；
- * 2. 构图 / 配色 / 氛围要按平台给足指令，否则小红书和公众号会长得一模一样；
- * 3. 智谱 CogView-4 是中文模型，中文 prompt 的语义对齐明显好于英文。
- */
-function buildCoverPrompt(title: string, body: string, platform: CoverPlatform): string {
-  const keyPoints = extractKeyPoints(body);
-  const headline = sanitizePrompt(title).slice(0, 60) || keyPoints[0] || "AI 数字员工";
-  const style = PLATFORM_VISUAL[platform];
-  // 用「主视觉图」而不是「封面/海报」：后两者会触发模型的排版模式，
-  // 让它自作主张画标题文字，而 AI 生成的中文字基本必有错字。
-  const label = platform === "xhs" ? "小红书竖版主视觉图" : "微信公众号横版主视觉图";
-
-  return [
-    `为下面这篇文章生成一张高冲击力的${label}。`,
-    "画面必须是纯图像，绝对不能出现任何文字、字母、数字、标语、字幕或水印（如需体现标题感，只用抽象的色块或线条暗示）。",
-    `文章标题：${headline}。`,
-    keyPoints.length ? `文章核心观点：${keyPoints.join("；")}。` : "",
-    "画面内容：把标题与核心观点转译成一个强有力的视觉主体，第一眼就抓住注意力。",
-    `构图：${style.layout}。`,
-    `配色：${style.palette}。`,
-    `氛围与手法：${style.mood}。`,
-    `${style.avoid}。`,
-    "整体要求：商业大片级质感、电影级光影、层次分明、主体清晰锐利。",
-    "再次强调：画面中不得出现任何可识别的字符。"
-  ]
-    .filter(Boolean)
-    .join("");
+function buildPollinationsUrl(prompt: string, width: number, height: number, seed: number): string {
+  const encoded = encodeURIComponent(prompt);
+  return `https://image.pollinations.ai/prompt/${encoded}?width=${width}&height=${height}&seed=${seed}&nologo=true&model=flux`;
 }
 
 function buildPromptFromContent(title: string, body: string): string {
@@ -185,16 +87,30 @@ function buildPromptFromContent(title: string, body: string): string {
   return `${base}, digital art, professional illustration, high quality, vibrant colors`;
 }
 
-function buildPollinationsUrl(prompt: string, width: number, height: number, seed: number): string {
-  const encoded = encodeURIComponent(prompt);
-  return `https://image.pollinations.ai/prompt/${encoded}?width=${width}&height=${height}&seed=${seed}&nologo=true&model=flux`;
+/**
+ * 封面背景 prompt：只要「简约风的纯图像」，严禁出现任何文字
+ * （文字由程序绘制，模型画字必有错字）。
+ */
+function buildMinimalistCoverPrompt(title: string, body: string): string {
+  const subject = sanitizePrompt(title).slice(0, 40) || "AI digital worker";
+  const keyLine = body
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l && !l.startsWith("#") && !isReasoningNoise(l));
+  const hint = keyLine ? sanitizePrompt(keyLine).slice(0, 40) : "";
+  return [
+    `minimalist flat illustration, subject: ${subject}${hint ? `, ${hint}` : ""}`,
+    "clean simple composition, soft pastel colors, large negative space",
+    "subtle geometric shapes, gentle gradient background",
+    "absolutely no text, no letters, no words, no numbers, no watermark, no logo"
+  ].join(", ");
 }
 
 export type GeneratedImages = {
   coverImageUrl: string;
 };
 
-/** Legacy sync helper — pollinations URL only (used as fallback). */
+/** Legacy sync helper — pollinations URL only (used as remote placeholder). */
 export function generateImageUrls(
   title: string,
   body: string,
@@ -209,7 +125,7 @@ export function generateImageUrls(
   return { coverImageUrl };
 }
 
-/** Legacy sync helper — pollinations URL only (used as fallback). */
+/** Legacy sync helper — pollinations URL only. */
 export function regenerateImage(prompt: string, width: number, height: number): string {
   const cleanPrompt = sanitizePrompt(prompt).slice(0, 120);
   const seed = Math.floor(Math.random() * 1000000);
@@ -224,8 +140,8 @@ export function extractImagePrompt(
   platform: CoverPlatform = "wechat"
 ): string {
   if (imageIndex === 0) {
-    // 封面图和首次生成保持一致：同样带核心观点与平台调性要求。
-    return buildCoverPrompt(title, body, platform);
+    // 封面背景与首次生成保持一致：简约、纯图像、无文字。
+    return buildMinimalistCoverPrompt(title, body);
   }
   const paragraphs = body.split("\n").filter((l) => l.trim() && !l.startsWith("#") && !isReasoningNoise(l));
   const paraIdx = Math.min(imageIndex, paragraphs.length - 1);
@@ -234,60 +150,244 @@ export function extractImagePrompt(
 }
 
 // ---------------------------------------------------------------------------
-// Zhipu CogView-4 — primary generator (image downloaded and stored locally)
+// 免费下载：pollinations 背景（简约、无文字）
 // ---------------------------------------------------------------------------
 
-/** CogView size constraint: width/height in [512, 2048] and multiples of 16. */
-function normalizeSize(width: number, height: number): { w: number; h: number } {
-  const clamp16 = (n: number) => Math.min(2048, Math.max(512, Math.round(n / 16) * 16));
-  return { w: clamp16(width), h: clamp16(height) };
+async function fetchPollinationsImage(prompt: string, width: number, height: number, timeoutMs = 45_000): Promise<Buffer | null> {
+  try {
+    const seed = Math.floor(Math.random() * 1000000);
+    const url = buildPollinationsUrl(prompt, width, height, seed);
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    // 太小的响应基本是错误页/占位图，当作失败处理。
+    if (buf.length < 2000) return null;
+    return buf;
+  } catch (error) {
+    console.error("[image-gen] pollinations 出图失败：", error instanceof Error ? error.message : error);
+    return null;
+  }
 }
 
-/** Call Zhipu CogView and download the resulting image as a Buffer. */
-async function zhipuGenerateImage(prompt: string, width: number, height: number): Promise<Buffer> {
-  if (!ZHIPU_API_KEY) {
-    throw new Error("ZHIPU_API_KEY 未配置。");
-  }
-  const { w, h } = normalizeSize(width, height);
+// ---------------------------------------------------------------------------
+// 内置中文字体 + canvas 绘制（文字由程序渲染，永远正确）
+// ---------------------------------------------------------------------------
 
-  const res = await fetch(ZHIPU_IMAGE_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${ZHIPU_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: ZHIPU_IMAGE_MODEL,
-      prompt: prompt.slice(0, 1000),
-      size: `${w}x${h}`,
-      // 智谱 CogView 默认在图片右下角加「AI生成」水印，生成内容图必须关掉。
-      watermark_enabled: false,
-    }),
-    signal: AbortSignal.timeout(120_000),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`智谱生图失败 ${res.status}：${text.slice(0, 200)}`);
-  }
-  const json = (await res.json()) as { data?: Array<{ url?: string }> };
-  const url = json.data?.[0]?.url;
-  if (!url) {
-    throw new Error("智谱生图未返回图片链接。");
-  }
+const COVER_FONT_FAMILY = "AiWorkerCover";
 
-  // The returned URL is temporary (30 days) — download and store locally.
-  const imgRes = await fetch(url, { signal: AbortSignal.timeout(60_000) });
-  if (!imgRes.ok) {
-    throw new Error(`下载智谱生成图片失败 ${imgRes.status}。`);
+/** 依次尝试：仓库内置字体 → 本机常见中文字体。注册成功后全局复用。 */
+const COVER_FONT_CANDIDATES = [
+  path.join(process.cwd(), "assets", "fonts", "simhei.ttf"),
+  "C:\\Windows\\Fonts\\simhei.ttf",
+  "C:\\Windows\\Fonts\\msyh.ttc",
+  "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+];
+
+let coverFontReady = false;
+function ensureCoverFont(): boolean {
+  if (coverFontReady) return true;
+  for (const candidate of COVER_FONT_CANDIDATES) {
+    try {
+      if (GlobalFonts.registerFromPath(candidate, COVER_FONT_FAMILY)) {
+        coverFontReady = true;
+        return true;
+      }
+    } catch {
+      // 换下一个候选
+    }
   }
-  return Buffer.from(await imgRes.arrayBuffer());
+  console.error("[image-gen] 封面中文字体注册失败，标题可能显示为方块。请确认 assets/fonts/simhei.ttf 存在。");
+  return false;
 }
+
+/** 极简配色（按标题哈希挑选，同一篇稳定、不同篇有变化）。 */
+const COVER_PALETTES: Array<{ bg: [string, string]; accent: string }> = [
+  { bg: ["#eef4ff", "#dfe9ff"], accent: "#3b82f6" }, // 蓝
+  { bg: ["#fdf2f8", "#fce7f3"], accent: "#ec4899" }, // 粉
+  { bg: ["#ecfdf5", "#d1fae5"], accent: "#10b981" }, // 绿
+  { bg: ["#fff7ed", "#ffedd5"], accent: "#f97316" }, // 橙
+  { bg: ["#f5f3ff", "#ede9fe"], accent: "#8b5cf6" }, // 紫
+  { bg: ["#f1f5f9", "#e2e8f0"], accent: "#334155" }  // 灰
+];
+
+function paletteOf(seed: string): { bg: [string, string]; accent: string } {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
+  return COVER_PALETTES[hash % COVER_PALETTES.length];
+}
+
+/** 极简背景：柔和渐变 + 大圆/圆环/圆点，留白充足，不含任何文字。 */
+function drawMinimalistBackground(
+  ctx: SKRSContext2D,
+  width: number,
+  height: number,
+  palette: { bg: [string, string]; accent: string }
+): void {
+  const grad = ctx.createLinearGradient(0, 0, width * 0.4, height);
+  grad.addColorStop(0, palette.bg[0]);
+  grad.addColorStop(1, palette.bg[1]);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, width, height);
+
+  const unit = Math.min(width, height);
+  // 右上大圆（半透明）
+  ctx.globalAlpha = 0.14;
+  ctx.fillStyle = palette.accent;
+  ctx.beginPath();
+  ctx.arc(width * 0.86, height * 0.16, unit * 0.42, 0, Math.PI * 2);
+  ctx.fill();
+  // 左下圆环
+  ctx.globalAlpha = 0.18;
+  ctx.lineWidth = Math.max(3, Math.round(unit * 0.006));
+  ctx.strokeStyle = palette.accent;
+  ctx.beginPath();
+  ctx.arc(width * 0.12, height * 0.82, unit * 0.18, 0, Math.PI * 2);
+  ctx.stroke();
+  // 小圆点点缀
+  ctx.globalAlpha = 0.22;
+  ctx.beginPath();
+  ctx.arc(width * 0.78, height * 0.7, unit * 0.035, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function roundRectPath(ctx: SKRSContext2D, x: number, y: number, w: number, h: number, r: number): void {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
+/** 中文标题按像素宽度折行（逐字测量），超出 maxLines 末行加省略号。 */
+function layoutTitle(ctx: SKRSContext2D, title: string, maxWidth: number, maxLines: number): string[] {
+  const clean = title.replace(/\s+/g, " ").trim() || "未命名内容";
+  const lines: string[] = [];
+  let current = "";
+  let truncated = false;
+  for (const ch of clean) {
+    const candidate = current + ch;
+    if (current && ctx.measureText(candidate).width > maxWidth) {
+      lines.push(current);
+      current = ch;
+      if (lines.length === maxLines) {
+        truncated = true;
+        break;
+      }
+    } else {
+      current = candidate;
+    }
+  }
+  if (!truncated && current) lines.push(current);
+  if (truncated && lines.length > 0) {
+    let last = lines[lines.length - 1];
+    while (last.length > 0 && ctx.measureText(`${last}…`).width > maxWidth) {
+      last = last.slice(0, -1);
+    }
+    lines[lines.length - 1] = `${last}…`;
+  }
+  return lines.slice(0, maxLines);
+}
+
+type CoverRenderOptions = {
+  title: string;
+  /** 免费生成的背景图（可空 → 程序化极简背景） */
+  background: Buffer | null;
+  width: number;
+  height: number;
+  seed: string;
+};
+
+/** 渲染一张「简约背景 + 正确标题文字」的封面，返回 PNG Buffer。 */
+async function renderCoverBuffer(opts: CoverRenderOptions): Promise<Buffer> {
+  const { title, background, width, height, seed } = opts;
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext("2d");
+  const palette = paletteOf(seed || title);
+
+  let usedFetched = false;
+  if (background) {
+    try {
+      const img = await loadImage(background);
+      ctx.drawImage(img, 0, 0, width, height);
+      usedFetched = true;
+    } catch (error) {
+      console.error("[image-gen] 背景图解码失败，改用程序化背景：", error instanceof Error ? error.message : error);
+    }
+  }
+  if (!usedFetched) {
+    drawMinimalistBackground(ctx, width, height, palette);
+  } else {
+    // 底部白纱渐变，保证深色标题在任何背景图上都可读。
+    const scrim = ctx.createLinearGradient(0, height * 0.35, 0, height);
+    scrim.addColorStop(0, "rgba(255,255,255,0)");
+    scrim.addColorStop(1, "rgba(255,255,255,0.92)");
+    ctx.fillStyle = scrim;
+    ctx.fillRect(0, Math.round(height * 0.35), width, Math.round(height * 0.65));
+    // pollinations 免费接口会在右下角打一个小水印（nologo 参数不总生效），
+    // 用与底部白纱同色的圆角块轻轻盖住，视觉上融进背景、不露痕迹。
+    const stampW = Math.round(width * 0.16);
+    const stampH = Math.max(18, Math.round(height * 0.038));
+    const stampX = width - stampW - Math.round(width * 0.02);
+    const stampY = height - stampH - Math.round(height * 0.015);
+    ctx.fillStyle = "rgba(255,255,255,0.96)";
+    roundRectPath(ctx, stampX, stampY, stampW, stampH, Math.round(stampH / 2));
+    ctx.fill();
+  }
+
+  const portrait = height > width;
+  const padding = Math.round(width * (portrait ? 0.075 : 0.065));
+  const fontSize = Math.round(width * (portrait ? 0.066 : 0.052));
+  const maxLines = portrait ? 4 : 3;
+  const maxWidth = width - padding * 2;
+
+  ensureCoverFont();
+  ctx.font = `bold ${fontSize}px "${COVER_FONT_FAMILY}", sans-serif`;
+  ctx.textBaseline = "alphabetic";
+
+  const lines = layoutTitle(ctx, title, maxWidth, maxLines);
+  const lineHeight = Math.round(fontSize * 1.42);
+  const blockHeight = lines.length * lineHeight;
+
+  // 标题上方的强调色条
+  const barWidth = Math.round(fontSize * 1.7);
+  const barHeight = Math.max(6, Math.round(fontSize * 0.13));
+  const barY = height - padding - blockHeight - Math.round(fontSize * 0.55) - barHeight;
+  ctx.fillStyle = palette.accent;
+  roundRectPath(ctx, padding, barY, barWidth, barHeight, barHeight / 2);
+  ctx.fill();
+
+  // 标题（逐行绘制）
+  ctx.fillStyle = "#1f2937";
+  let baseline = barY + barHeight + Math.round(fontSize * 0.55) + fontSize;
+  for (const line of lines) {
+    ctx.fillText(line, padding, baseline);
+    baseline += lineHeight;
+  }
+
+  return canvas.toBuffer("image/png");
+}
+
+/** 程序化极简配图（无文字），作为 pollinations 失败时的兜底。 */
+async function renderMinimalistImageBuffer(width: number, height: number, seed: string): Promise<Buffer> {
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext("2d");
+  drawMinimalistBackground(ctx, width, height, paletteOf(seed));
+  return canvas.toBuffer("image/png");
+}
+
+// ---------------------------------------------------------------------------
+// 本地存储
+// ---------------------------------------------------------------------------
 
 /** Save an image buffer into public/uploads/covers/ and return the web path. */
 async function saveLocalImage(buf: Buffer): Promise<string> {
   await mkdir(LOCAL_IMAGES_DIR, { recursive: true });
-  // Zhipu may return JPEG even when a .png was expected — sniff the magic
-  // number so the file extension matches the actual encoding.
+  // Sniff the magic number so the file extension matches the actual encoding.
   const isPng = buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
   const filename = `${randomUUID()}.${isPng ? "png" : "jpg"}`;
   await writeFile(path.join(LOCAL_IMAGES_DIR, filename), buf);
@@ -303,58 +403,28 @@ export function deleteLocalImage(url: string | null | undefined): void {
   void unlink(path.join(LOCAL_IMAGES_DIR, filename)).catch(() => {});
 }
 
-/** Generate the cover image via Zhipu and store it locally. */
+// ---------------------------------------------------------------------------
+// 对外入口
+// ---------------------------------------------------------------------------
+
+/**
+ * 生成封面（主图）：免费背景 + 程序绘制的正确标题，输出本地 PNG。
+ * pollinations 失败时自动退化为程序化极简背景，几乎不会失败。
+ */
 export async function generateCoverImage(
   title: string,
   body: string,
   platform: CoverPlatform = "wechat"
 ): Promise<string> {
-  // 用带「核心观点 + 平台调性」的完整 prompt，而不是只喂标题。
-  const prompt = buildCoverPrompt(title, body, platform);
   const { width, height } = coverSizeOf(platform);
-  const buf = await zhipuGenerateImage(prompt, width, height);
-  return saveLocalImage(buf);
-}
-
-/** Regenerate an image via Zhipu with an explicit prompt, stored locally. */
-export async function regenerateImageLocal(prompt: string, width: number, height: number): Promise<string> {
-  const cleaned = sanitizePrompt(prompt).slice(0, 1000);
-  // 封面图给的是完整中文画面描述，此时不要再拼英文风格词
-  // （CogView-4 是中文模型，混入英文反而削弱语义对齐）。
-  const isChineseDirection = /画面要求|画面中不要出现|构图|视觉主体/.test(cleaned);
-  const finalPrompt = isChineseDirection
-    ? cleaned
-    : `${cleaned}, digital art, professional illustration, high quality, vibrant colors`;
-  const buf = await zhipuGenerateImage(finalPrompt, width, height);
+  const background = await fetchPollinationsImage(buildMinimalistCoverPrompt(title, body), width, height);
+  const buf = await renderCoverBuffer({ title, background, width, height, seed: title });
   return saveLocalImage(buf);
 }
 
 /**
- * Race a promise against a hard timeout. On timeout the original promise keeps
- * running in the background (useful for late-success cover upgrades), but the
- * caller gets `null` immediately — content saving must never block on image
- * generation.
- */
-function withHardTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  return new Promise<T | null>((resolve) => {
-    const timer = setTimeout(() => resolve(null), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      () => {
-        clearTimeout(timer);
-        resolve(null);
-      }
-    );
-  });
-}
-
-/**
- * Zhipu-first with pollinations fallback. The caller is expected to use this
- * in a fire-and-forget manner (save content first, upgrade cover later) so an
- * image outage can never block content saving.
+ * 同 generateCoverImage，但任何意外都不抛出：
+ * 最后兜底是「程序化极简背景 + 正确标题」，保证内容保存/发布永不被生图阻塞。
  */
 export async function generateCoverImageWithFallback(
   title: string,
@@ -364,18 +434,23 @@ export async function generateCoverImageWithFallback(
   try {
     return await generateCoverImage(title, body, platform);
   } catch (error) {
-    console.error("[image-gen] 智谱生图失败，回退 pollinations：", error);
-    return generateImageUrls(title, body, 0, platform).coverImageUrl;
+    console.error("[image-gen] 免费封面生成失败，退化为程序化极简封面：", error);
+    const { width, height } = coverSizeOf(platform);
+    const buf = await renderCoverBuffer({ title, background: null, width, height, seed: title });
+    return saveLocalImage(buf);
   }
 }
 
-/** Zhipu-first with pollinations fallback for the regenerate endpoint (30s hard cap). */
+/**
+ * 重绘一张配图（非主图或指定 prompt）：免费 pollinations 出图落本地，
+ * 失败退化为程序化极简背景。
+ */
 export async function regenerateImageWithFallback(prompt: string, width: number, height: number): Promise<string> {
-  const zhipuPromise = regenerateImageLocal(prompt, width, height);
-  const url = await withHardTimeout(zhipuPromise, 30_000);
-  if (url) {
-    return url;
+  const buf = await fetchPollinationsImage(buildPromptFromContent(prompt, ""), width, height);
+  if (buf) {
+    return saveLocalImage(buf);
   }
-  console.error("[image-gen] 智谱重绘超时/失败，回退 pollinations。");
-  return regenerateImage(prompt, width, height);
+  console.error("[image-gen] pollinations 重绘失败，退化为程序化极简背景。");
+  const fallback = await renderMinimalistImageBuffer(width, height, prompt);
+  return saveLocalImage(fallback);
 }

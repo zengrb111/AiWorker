@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 
 /**
- * 「平台授权管理」真实面板 —— 官网渠道免授权；小红书 / 头条号通过
- * 创作者后台 Cookie 授权（服务端真实校验后 AES 加密存储）。
+ * 「平台授权管理」真实面板 —— 官网渠道配置域名 + 令牌；小红书 / 头条号 / 公众号 / 视频号
+ * 通过后台 Cookie 授权（服务端真实校验后 AES 加密存储）。
  */
 
 type Account = {
@@ -21,6 +21,14 @@ type Account = {
 };
 
 const PLATFORMS: Record<string, { name: string; desc: string; cookieGuide: string; badge: string; needsToken?: boolean }> = {
+  aiworker: {
+    name: "官网-AI员工",
+    desc: "AI员工官网 AI最前沿频道（aiworker.aimemory.cafe），授权后可将资讯推送到该频道",
+    cookieGuide:
+      "填写 https://aiworker.aimemory.cafe 与频道 API Key（x-api-key）。\n保存时会真实调用接口校验密钥：先 GET /api/frontier 确认站点可达，再 POST 一条临时资讯并立即 DELETE 校验密钥有效性。\n授权后，内容库详情页会出现「推送 AI最前沿」按钮；该频道是资讯列表（标题 + 摘要 + 标签 + 原文链接），无封面/正文长文。",
+    badge: "未授权",
+    needsToken: true,
+  },
   site: {
     name: "官网",
     desc: "和光万象官网（好物推荐）或 AI回忆录官网（心灵驿站），配置域名 + 令牌后可用",
@@ -49,6 +57,20 @@ const PLATFORMS: Record<string, { name: string; desc: string; cookieGuide: strin
     desc: "授权后自动拉取头条号后台内容数据",
     cookieGuide:
       "电脑浏览器打开 mp.toutiao.com 登录 → 按 F12 打开开发者工具 → Network 面板刷新页面 → 点任意一个请求 → 在 Request Headers 里复制完整的 Cookie 值，粘贴到下面",
+    badge: "未授权",
+  },
+  wechat: {
+    name: "公众号",
+    desc: "授权后拉取微信公众号阅读 / 在看 / 涨粉数据",
+    cookieGuide:
+      "电脑浏览器打开 mp.weixin.qq.com 登录公众号后台 → 按 F12 打开开发者工具 → Network 面板刷新页面 → 点任意一个请求 → 在 Request Headers 里复制完整的 Cookie 值，粘贴到下面。\n保存时会真实请求后台校验登录态。授权后「效果分析」新增「公众号」渠道，展示阅读次数 / 阅读人数 / 在看 / 分享 / 收藏 / 涨粉。",
+    badge: "未授权",
+  },
+  channels: {
+    name: "视频号",
+    desc: "授权后拉取微信视频号播放 / 互动 / 涨粉数据",
+    cookieGuide:
+      "电脑浏览器打开 channels.weixin.qq.com 登录视频号助手 → 按 F12 打开开发者工具 → Network 面板刷新页面 → 点任意一个请求 → 在 Request Headers 里复制完整的 Cookie 值，粘贴到下面。\n保存时会真实请求后台校验登录态。授权后「效果分析」新增「视频号」渠道，展示播放量 / 点赞 / 评论 / 转发 / 收藏 / 涨粉。",
     badge: "未授权",
   },
 };
@@ -229,7 +251,7 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
               <>
                 <input
                   className="acct-input"
-                  placeholder="官网域名，如 https://hgwx.aimemory.cafe 或 https://aimemory.cafe"
+                  placeholder="官网域名，如 https://hgwx.aimemory.cafe、https://aimemory.cafe 或 https://aiworker.aimemory.cafe"
                   value={domainInput}
                   onChange={(e) => setDomainInput(e.target.value)}
                   disabled={binding}
