@@ -1276,10 +1276,16 @@ export const openClawClient = {
   },
 
   async sendTask(input: string | OpenClawTaskRequest): Promise<OpenClawTaskResult> {
-    const request = typeof input === "string" ? { message: input } : input;
+    const request: OpenClawTaskRequest = typeof input === "string" ? { message: input } : input;
     const message = request.prompt ?? request.message;
 
-    const result = await requestGatewayChat(message);
+    // 按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
+    const result = await requestGatewayChat(
+      message,
+      undefined,
+      undefined,
+      deriveUserSessionKey(request.userId)
+    );
 
     if (!result.content) {
       throw new Error("OpenClaw 未返回任务内容。");
@@ -1297,10 +1303,16 @@ export const openClawClient = {
     onDelta: (deltaText: string) => void,
     timeoutMs?: number
   ): Promise<OpenClawTaskResult> {
-    const request = typeof input === "string" ? { message: input } : input;
+    const request: OpenClawTaskRequest = typeof input === "string" ? { message: input } : input;
     const message = request.prompt ?? request.message;
 
-    const result = await requestGatewayChat(message, timeoutMs, onDelta);
+    // 按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
+    const result = await requestGatewayChat(
+      message,
+      timeoutMs,
+      onDelta,
+      deriveUserSessionKey(request.userId)
+    );
 
     if (!result.content) {
       throw new Error("OpenClaw 未返回任务内容。");

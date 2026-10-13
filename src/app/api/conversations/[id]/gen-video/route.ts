@@ -303,7 +303,7 @@ export async function POST(request: Request, context: { params: { id: string } }
           saved = {
             id: item.id,
             title: item.title,
-            category: item.category,
+            category: item.category ?? "视频",
             videoUrl: finalUrl,
             coverImageUrl: coverUrl,
           };

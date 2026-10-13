@@ -385,6 +385,8 @@ export default function PlatformClient() {
   const [referenceVideoUrl, setReferenceVideoUrl] = useState("");
   const [referenceVideoFile, setReferenceVideoFile] = useState<File | null>(null);
   const [genVideoPreviewUrl, setGenVideoPreviewUrl] = useState<string | null>(null);
+  /** 热点「一键生成视频」：后端正在联网收集信息 / 整理创作要求 / 下载关联配图。 */
+  const [videoPreparingTopic, setVideoPreparingTopic] = useState<string | null>(null);
 
   function removeGenVideoImage(index: number) {
     setGenVideoImages((previous) => {
@@ -1167,6 +1169,64 @@ export default function PlatformClient() {
     }
   }
 
+  /**
+   * 热点卡片「一键生成视频」：以后端准备好的创作要求 + 关联配图预填生成面板。
+   * 准备阶段由 /gen-video/prepare 完成（agent 联网检索 + 知识库 + 下载新闻配图）；
+   * 此处只负责把返回的图片转成 File 填入面板，用户确认后复用 createGenVideo() 出片。
+   */
+  async function startHotTopicVideo(topic: string) {
+    const conversationId = activeConversation?.id;
+    if (!conversationId || sending || videoPreparingTopic) return;
+
+    setVideoPreparingTopic(topic);
+    setChatError("");
+    try {
+      const response = await fetch(`/api/conversations/${conversationId}/gen-video/prepare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({ error: "短视频准备失败。" }))) as ApiResponse<unknown>;
+        throw new Error(payload.ok ? "短视频准备失败。" : payload.error);
+      }
+      const payload = (await response.json()) as ApiResponse<{
+        requirement: string;
+        images: Array<{ url: string; name: string }>;
+      }>;
+      if (!payload.ok) {
+        throw new Error(payload.error || "短视频准备失败。");
+      }
+
+      const prepared = payload.data;
+      // 关联配图已在后端落到 public 同源目录，这里取回转成 File（复用缩略图/大图逻辑）。
+      const files: Array<{ file: File; url: string }> = [];
+      for (const image of prepared.images ?? []) {
+        try {
+          const blob = await fetch(image.url).then((r) => (r.ok ? r.blob() : Promise.reject(new Error("bad image"))));
+          const type = blob.type || "image/jpeg";
+          const extension = type.includes("png") ? "png" : type.includes("webp") ? "webp" : type.includes("gif") ? "gif" : "jpg";
+          const name = image.name || `ref.${extension}`;
+          files.push({ file: new File([blob], name, { type }), url: URL.createObjectURL(blob) });
+        } catch {
+          // 单张取回失败就跳过，不影响其它图
+        }
+      }
+
+      clearGenVideoImages();
+      setGenVideoImages(files);
+      setGenVideoRequirement(prepared.requirement ?? "");
+      setGenVideoPanelOpen(true);
+      if (!files.length) {
+        setChatError("已整理好创作要求，但未能取回关联配图，请在面板中自行上传参考图。");
+      }
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "短视频准备失败，请稍后重试。");
+    } finally {
+      setVideoPreparingTopic(null);
+    }
+  }
+
   async function createViralRemake() {
     const conversationId = activeConversation?.id;
     if (!conversationId || sending) return;
@@ -1932,6 +1992,14 @@ export default function PlatformClient() {
                                         >
                                           公众号创作
                                         </button>
+                                        <button
+                                          type="button"
+                                          className="topic-gen-btn topic-gen-btn-video"
+                                          disabled={sending || videoPreparingTopic !== null}
+                                          onClick={() => void startHotTopicVideo(topic.text)}
+                                        >
+                                          {videoPreparingTopic === topic.text ? "准备中…" : "一键生成视频"}
+                                        </button>
                                       </div>
                                     </div>
                                   ))}
@@ -2064,6 +2132,12 @@ export default function PlatformClient() {
                         <label className="viral-remake-file">上传制作素材（视频或图片，可多选）<input type="file" multiple accept="video/mp4,video/quicktime,video/webm,video/x-m4v,image/jpeg,image/png,image/webp" onChange={(event) => setRemakeMaterials(Array.from(event.target.files ?? []))} /></label>
                         <div className="viral-remake-summary">{referenceVideoFile ? `参考：${referenceVideoFile.name}` : ""}{remakeMaterials.length ? `  素材：${remakeMaterials.length} 个` : ""}</div>
                         <div className="viral-remake-actions"><button type="button" onClick={() => setRemakePanelOpen(false)}>取消</button><button type="button" disabled={sending} onClick={() => void createViralRemake()}>开始制作</button></div>
+                      </div>
+                    )}
+                    {videoPreparingTopic && (
+                      <div className="video-preparing">
+                        <span className="video-preparing-dot" />
+                        <span>正在围绕「{videoPreparingTopic}」收集信息、整理短视频创作要求并挑选关联配图，请稍候…</span>
                       </div>
                     )}
                     {genVideoPanelOpen && (
