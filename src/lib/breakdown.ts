@@ -15,6 +15,8 @@ const PLATFORM_NAME: Record<string, string> = {
   xhs: "小红书",
   toutiao: "头条号",
   site: "官网好物推荐",
+  wechat: "公众号",
+  channels: "视频号",
 };
 
 /** 每日任务读取的拆解汇总文件目录（与每日任务知识库同根） */

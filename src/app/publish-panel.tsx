@@ -108,6 +108,9 @@ export default function PublishPanel({ resetToken }: { resetToken: number }) {
           <a className="pub-site-link" href={SITE_URL} target="_blank" rel="noreferrer" title="打开官网好物推荐板块">
             ↗ 好物推荐
           </a>
+          <a className="pub-site-link" href="https://aiworker.aimemory.cafe/frontier.html" target="_blank" rel="noreferrer" title="打开 AI员工官网 AI最前沿 频道">
+            ↗ AI最前沿
+          </a>
           <button className="pub-refresh" onClick={() => void refresh()} disabled={loading}>
             {loading ? "刷新中…" : "刷新"}
           </button>

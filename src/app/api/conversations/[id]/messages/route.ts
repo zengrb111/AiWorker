@@ -148,7 +148,7 @@ function buildReferenceProcessMarkdown(
     );
   } else {
     lines.push(
-      "- 当前没有可自动发布的渠道：小红书 / 头条号仅用于数据采集。需要自动发布请先在「平台授权管理」授权官网（好物推荐）或官网-AI回忆录（心灵驿站）。"
+      "- 当前没有可自动发布的渠道：小红书 / 头条号 / 公众号 / 视频号仅用于数据采集。需要自动发布请先在「平台授权管理」授权官网（好物推荐）、官网-AI回忆录（心灵驿站）或官网-AI员工（AI最前沿）。"
     );
   }
   lines.push("");
@@ -162,13 +162,37 @@ function buildReferenceProcessMarkdown(
   return lines.join("\n");
 }
 
-function buildTaskPrompt(contextText: string, content: string, kbText?: string, authText?: string): string {
+/**
+ * 按登录用户派生专属网关会话 key（与 lib/openclaw 内部保持同一算法）。
+ * 这里本地实现是为了让 prompt 里的「用户专属 sessionKey」与实际路由 key 严格一致，
+ * 不额外依赖其它模块的导出。
+ */
+function userSessionKeyOf(userId?: string | null): string {
+  if (userId && typeof userId === "string" && userId.trim()) {
+    return `agent:main:user-${userId.trim().replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  }
+  return process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
+}
+
+function buildTaskPrompt(contextText: string, content: string, kbText?: string, authText?: string, userId?: string): string {
   // 图文/文案类请求：约定输出格式（# 一级标题开头），让自动入库判定稳定命中，
   // 也保证 generateArticleTitle 能提到干净的标题。
   const isArticleRequest = /(写一篇|写篇|写个?文案|写个?图文|生成一篇|生成篇|小红书(风格|文案|图文)|公众号(风格|文案|图文|文章)|文章正文|软文)/i.test(content);
   // 热点类快捷指令：约定编号列表格式，前端据此渲染可点选的热点卡片。
   const isHotTopicsRequest = /今日全网热点|今日产品热点/.test(content);
+  // 多用户隔离：每个登录用户独享网关会话与定时任务，规则作为最高优先级指令注入。
+  const userSessionKey = userSessionKeyOf(userId);
+  const userScopeTag = userId ? `user-${userId.replace(/[^a-zA-Z0-9_-]/g, "-")}` : "user-anonymous";
+  const isolationBlock = [
+    "【多用户隔离规则（最高优先级，必须遵守）】",
+    `- 本平台多名用户共用同一个 AI 员工，你当前只为其中一位用户服务，其专属会话 key 是：${userSessionKey}。`,
+    `- 该用户的一切定时任务（automation/cron）在创建、修改、查询、删除、立即执行时，必须且只能路由到该用户的会话：命令带 --session-key ${userSessionKey}，任务名（--name/--display-name）以「${userScopeTag}-」开头；禁止使用 main 或其他用户的会话。`,
+    "- 严禁引用、复述或推测其他用户的会话内容、定时任务、账号或数据；上下文里出现与当前用户无关的信息时，直接忽略。",
+    "- 用户查询定时任务时，只汇报属于该用户的任务；发现遗留的共享会话任务，提醒用户联系管理员迁移，不要擅自改动其他用户的任务。"
+  ].join("\n");
   return [
+    isolationBlock,
+    "",
     "请结合以下历史会话上下文继续完成用户任务。",
     "",
     "历史会话：",
@@ -207,9 +231,9 @@ function buildTaskPrompt(contextText: string, content: string, kbText?: string, 
 }
 
 /**
- * 智谱封面后台升级：内容先以 pollinations 占位封面入库，本函数在后台完成
- * 智谱生图并落盘本地，成功后把 coverImageUrl 覆盖为本地路径。任何失败只
- * 打日志、保持占位封面，绝不影响已入库的内容。
+ * 免费封面后台升级：内容先以 pollinations 占位封面入库，本函数在后台完成
+ * 免费生图（简约背景 + 程序绘制正确标题）并落盘本地，成功后把 coverImageUrl
+ * 覆盖为本地路径。任何失败只打日志、保持占位封面，绝不影响已入库的内容。
  */
 async function upgradeCoverInBackground(
   contentItemId: string,
@@ -224,7 +248,7 @@ async function upgradeCoverInBackground(
       data: { coverImageUrl: localUrl }
     });
   } catch (error) {
-    console.error("[image-gen] 智谱封面后台升级失败（保持占位封面）：", error);
+    console.error("[image-gen] 免费封面后台升级失败（保持占位封面）：", error);
   }
 }
 
@@ -755,7 +779,7 @@ export async function POST(request: Request, context: { params: { id: string } }
           const articleTitle = generateArticleTitle(rewriteText);
 
           // 小红书链路 + 已识别到主图：OCR 后按文案拆分生成「仿写文字图」，
-          // 这些图同时作为内容库「主图」（首图即封面），跳过智谱封面升级。
+          // 这些图同时作为内容库「主图」（首图即封面），跳过普通封面升级。
           let rewriteImages: string[] = [];
           if (category === "小红书" && mainImage) {
             try {
@@ -764,7 +788,7 @@ export async function POST(request: Request, context: { params: { id: string } }
               controller.enqueue(sseEncode({ type: "delta", text: `✅ 已生成 ${rewriteImages.length} 张仿写主图，存入内容库「主图」区（可一键下载 zip）。\n` }));
             } catch (error) {
               rewriteImages = [];
-              console.error("[rewrite-images] 仿写图生成失败，回退智谱封面：", error);
+              console.error("[rewrite-images] 仿写图生成失败，改用普通封面：", error);
               controller.enqueue(sseEncode({ type: "delta", text: `⚠️ 仿写图生成失败（改用普通封面）：${error instanceof Error ? error.message : String(error)}\n` }));
             }
           }
@@ -891,7 +915,7 @@ await prisma.message.create({
       : [];
     referenceProcess = buildReferenceProcessMarkdown(groups, platformLabel, authCtx.entries);
   }
-  const prompt = buildTaskPrompt(conversationContext, content, kbText, authCtx.promptBlock);
+  const prompt = buildTaskPrompt(conversationContext, content, kbText, authCtx.promptBlock, user.id);
 
   const task = await prisma.openClawTask.create({
     data: {
@@ -969,7 +993,7 @@ await prisma.message.create({
               title: articleTitle,
               body: result.content,
               category,
-              // 入库不被生图阻塞：先用 pollinations 占位封面，智谱生图后台完成后升级为本地图
+              // 入库不被生图阻塞：先用 pollinations 占位封面，免费封面后台完成后升级为本地图
               coverImageUrl: generateImageUrls(articleTitle, result.content, 0, coverPlatformOf(category)).coverImageUrl,
               sourceConversationId: conversation.id
             }
@@ -1021,7 +1045,7 @@ await prisma.message.create({
                 title: articleTitle,
                 body: partial,
                 category,
-                // 入库不被生图阻塞：先用 pollinations 占位封面，智谱生图后台完成后升级为本地图
+                // 入库不被生图阻塞：先用 pollinations 占位封面，免费封面后台完成后升级为本地图
                 coverImageUrl: generateImageUrls(articleTitle, partial, 0, coverPlatformOf(category)).coverImageUrl,
                 sourceConversationId: conversation.id
               }

@@ -1,6 +1,7 @@
 import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { HEALING_CHANNEL, deleteContentFromHealing } from "@/lib/healing-publish";
+import { FRONTIER_CHANNEL, deleteContentFromFrontier } from "@/lib/frontier-publish";
 import { PUBLISH_CHANNEL_LABEL, type PublishChannelKey } from "@/lib/platform-auth-context";
 import { resolvePublishTargets } from "@/lib/publish-targets";
 
@@ -26,13 +27,14 @@ import { resolvePublishTargets } from "@/lib/publish-targets";
  */
 export const dynamic = "force-dynamic";
 
-const KNOWN_CHANNELS = new Set<string>(["healing", HEALING_CHANNEL, "xinling", "hgwx", "官网好物推荐"]);
-const DELETABLE: PublishChannelKey[] = ["healing"];
+const KNOWN_CHANNELS = new Set<string>(["healing", HEALING_CHANNEL, "xinling", "hgwx", "官网好物推荐", "aiworker", FRONTIER_CHANNEL]);
+const DELETABLE: PublishChannelKey[] = ["healing", "aiworker"];
 
 function normalizeChannel(input: string): PublishChannelKey | null {
   const channel = input.trim();
   if (channel === "hgwx" || channel === "官网好物推荐") return "hgwx";
   if (channel === "healing" || channel === HEALING_CHANNEL || channel === "xinling") return "healing";
+  if (channel === "aiworker" || channel === FRONTIER_CHANNEL) return "aiworker";
   return null;
 }
 
@@ -67,7 +69,7 @@ export async function POST(request: Request) {
   if (unknown.length > 0) {
     return jsonError(`暂不支持的渠道：${unknown.join("、")}。`);
   }
-  const requestedKeys = (payload.channels?.length ? payload.channels : ["healing"])
+  const requestedKeys = (payload.channels?.length ? payload.channels : DELETABLE)
     .map((c) => normalizeChannel(String(c)))
     .filter((c): c is PublishChannelKey => Boolean(c));
   const channels = requestedKeys.filter((c) => DELETABLE.includes(c));
@@ -102,7 +104,7 @@ export async function POST(request: Request) {
       unsupportedChannels: unsupported.map((c) => PUBLISH_CHANNEL_LABEL[c]),
       successCount: 0,
       results,
-      message: `暂不支持删除这些渠道：${unsupported.map((c) => PUBLISH_CHANNEL_LABEL[c]).join("、")}（目前仅支持删除「官网-AI回忆录（心灵驿站）」的内容）。`
+      message: `暂不支持删除这些渠道：${unsupported.map((c) => PUBLISH_CHANNEL_LABEL[c]).join("、")}（目前仅支持删除「官网-AI回忆录（心灵驿站）」与「官网-AI员工（AI最前沿）」的内容）。`
     });
   }
 
@@ -113,7 +115,10 @@ export async function POST(request: Request) {
     }
     for (const channel of channels) {
       try {
-        const result = await deleteContentFromHealing(target.contentId, target.userId);
+        const result =
+          channel === "aiworker"
+            ? await deleteContentFromFrontier(target.contentId, target.userId)
+            : await deleteContentFromHealing(target.contentId, target.userId);
         results.push({
           ok: result.ok,
           channel,

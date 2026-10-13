@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * 「效果分析」真实面板 —— 数据来自各渠道真实采集：
- * 官网（站点 PV/UV + 内容浏览）+ 已授权的小红书 / 头条号创作者数据。
+ * 官网（站点 PV/UV + 内容浏览）+ 已授权的小红书 / 头条号 / 公众号 / 视频号数据。
  */
 
 type PerPlatform = {
@@ -17,9 +17,27 @@ type PerPlatform = {
   comments: number;
   collects: number;
   shares: number;
+  /** 阅读人数（公众号） */
+  readers?: number;
+  /** 在看数（公众号） */
+  wows?: number;
 };
 
 type SiteDay = { date: string; pv: number; uv: number };
+
+/** 账号级日指标（公众号 / 视频号的涨粉、阅读/互动汇总等） */
+type DailyMetric = {
+  platform: string;
+  metricDate: string;
+  pv: number;
+  uv: number;
+  fans: number;
+  /** 账号级互动汇总（公众号后台口径） */
+  reads: number;
+  shares: number;
+  likes: number;
+  wows: number;
+};
 
 /** 拆解库列表项 */
 type LibItem = {
@@ -46,6 +64,10 @@ type MetricItem = {
   comments: number;
   collects: number;
   shares: number;
+  /** 阅读人数（公众号） */
+  readers?: number;
+  /** 在看数（公众号） */
+  wows?: number;
   /** 是否已抓到原文（拆解必须基于原文，没原文不能拆） */
   hasSource?: boolean;
   /** 平台原文链接（标题可点击新标签打开查看实际作品） */
@@ -57,6 +79,8 @@ type MetricsData = {
   perPlatform?: PerPlatform[];
   siteDays?: SiteDay[];
   items?: MetricItem[];
+  /** 非官网渠道的账号级日指标（公众号 / 视频号涨粉） */
+  dailyMetrics?: DailyMetric[];
   accounts?: Array<{ id: string; platform: string; displayName: string; status: string; lastSyncAt?: string | null }>;
   syncedAt?: string | null;
 };
@@ -78,7 +102,27 @@ const PLATFORM_METRICS: Record<string, string[]> = {
   site: ["views"],
   xhs: ["views", "likes", "comments", "collects", "shares"],
   toutiao: ["views", "impressions", "likes", "comments", "collects"],
+  // 公众号 / 视频号：后台不提供内容级明细（只有账号级汇总，见「微信生态数据」区块）→ 内容行全列显示「—」
+  wechat: [],
+  channels: [],
+  // 官网-AI回忆录 / 官网-AI员工：只同步「收录内容」清单，平台不提供阅读/互动统计 → 全列显示「—」
+  healing: [],
+  aiworker: [],
 };
+
+/** 渠道中文名（表格、明细、弹窗统一取用） */
+const PLATFORM_LABEL: Record<string, string> = {
+  site: "官网",
+  xhs: "小红书",
+  toutiao: "头条号",
+  wechat: "公众号",
+  channels: "视频号",
+  healing: "官网-AI回忆录",
+  aiworker: "官网-AI员工",
+};
+
+/** 微信生态渠道：在效果分析里额外展示「阅读人数 / 在看 / 涨粉」专属数据 */
+const WECHAT_PLATFORMS = ["wechat", "channels"];
 
 function metricCell(platform: string, key: string, value: number, strong = false) {
   const supported = PLATFORM_METRICS[platform];
@@ -99,7 +143,7 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const syncPollRef = useRef<number | null>(null);
-  const [channel, setChannel] = useState<"all" | "site" | "xhs" | "toutiao">("all");
+  const [channel, setChannel] = useState<"all" | "site" | "xhs" | "toutiao" | "wechat" | "channels" | "healing" | "aiworker">("all");
   const [query, setQuery] = useState("");
   const [shown, setShown] = useState(100);
 
@@ -389,12 +433,27 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
   const totalInteractions = perPlatform.reduce((s, p) => s + p.likes + p.comments + p.collects + p.shares, 0);
   const maxPv = Math.max(1, ...siteDays.map((d) => d.pv));
 
+  // 微信生态（公众号 / 视频号）：账号级汇总（后台采集器回填）+ 涨粉。
+  // 这类后台只提供账号级数据、不提供内容级明细，因此以「账号级汇总」为准展示。
+  const wechatRows = perPlatform.filter((p) => WECHAT_PLATFORMS.includes(p.platform));
+  const dailyMetrics = data?.dailyMetrics || [];
+  const accountStatsOf = (platform: string) => {
+    const rows = dailyMetrics.filter((d) => d.platform === platform);
+    const latest = rows.length ? rows[rows.length - 1] : null;
+    return {
+      has: rows.length > 0,
+      latest,
+      todayFans: rows.find((d) => d.metricDate === todayStr)?.fans ?? 0,
+      totalFans: rows.reduce((s, d) => s + d.fans, 0),
+    };
+  };
+
   return (
     <div className="pub-root">
       <div className="pub-toolbar">
         <div className="pub-title-group">
           <h2>效果分析</h2>
-          <p className="pub-subtitle">官网 · 小红书 · 头条号 三渠道真实投放效果</p>
+          <p className="pub-subtitle">官网 · 小红书 · 头条号 · 公众号 · 视频号 真实投放效果</p>
         </div>
         <div className="ana-tabs">
           <button className={tab === "data" ? "ana-tab active" : "ana-tab"} onClick={() => setTab("data")}>效果数据</button>
@@ -441,7 +500,7 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
         <div className="pub-empty-card">
           <div className="pub-empty-ico">◫</div>
           <p>还没有效果数据。</p>
-          <p className="pub-empty-hint">点右上角「同步数据」拉取各渠道真实统计；官网 / 小红书 / 头条号需先在「平台授权管理」完成配置（官网填域名 + 令牌）。</p>
+          <p className="pub-empty-hint">点右上角「同步数据」拉取各渠道真实统计；官网 / 小红书 / 头条号 / 公众号 / 视频号需先在「平台授权管理」完成配置（官网填域名 + 令牌，其余粘贴后台 Cookie）。</p>
         </div>
       ) : (
         <>
@@ -455,6 +514,65 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
                     <div className="ana-bar-date">{d.date.slice(5)}</div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {wechatRows.length > 0 && (
+            <div className="ana-site-days">
+              <div className="ana-section-title">微信生态数据（公众号 / 视频号）</div>
+              <div className="ana-wechat-grid">
+                {wechatRows.map((p) => {
+                  const acc = accountStatsOf(p.platform);
+                  const L = acc.latest;
+                  const isWechat = p.platform === "wechat";
+                  const hint = acc.has
+                    ? "账号级数据由浏览器采集器回填（该后台只提供账号级汇总，不提供内容级明细）"
+                    : "尚未采集到账号级数据：点右上角「同步数据」触发浏览器采集器（约 1-2 分钟）";
+                  const show = (n?: number) => (acc.has && typeof n === "number" ? num(n) : "—");
+                  return (
+                    <div key={p.platform} className="ana-wechat-card">
+                      <div className="ana-wechat-head">
+                        <span className={`acct-plat-badge ${p.platform}`}>{p.name}</span>
+                        <span className="ana-wechat-sub">{p.contents} 篇内容</span>
+                      </div>
+                      <div className="ana-wechat-stats">
+                        <div className="ana-wechat-stat" title={hint}>
+                          <span className="k">{isWechat ? "阅读次数" : "播放量"}</span>
+                          <span className="v">{show(L?.reads)}</span>
+                        </div>
+                        <div className="ana-wechat-stat" title="该后台未提供人数口径">
+                          <span className="k">阅读人数</span>
+                          <span className="v">—</span>
+                        </div>
+                        <div className="ana-wechat-stat" title={hint}>
+                          <span className="k">在看</span>
+                          <span className="v">{show(L?.wows)}</span>
+                        </div>
+                        <div className="ana-wechat-stat" title={hint}>
+                          <span className="k">点赞</span>
+                          <span className="v">{show(L?.likes)}</span>
+                        </div>
+                        <div className="ana-wechat-stat" title={hint}>
+                          <span className="k">分享</span>
+                          <span className="v">{show(L?.shares)}</span>
+                        </div>
+                        <div className="ana-wechat-stat" title="该后台未提供收藏口径">
+                          <span className="k">收藏</span>
+                          <span className="v">—</span>
+                        </div>
+                        <div className="ana-wechat-stat" title={hint + "（涨粉口径待接入用户分析接口）"}>
+                          <span className="k">今日涨粉</span>
+                          <span className="v">{show(acc.todayFans)}</span>
+                        </div>
+                        <div className="ana-wechat-stat" title={hint}>
+                          <span className="k">累计涨粉</span>
+                          <span className="v">{acc.has && acc.totalFans > 0 ? num(acc.totalFans) : "—"}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -477,7 +595,7 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
                   <span className={`acct-plat-badge ${p.platform}`}>{p.name}</span>
                 </span>
                 <span className="col-n">{p.contents}</span>
-                <span className="col-n strong">{num(p.views)}</span>
+                {metricCell(p.platform, "views", p.views, true)}
                 {metricCell(p.platform, "impressions", p.impressions)}
                 {metricCell(p.platform, "likes", p.likes)}
                 {metricCell(p.platform, "comments", p.comments)}
@@ -499,7 +617,11 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
                       ["all", "全部"],
                       ["xhs", "小红书"],
                       ["toutiao", "头条号"],
+                      ["wechat", "公众号"],
+                      ["channels", "视频号"],
                       ["site", "官网"],
+                      ["healing", "官网-AI回忆录"],
+                      ["aiworker", "官网-AI员工"],
                     ] as const
                   ).map(([key, label]) => (
                     <button
@@ -572,7 +694,7 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
                         </button>
                       )}
                     </span>
-                    <span className="col-n strong">{num(it.views)}</span>
+                    {metricCell(it.platform, "views", it.views, true)}
                     {metricCell(it.platform, "impressions", it.impressions)}
                     {metricCell(it.platform, "likes", it.likes)}
                     {metricCell(it.platform, "comments", it.comments)}
@@ -621,7 +743,7 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
                   </span>
                   <span className="col-n">
                     <span className={`acct-plat-badge ${b.platform}`}>
-                      {{ xhs: "小红书", toutiao: "头条号", site: "官网" }[b.platform] || b.platform}
+                      {PLATFORM_LABEL[b.platform] || b.platform}
                     </span>
                   </span>
                   <span className="col-n strong">{num(b.metricViews)}</span>
@@ -643,7 +765,7 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
               <div>
                 <div className="bd-modal-title">{modal.title}</div>
                 <div className="bd-modal-sub">
-                  {{ xhs: "小红书", toutiao: "头条号", site: "官网" }[modal.platform] || modal.platform} · 阅读/播放 {num(modal.views)}
+                  {PLATFORM_LABEL[modal.platform] || modal.platform} · 阅读/播放 {num(modal.views)}
                   {modal.usedByCron ? " · 已设为每日任务参考" : ""}
                 </div>
               </div>

@@ -56,7 +56,7 @@ export function normalizeCategory(input?: string | null): string {
 }
 
 /**
- * 占位封面先入库、智谱封面后台升级 —— 和对话链路保持一致的策略：
+ * 占位封面先入库、免费封面后台升级 —— 和对话链路保持一致的策略：
  * 入库不被生图阻塞（生图十几秒），失败也只打日志、保留占位封面。
  */
 async function upgradeCoverInBackground(
@@ -72,7 +72,7 @@ async function upgradeCoverInBackground(
       data: { coverImageUrl: localUrl }
     });
   } catch (error) {
-    console.error("[content-ingest] 智谱封面后台升级失败（保持占位封面）：", error);
+    console.error("[content-ingest] 免费封面后台升级失败（保持占位封面）：", error);
   }
 }
 
