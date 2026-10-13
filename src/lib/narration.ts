@@ -124,7 +124,7 @@ async function expandNarrationScript(
 /**
  * 生成标题 + 旁白文案。失败返回 null。
  *
- * targetSeconds：目标口播时长（秒）。默认 30s，封顶 45s（兼顾渲染耗时）。
+ * targetSeconds：目标口播时长（秒）。默认 30s，封顶 40s（兼顾渲染耗时）。
  * 视频时长 = TTS 旁白时长，所以旁白字数必须服从该目标。
  */
 export async function generateNarrationScript(
@@ -134,8 +134,8 @@ export async function generateNarrationScript(
 ): Promise<NarrationScript | null> {
   if (!ZHIPU_API_KEY) return null;
 
-  // 目标时长（秒）→ 目标字数（中文口播约 4.5 字/秒）。封顶 45s、下限 8s。
-  const safeTarget = Math.min(45, Math.max(8, Math.round(targetSeconds || 30)));
+  // 目标时长（秒）→ 目标字数（中文口播约 4.5 字/秒）。封顶 40s、下限 8s。
+  const safeTarget = Math.min(40, Math.max(8, Math.round(targetSeconds || 30)));
   const targetChars = Math.round(safeTarget * 4.5);
 
   const prompt = [

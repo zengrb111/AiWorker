@@ -159,7 +159,7 @@ export async function POST(request: Request, context: { params: { id: string } }
         const durMatch = requirement.match(/(\d{1,3})\s*秒/);
         let targetSeconds = durMatch ? parseInt(durMatch[1], 10) : 0;
         if (!Number.isFinite(targetSeconds) || targetSeconds < 8) targetSeconds = 30; // 未写/无效 → 兜底 30s
-        targetSeconds = Math.min(45, targetSeconds); // 封顶 45s，兼顾渲染耗时
+        targetSeconds = Math.min(40, targetSeconds); // 封顶 40s，兼顾渲染耗时
         const script = await generateNarrationScript(requirement, savedImagePaths.length, targetSeconds);
         const narrationText = script?.fullText ?? "";
         const videoTitle = script?.title ?? "";
