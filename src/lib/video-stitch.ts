@@ -40,8 +40,11 @@ export async function burnSubtitles(
   const fontfile = existsSync("C:/Windows/Fonts/msyh.ttc")
     ? "fontfile=C\\:/Windows/Fonts/msyh.ttc"
     : "fontfile=C\\:/Windows/Fonts/arial.ttf";
-  // PlayRes 固定为竖版 1080x1920：字幕置于画面下方安全区（距底约 17%），白字黑边、逐句显示。
-  const filter = `subtitles='${escaped}':charenc=UTF-8:force_style='${fontfile},PlayResX=1080,PlayResY=1920,FontSize=58,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=330'`;
+  // .ass 自带样式（卡拉OK 高亮由文件内 Style 控制），不加 force_style；.srt 才用 force_style。
+  // SRT 样式（B 大字加粗）：80 号加粗 + 4px 黑描边 + 阴影，底部安全区，远看也清晰。
+  const filter = /\.ass$/i.test(srtPath)
+    ? `subtitles='${escaped}'`
+    : `subtitles='${escaped}':charenc=UTF-8:force_style='${fontfile},PlayResX=1080,PlayResY=1920,FontSize=80,Bold=1,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=4,Shadow=1,Alignment=2,MarginV=380'`;
   onProgress?.("正在烧录字幕...");
   const r = await runTool(FFMPEG, [
     "-y", "-i", inputPath, "-vf", filter,
@@ -108,6 +111,78 @@ export function buildSrtFromCaptions(
   });
   writeFileSync(srtPath, blocks.join("\n"), "utf-8");
   return { ok: true, cueCount: cues.length };
+}
+
+/** 把句级时间戳细化到「字级」：在每句时长内按字数均分，供卡拉OK逐字高亮使用。 */
+export function buildCharTimeline(
+  captions: { word: string; startMs: number; endMs: number }[]
+): { char: string; startMs: number; endMs: number }[] {
+  const out: { char: string; startMs: number; endMs: number }[] = [];
+  for (const c of captions) {
+    const text = (c.word || "").replace(/\s+/g, "");
+    const dur = Math.max(0, c.endMs - c.startMs);
+    if (!text || dur <= 0) continue;
+    const per = dur / text.length;
+    for (let i = 0; i < text.length; i++) {
+      out.push({
+        char: text[i],
+        startMs: Math.round(c.startMs + per * i),
+        endMs: Math.round(c.startMs + per * (i + 1)),
+      });
+    }
+  }
+  return out;
+}
+
+function assTime(ms: number): string {
+  const cs = Math.round(ms / 10); // 厘秒
+  const h = Math.floor(cs / 360000);
+  const m = Math.floor((cs % 360000) / 6000);
+  const s = Math.floor((cs % 6000) / 100);
+  const c = cs % 100;
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(c).padStart(2, "0")}`;
+}
+
+/**
+ * 生成 ASS 卡拉OK字幕：跟随朗读逐字高亮（已读=亮黄，未读=暗灰）。
+ * 依赖 TTS 的句级时间戳，句内按字均分（见 buildCharTimeline）。
+ */
+export function buildKaraokeAss(
+  captions: { word: string; startMs: number; endMs: number }[],
+  assPath: string
+): { ok: boolean; cueCount: number } {
+  const lines = captions.filter((c) => c.word?.trim() && c.endMs > c.startMs);
+  if (!lines.length) return { ok: false, cueCount: 0 };
+
+  const header = [
+    "[Script Info]",
+    "ScriptType: v4.00+",
+    "PlayResX: 1080",
+    "PlayResY: 1920",
+    "WrapStyle: 2",
+    "ScaledBorderAndShadow: yes",
+    "YCbCr Matrix: TV.709",
+    "",
+    "[V4+ Styles]",
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    // Primary=已读高亮(亮黄)，Secondary=未读(暗灰)，黑描边；底部居中，竖版安全区。
+    "Style: Karaoke,Microsoft YaHei,60,&H0000FFFF,&H00999999,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,300,1",
+    "",
+    "[Events]",
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+  ].join("\n");
+
+  const dialogues = lines.map((c) => {
+    const text = (c.word || "").replace(/\s+/g, "");
+    const per = Math.max(0, c.endMs - c.startMs) / Math.max(1, text.length);
+    const karaoked = Array.from(text)
+      .map((ch) => `{\\k${Math.max(1, Math.round(per / 10))}}${ch}`)
+      .join("");
+    return `Dialogue: 0,${assTime(c.startMs)},${assTime(c.endMs)},Karaoke,,0,0,0,,${karaoked}`;
+  });
+
+  writeFileSync(assPath, `${header}\n${dialogues.join("\n")}\n`, "utf-8");
+  return { ok: true, cueCount: lines.length };
 }
 
 /**
