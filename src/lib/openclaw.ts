@@ -936,6 +936,45 @@ function deriveUserSessionKey(userId?: string | null): string {
   return process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
 }
 
+/** 网关「启动中 / 未运行」类瞬时错误：可自动等待重试。 */
+function isGatewayTransientError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /gateway starting|startup-sidecars|ECONNREFUSED|socket hang up|ECONNRESET/i.test(msg);
+}
+
+/** 把网关的技术性英文错误转成用户能看懂的中文提示（避免把原始 JSON 抛到界面上）。 */
+export function friendlyGatewayError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/gateway starting|startup-sidecars/i.test(msg)) {
+    return "AI 网关正在启动中（通常需要 1-3 分钟），请稍后重试。";
+  }
+  if (/ECONNREFUSED|socket hang up|ECONNRESET/i.test(msg)) {
+    return "AI 网关未运行或连接中断，请确认网关已启动后重试。";
+  }
+  return msg;
+}
+
+/** 网关启动中会自动等待重试的 request（间隔递增，累计约 80 秒）。 */
+async function gatewayRequestWithRetry<T>(
+  conn: { request: <R>(method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<R> },
+  method: string,
+  params: Record<string, unknown>,
+  timeoutMs: number
+): Promise<T> {
+  const delays = [0, 15000, 25000, 40000];
+  let lastErr: unknown;
+  for (let i = 0; i < delays.length; i++) {
+    if (delays[i] > 0) await new Promise((r) => setTimeout(r, delays[i]));
+    try {
+      return await conn.request<T>(method, params, timeoutMs);
+    } catch (e) {
+      lastErr = e;
+      if (!isGatewayTransientError(e)) throw e;
+    }
+  }
+  throw new Error(friendlyGatewayError(lastErr));
+}
+
 async function requestGatewayChat(
   message: string,
   timeoutMs?: number,
@@ -944,15 +983,30 @@ async function requestGatewayChat(
 ): Promise<{ runId: string; content: string; raw: unknown }> {
   const effectiveTimeout =
     timeoutMs ?? Number(process.env.OPENCLAW_CHAT_TIMEOUT_MS ?? 120000);
-  const conn = await connectGateway();
+  // 网关可能正在启动（startup-sidecars）或尚未起来：先按间隔重试连接，再转成中文提示。
+  let conn: Awaited<ReturnType<typeof connectGateway>> | null = null;
+  const connectDelays = [0, 15000, 30000];
+  let connectErr: unknown;
+  for (const delay of connectDelays) {
+    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+    try {
+      conn = await connectGateway();
+      break;
+    } catch (e) {
+      connectErr = e;
+      if (!isGatewayTransientError(e)) break;
+    }
+  }
+  if (!conn) throw new Error(friendlyGatewayError(connectErr));
   try {
     const sessionKey = sessionKeyOverride ?? (process.env.OPENCLAW_SESSION_KEY || "agent:main:main");
 
     // Initialise the chat session.
-    await conn.request("chat.startup", { sessionKey }, 15000);
+    await gatewayRequestWithRetry(conn, "chat.startup", { sessionKey }, 15000);
 
     // Send the user message — the response returns immediately with a runId.
-    const sendResult = await conn.request<{ runId: string; status: string }>(
+    const sendResult = await gatewayRequestWithRetry<{ runId: string; status: string }>(
+      conn,
       "chat.send",
       {
         sessionKey,
@@ -1276,13 +1330,20 @@ export const openClawClient = {
   },
 
   async sendTask(input: string | OpenClawTaskRequest): Promise<OpenClawTaskResult> {
-    const request = typeof input === "string" ? { message: input } : input;
+    const request: OpenClawTaskRequest = typeof input === "string" ? { message: input } : input;
     const message = request.prompt ?? request.message;
 
-    const result = await requestGatewayChat(message);
+    // 按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
+    const sessionKey = deriveUserSessionKey(request.userId);
+    // agent 冷启动/偶发空返回时自动重试一次，避免整轮对话白跑。
+    let result = await requestGatewayChat(message, undefined, undefined, sessionKey);
+    if (!result.content?.trim()) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      result = await requestGatewayChat(message, undefined, undefined, sessionKey);
+    }
 
-    if (!result.content) {
-      throw new Error("OpenClaw 未返回任务内容。");
+    if (!result.content?.trim()) {
+      throw new Error("OpenClaw 未返回任务内容（已自动重试一次），请稍后重试。");
     }
 
     return {
@@ -1294,15 +1355,23 @@ export const openClawClient = {
 
   async sendTaskStream(
     input: string | OpenClawTaskRequest,
-    onDelta: (deltaText: string) => void
+    onDelta: (deltaText: string) => void,
+    timeoutMs?: number
   ): Promise<OpenClawTaskResult> {
-    const request = typeof input === "string" ? { message: input } : input;
+    const request: OpenClawTaskRequest = typeof input === "string" ? { message: input } : input;
     const message = request.prompt ?? request.message;
 
-    const result = await requestGatewayChat(message, undefined, onDelta);
+    // 按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
+    const sessionKey = deriveUserSessionKey(request.userId);
+    // 同上：空返回（冷启动/偶发）自动重试一次。
+    let result = await requestGatewayChat(message, timeoutMs, onDelta, sessionKey);
+    if (!result.content?.trim()) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      result = await requestGatewayChat(message, timeoutMs, onDelta, sessionKey);
+    }
 
-    if (!result.content) {
-      throw new Error("OpenClaw 未返回任务内容。");
+    if (!result.content?.trim()) {
+      throw new Error("OpenClaw 未返回任务内容（已自动重试一次），请稍后重试。");
     }
 
     return {
