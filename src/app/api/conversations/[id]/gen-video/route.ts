@@ -6,7 +6,6 @@ import { generateNarrationScript } from "@/lib/narration";
 import { synthesizeNarration } from "@/lib/tts";
 import {
   addTitleOverlay,
-  buildKaraokeAss,
   buildSrtFromCaptions,
   burnSubtitles,
   extractCoverFrame,
@@ -264,30 +263,19 @@ export async function POST(request: Request, context: { params: { id: string } }
 
           if (audio && audio.captions.length) {
             const subAbs = join(videosDir, `gen-video-${token}-sub.mp4`);
-            // 口播字幕：优先卡拉OK（逐字跟随高亮）ASS；失败降级整句 SRT。
-            const assPath = join(workDir, "captions.ass");
-            const ass = buildKaraokeAss(audio.captions, assPath);
-            const burn = ass.ok
-              ? await burnSubtitles(currentAbs, assPath, subAbs, sendProgress)
-              : { ok: false as const, reason: "字幕数据为空" };
-            if (burn.ok) {
-              currentAbs = subAbs;
-              sendProgress(`口播字幕已烧录（${ass.cueCount} 句，逐字高亮）`);
-            } else {
-              // 降级：整句 SRT。
-              const srtPath = join(workDir, "captions.srt");
-              const srt = buildSrtFromCaptions(audio.captions, srtPath);
-              if (srt.ok) {
-                const b2 = await burnSubtitles(currentAbs, srtPath, subAbs, sendProgress);
-                if (b2.ok) {
-                  currentAbs = subAbs;
-                  sendProgress(`字幕已烧录（${srt.cueCount} 句，整句样式）`);
-                } else {
-                  sendProgress(`字幕烧录失败，保留无字幕版：${b2.reason}`);
-                }
+            // 口播字幕：标准整句 SRT（长句自动折行）。
+            const srtPath = join(workDir, "captions.srt");
+            const srt = buildSrtFromCaptions(audio.captions, srtPath);
+            if (srt.ok) {
+              const burn = await burnSubtitles(currentAbs, srtPath, subAbs, sendProgress);
+              if (burn.ok) {
+                currentAbs = subAbs;
+                sendProgress(`口播字幕已烧录（${srt.cueCount} 句）`);
               } else {
-                sendProgress("字幕数据为空，跳过字幕烧录。");
+                sendProgress(`字幕烧录失败，保留无字幕版：${burn.reason}`);
               }
+            } else {
+              sendProgress("字幕数据为空，跳过字幕烧录。");
             }
           }
 
