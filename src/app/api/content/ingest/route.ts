@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { ingestContentItems, type IngestItem } from "@/lib/content-ingest";
+import { resolveOwnerFromBody } from "@/lib/ingest-owner";
 
 /**
  * POST /api/content/ingest —— 外部（OpenClaw 定时任务）批量写入内容库。
@@ -61,37 +62,13 @@ export async function POST(request: NextRequest) {
     return jsonError(`单次最多 ${MAX_ITEMS} 条，本次收到 ${items.length} 条。`);
   }
 
-  // ── 归属账号解析 ────────────────────────────────────────────────
-  // 内容库按账号隔离，写错账号在界面上就是「完全看不到内容」。
-  // 优先级：显式 userId > sessionKey 里的 user-<id> > 显式 phone > 环境变量默认 > 最早创建的账号。
-  //
-  // 关键约束：**显式指定了归属却查不到账号时直接报错**，绝不静默退回默认账号。
-  // 否则内容会悄悄写进别人的库（2026-10-13「13800138003 任务产出跑到 13800138001」就是这么发生的）。
-  const sessionUserId =
-    /(?:^|[:\s])user-([A-Za-z0-9_-]+)/.exec((body.sessionKey || "").trim())?.[1] || "";
-  const wantedUserId = ((body.userId || "").trim() || sessionUserId).trim();
-  const wantedPhone = wantedUserId
-    ? ""
-    : ((body.phone || "").trim() || (process.env.CONTENT_INGEST_PHONE || "").trim());
-
-  const user = wantedUserId
-    ? await prisma.user.findUnique({ where: { id: wantedUserId } })
-    : wantedPhone
-      ? await prisma.user.findUnique({ where: { phone: wantedPhone } })
-      : await prisma.user.findFirst({ orderBy: { createdAt: "asc" } });
-
-  if (!user) {
-    if (wantedUserId) {
-      return jsonError(
-        `找不到 id 为 ${wantedUserId} 的账号（请检查传入的 sessionKey / userId 是否正确）。`,
-        404
-      );
-    }
-    if (wantedPhone) {
-      return jsonError(`找不到手机号为 ${wantedPhone} 的账号。`, 404);
-    }
-    return jsonError("库里还没有任何账号，无法确定入库归属。", 404);
+  // ── 归属账号解析（与 /api/knowledge/context 共用同一套规则）──
+  // 关键约束：显式指定了归属却查不到账号时直接报错，绝不静默退回默认账号。
+  const owner = await resolveOwnerFromBody(body);
+  if (!owner.ok) {
+    return jsonError(owner.error, owner.status);
   }
+  const user = owner.user;
 
   const result = await ingestContentItems(user.id, items);
   return jsonOk({
