@@ -6,6 +6,7 @@ import { generateNarrationScript } from "@/lib/narration";
 import { synthesizeNarration } from "@/lib/tts";
 import {
   addTitleOverlay,
+  buildKaraokeAss,
   buildSrtFromCaptions,
   burnSubtitles,
   extractCoverFrame,
@@ -13,8 +14,9 @@ import {
 } from "@/lib/video-stitch";
 import { probeDuration } from "@/lib/ffmpeg";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
+import os from "node:os";
 
 const maxUploadBytes = 30 * 1024 * 1024;
 const allowedImageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp"]);
@@ -109,6 +111,23 @@ export async function POST(request: Request, context: { params: { id: string } }
   }
   if (!savedImagePaths.length) return jsonError("参考图格式不支持，请上传 JPG / PNG / WebP。");
 
+  // 把参考图复制一份到 OpenClaw agent 工作区（其媒体读取白名单目录），
+  // 避免 openclaw 直接读取 public/... 时报 "Local media path is not under an allowed directory"。
+  let agentImagePaths = savedImagePaths;
+  try {
+    const wsDir = join(os.homedir(), ".openclaw", "workspace", "remotion-refs", token);
+    await mkdir(wsDir, { recursive: true });
+    const copied: string[] = [];
+    for (const abs of savedImagePaths) {
+      const dest = join(wsDir, basename(abs));
+      await copyFile(abs, dest);
+      copied.push(dest);
+    }
+    if (copied.length === savedImagePaths.length) agentImagePaths = copied;
+  } catch {
+    // 复制失败则回退到原始 public 路径，不影响生成。
+  }
+
   const outputName = `gen-video-${token}.mp4`;
   const outputAbs = join(videosDir, outputName);
   const outputUrl = `/videos/${outputName}`;
@@ -161,7 +180,7 @@ export async function POST(request: Request, context: { params: { id: string } }
 
         // ---- 3. 调用龙虾 Remotion 渲染画面 ----
         const targetDur = audio ? Math.round(audio.durationSeconds) : 0;
-        const imageList = savedImagePaths.map((path, index) => `${index + 1}. ${path}`).join("\n");
+        const imageList = agentImagePaths.map((path, index) => `${index + 1}. ${path}`).join("\n");
         const prompt =
           "请使用 Remotion 视频技能，根据下列参考图与整体创作要求生成一条竖版短视频。\n\n" +
           "参考图（本地绝对路径，按序号顺序使用）：\n" + imageList + "\n\n" +
@@ -180,7 +199,7 @@ export async function POST(request: Request, context: { params: { id: string } }
         sendProgress(`已上传 ${savedImagePaths.length} 张参考图，正在调用龙虾(OpenClaw) Remotion 技能规划脚本…`);
         const result = await openClawClient.sendTaskStream(prompt, (delta) => {
           controller.enqueue(sseEncode({ type: "delta", text: delta }));
-        });
+        }, Number(process.env.OPENCLAW_VIDEO_TIMEOUT_MS ?? 1_800_000));
 
         const rawUrl =
           extractVideoUrl(result.content) ?? (result.content.includes(outputUrl) ? outputUrl : undefined);
@@ -203,16 +222,30 @@ export async function POST(request: Request, context: { params: { id: string } }
           }
 
           if (audio && audio.captions.length) {
-            const srtPath = join(workDir, "captions.srt");
-            const srt = buildSrtFromCaptions(audio.captions, srtPath);
-            if (srt.ok) {
-              const subAbs = join(videosDir, `gen-video-${token}-sub.mp4`);
-              const burn = await burnSubtitles(currentAbs, srtPath, subAbs, sendProgress);
-              if (burn.ok) {
-                currentAbs = subAbs;
-                sendProgress(`字幕已烧录（${srt.cueCount} 句）`);
+            const subAbs = join(videosDir, `gen-video-${token}-sub.mp4`);
+            // 口播字幕：优先卡拉OK（逐字跟随高亮）ASS；失败降级整句 SRT。
+            const assPath = join(workDir, "captions.ass");
+            const ass = buildKaraokeAss(audio.captions, assPath);
+            const burn = ass.ok
+              ? await burnSubtitles(currentAbs, assPath, subAbs, sendProgress)
+              : { ok: false as const, reason: "字幕数据为空" };
+            if (burn.ok) {
+              currentAbs = subAbs;
+              sendProgress(`口播字幕已烧录（${ass.cueCount} 句，逐字高亮）`);
+            } else {
+              // 降级：整句 SRT。
+              const srtPath = join(workDir, "captions.srt");
+              const srt = buildSrtFromCaptions(audio.captions, srtPath);
+              if (srt.ok) {
+                const b2 = await burnSubtitles(currentAbs, srtPath, subAbs, sendProgress);
+                if (b2.ok) {
+                  currentAbs = subAbs;
+                  sendProgress(`字幕已烧录（${srt.cueCount} 句，整句样式）`);
+                } else {
+                  sendProgress(`字幕烧录失败，保留无字幕版：${b2.reason}`);
+                }
               } else {
-                sendProgress(`字幕烧录失败，保留无字幕版：${burn.reason}`);
+                sendProgress("字幕数据为空，跳过字幕烧录。");
               }
             }
           }
