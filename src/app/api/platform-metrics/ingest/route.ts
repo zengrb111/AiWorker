@@ -9,8 +9,9 @@ export const dynamic = "force-dynamic";
  * 小红书创作者中心接口有签名风控，数据由本地 CDP 采集器（scripts/xhs-collect.mjs）抓取；
  * 头条号 feed 接口服务端可直连，由 scripts/toutiao-collect.mjs 抓取。
  *
- * Body: { platform: "xhs" | "toutiao", notes: [{ id, title, views, impressions, clicks,
- *         likes, comments, collects, shares, permissionCode, itemStatus }] }
+ * Body: { platform: "xhs" | "toutiao" | "wechat" | "channels", notes: [{ id, title, views,
+ *         impressions, clicks, likes, comments, collects, shares, readers, wows,
+ *         permissionCode, itemStatus }], fans?: number }
  *
  * 只统计「当前公开可见」的内容：
  *   - 小红书 permissionCode !== 0（如 1「仅自己可见」）→ 丢弃
@@ -18,9 +19,10 @@ export const dynamic = "force-dynamic";
  * 本次未出现的旧记录会被删除，避免已删除内容的效果数据残留虚高。
  *
  * 字段语义：impressions=展现量（头条号 showCount）；clicks=点击量（仅官网有真实统计，
- * 小红书/头条号平台不提供，恒为 0）。
+ * 小红书/头条号平台不提供，恒为 0）；readers=阅读人数、wows=在看（公众号）；
+ * fans=当日新增关注（公众号 / 视频号账号级涨粉）。
  */
-const ALLOWED_PLATFORMS = new Set(["xhs", "toutiao"]);
+const ALLOWED_PLATFORMS = new Set(["xhs", "toutiao", "wechat", "channels"]);
 
 export async function POST(req: Request) {
   const token = process.env.CONTENT_INGEST_TOKEN || "";
@@ -33,7 +35,7 @@ export async function POST(req: Request) {
   const notes: any[] = Array.isArray(body?.notes) ? body.notes : [];
   const bodies: any[] = Array.isArray(body?.bodies) ? body.bodies : [];
   if (!ALLOWED_PLATFORMS.has(platform) || notes.length === 0) {
-    return NextResponse.json({ ok: false, message: "参数错误：需要 platform（xhs/toutiao）和非空 notes" }, { status: 400 });
+    return NextResponse.json({ ok: false, message: "参数错误：需要 platform（xhs/toutiao/wechat/channels）和非空 notes" }, { status: 400 });
   }
 
   const accountId = String(body?.accountId || "").trim();
@@ -75,6 +77,8 @@ export async function POST(req: Request) {
       comments: Number(n.comments) || 0,
       collects: Number(n.collects) || 0,
       shares: Number(n.shares) || 0,
+      readers: Number(n.readers) || 0,
+      wows: Number(n.wows) || 0,
       visible: true,
     };
     totalViews += row.views;
@@ -129,10 +133,32 @@ export async function POST(req: Request) {
     }
   }
 
+  // 账号级指标：公众号 / 视频号的新增关注（涨粉）与互动汇总
+  // （这些平台后台只提供账号级汇总，不提供内容级明细，由采集器在 body.summary 里带过来）
+  const fans = Number(body?.fans);
+  const sm = body?.summary;
+  const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : undefined);
+  const summaryPayload = {
+    ...(Number.isFinite(fans) ? { fans } : {}),
+    ...(num(sm?.reads) !== undefined ? { reads: num(sm?.reads) } : {}),
+    ...(num(sm?.shares) !== undefined ? { shares: num(sm?.shares) } : {}),
+    ...(num(sm?.likes) !== undefined ? { likes: num(sm?.likes) } : {}),
+    ...(num(sm?.wows) !== undefined ? { wows: num(sm?.wows) } : {}),
+  };
+  if (Object.keys(summaryPayload).length > 0) {
+    await prisma.platformSiteMetric.upsert({
+      where: { userId_platform_metricDate: { userId, platform, metricDate } },
+      update: summaryPayload,
+      create: { userId, platform, metricDate, ...summaryPayload },
+    });
+  }
+
   const extra = [
     bodiesSaved > 0 ? `原文 ${bodiesSaved} 篇` : "",
     skippedNotPublic > 0 ? `已排除 ${skippedNotPublic} 条非公开内容` : "",
     removed > 0 ? `清理 ${removed} 条不可见残留` : "",
+    Number.isFinite(fans) ? `新增关注 ${fans}` : "",
+    num(sm?.reads) !== undefined ? `阅读 ${num(sm?.reads)}` : "",
   ].filter(Boolean).join("；");
   await prisma.platformAccount.update({
     where: { id: account.id },

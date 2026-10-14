@@ -131,7 +131,7 @@ model PlatformContentMetric {
   user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   account    PlatformAccount? @relation(fields: [accountId], references: [id], onDelete: Cascade)
   accountId  String?
-  platform   String           // site | xhs | toutiao
+  platform   String           // site | xhs | toutiao | wechat
   contentKey String           // 平台侧内容标识（官网 recommend id / 笔记 id / 文章 id）
   title      String
   category   String?
@@ -143,6 +143,8 @@ model PlatformContentMetric {
   comments    Int              @default(0)
   collects    Int              @default(0)
   shares      Int              @default(0)
+  readers     Int              @default(0) // 阅读人数（公众号「送达阅读人数」；其他平台不提供为 0）
+  wows        Int              @default(0) // 在看数（公众号；其他平台不提供为 0）
   visible     Boolean          @default(true) // 该内容当前是否仍公开可见（同步时不在公开列表里的会被移除）
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
@@ -190,10 +192,16 @@ model PlatformSiteMetric {
   id         String @id @default(cuid())
   userId     String // 归属登录用户
   user       User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  platform   String // site | xhs | toutiao
+  platform   String // site | xhs | toutiao | wechat | channels
   metricDate String // yyyy-MM-dd
   pv         Int    @default(0)
   uv         Int    @default(0)
+  fans       Int    @default(0) // 当日新增关注（公众号涨粉；其他平台为 0）
+  /// 账号级互动汇总（公众号等后台只提供账号级汇总、不提供内容级明细时使用）
+  reads      Int    @default(0) // 阅读次数（公众号）
+  shares     Int    @default(0) // 分享次数
+  likes      Int    @default(0) // 点赞次数
+  wows       Int    @default(0) // 在看次数
   @@unique([userId, platform, metricDate])
 }
 

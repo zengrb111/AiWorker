@@ -8,7 +8,7 @@ import { decryptCredential } from "./platform-creds";
  * 平台效果数据同步器（按登录用户隔离）。
  * - 官网(site)：每个用户各自在「平台授权管理」配置自己的官网域名 + 令牌，
  *   同步时用该用户的凭据拉官网统计接口（/api/stats）。
- * - 小红书(xhs) / 头条号(toutiao)：无个人可申请的内容数据开放 API，
+ * - 小红书(xhs) / 头条号(toutiao) / 公众号(wechat) / 视频号(channels)：无个人可申请的内容数据开放 API，
  *   采用创作者后台 Cookie 授权（业界通行做法），凭据加密存储后真实请求平台接口。
  *   平台接口有签名/风控不确定性，验证器按候选端点轮询，失败如实记录到账号状态。
  */
@@ -28,6 +28,13 @@ export const PLATFORM_META: Record<string, { name: string; desc: string; cookieG
       "填写 https://aimemory.cafe 与心灵驿站令牌（Bearer Token）。\n保存时会真实调用 /api/healing/sync-log 校验令牌。\n授权后，内容库详情页即可「推送心灵驿站」；该频道无流量统计，不影响官网统计授权。",
     needsToken: true,
   },
+  aiworker: {
+    name: "官网-AI员工",
+    desc: "AI员工官网 AI最前沿频道（aiworker.aimemory.cafe），授权后可将资讯推送到该频道",
+    cookieGuide:
+      "填写 https://aiworker.aimemory.cafe 与频道 API Key（x-api-key）。\n保存时会真实调用接口校验密钥：先 GET /api/frontier 确认站点可达，再 POST 一条临时资讯并立即 DELETE 校验密钥有效性。\n授权后，内容库详情页会出现「推送 AI最前沿」按钮；该频道是资讯列表（无封面/正文长文），推送内容为标题 + 摘要 + 标签 + 原文链接。",
+    needsToken: true,
+  },
   xhs: {
     name: "小红书",
     desc: "创作者中心数据授权",
@@ -39,6 +46,18 @@ export const PLATFORM_META: Record<string, { name: string; desc: string; cookieG
     desc: "头条号后台数据授权",
     cookieGuide:
       "电脑浏览器打开 mp.toutiao.com 登录 → F12 打开开发者工具 → Network 面板刷新页面 → 任选一个请求 → 复制 Request Headers 里完整的 Cookie 值粘贴到下面",
+  },
+  wechat: {
+    name: "公众号",
+    desc: "微信公众号后台数据授权（mp.weixin.qq.com），授权后自动拉取图文阅读 / 在看 / 涨粉数据",
+    cookieGuide:
+      "电脑浏览器打开 mp.weixin.qq.com 登录公众号后台 → F12 打开开发者工具 → Network 面板刷新页面 → 任选一个请求 → 复制 Request Headers 里完整的 Cookie 值粘贴到下面。\n授权后「效果分析」会新增「公众号」渠道，展示阅读次数 / 阅读人数 / 在看 / 分享 / 收藏 / 涨粉。",
+  },
+  channels: {
+    name: "视频号",
+    desc: "微信视频号助手数据授权（channels.weixin.qq.com），授权后自动拉取视频播放 / 互动 / 涨粉数据",
+    cookieGuide:
+      "电脑浏览器打开 channels.weixin.qq.com 登录视频号助手 → F12 打开开发者工具 → Network 面板刷新页面 → 任选一个请求 → 复制 Request Headers 里完整的 Cookie 值粘贴到下面。\n授权后「效果分析」会新增「视频号」渠道，展示播放量 / 点赞 / 评论 / 转发 / 收藏 / 涨粉。",
   },
 };
 
@@ -197,6 +216,82 @@ async function verifyViaCandidates(
 }
 
 /**
+ * 后台类登录态校验（公众号 mp.weixin.qq.com / 视频号 channels.weixin.qq.com）。
+ *
+ * 这两个后台的绝大多数数据接口都要求 URL 携带动态 token 参数（登录时生成、Cookie 里拿不到），
+ * 因此纯 Cookie 无法直接调用数据接口；授权校验只负责判定「后台登录态是否有效」：
+ * 请求后台首页，未重定向到登录页、响应体不是登录页特征，即视为凭据有效。
+ * 真实数据由 sync*Metrics 用同一 Cookie 尝试候选数据端点获取，失败时如实记录。
+ */
+async function verifyBackendLoginState(
+  candidates: Array<{ url: string }>,
+  cookie: string,
+  label: string
+): Promise<VerifyResult> {
+  const errors: string[] = [];
+  const LOGIN_HINTS = /(登录|login|扫码|安全验证|请先)/i;
+  for (const c of candidates) {
+    try {
+      const res = await fetchWithCookie(c.url, cookie);
+      if (res.status === 301 || res.status === 302 || res.status === 401 || res.status === 403) {
+        errors.push(`${new URL(c.url).host} 未授权（HTTP ${res.status}），Cookie 可能已过期`);
+        continue;
+      }
+      const text = await res.text();
+      let json: any = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        /* HTML 响应，走下面对后台首页的判定 */
+      }
+      if (json && typeof json === "object") {
+        // 少数端点返回 JSON：code/base_resp.ret=0 视为登录态有效
+        const code = json?.base_resp?.ret ?? json?.code ?? json?.ret;
+        if (code === 0 || code === "0") {
+          const nick = json?.nickname || json?.nick_name || json?.user_name || json?.data?.nickname;
+          return { ok: true, displayName: String(nick || label), externalId: "" };
+        }
+        errors.push(`${new URL(c.url).host} 响应 code=${code ?? "未知"}`);
+        continue;
+      }
+      const title = (/<title>([^<]*)<\/title>/i.exec(text)?.[1] || "").trim();
+      if (LOGIN_HINTS.test(title) || text.length < 200) {
+        errors.push(`${new URL(c.url).host} 返回登录页（${title || "响应过短"}），Cookie 可能已过期`);
+        continue;
+      }
+      return { ok: true, displayName: title.replace(/[-—_|].*$/, "").trim() || label, externalId: "" };
+    } catch (e) {
+      errors.push(`${new URL(c.url).host} 请求失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  return { ok: false, message: `${label}凭据验证未通过：${errors.join("；")}` };
+}
+
+/** 公众号后台（mp.weixin.qq.com）登录态校验 */
+async function verifyWechat(cookie: string): Promise<VerifyResult> {
+  return verifyBackendLoginState(
+    [
+      { url: "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN" },
+      { url: "https://mp.weixin.qq.com/" }
+    ],
+    cookie,
+    "公众号"
+  );
+}
+
+/** 视频号助手（channels.weixin.qq.com）登录态校验 */
+async function verifyChannels(cookie: string): Promise<VerifyResult> {
+  return verifyBackendLoginState(
+    [
+      { url: "https://channels.weixin.qq.com/platform" },
+      { url: "https://channels.weixin.qq.com/" }
+    ],
+    cookie,
+    "视频号"
+  );
+}
+
+/**
  * 验证官网凭据：用域名 + 令牌真实请求，自动识别官网类型。
  * 1) 和光万象官网「好物推荐」：GET /api/stats（Bearer）
  * 2) AI回忆录官网「心灵驿站」：GET /api/healing/sync-log（Bearer，需令牌）
@@ -304,6 +399,22 @@ export async function loadHealingCredential(
   return null;
 }
 
+/**
+ * 读取「AI员工官网 AI最前沿」推送用的凭据（platform = aiworker）。
+ * 凭据形态 { domain, token }：domain 为官网地址，token 为频道 API Key（x-api-key）。
+ */
+export async function loadFrontierCredential(
+  userId: string
+): Promise<{ accountId: string; credential: { domain: string; token: string } } | null> {
+  const account = await prisma.platformAccount.findFirst({
+    where: { userId, platform: "aiworker", status: { not: "expired" } }
+  });
+  if (!account?.credentialEnc) return null;
+  const parsed = parseTokenCredential(account.credentialEnc);
+  if (!parsed) return null;
+  return { accountId: account.id, credential: { domain: parsed.domain, token: parsed.token } };
+}
+
 /** 验证「心灵驿站」专用授权：GET /api/healing/sync-log（需令牌）+ /meta 拿频道信息 */
 export async function verifyHealingCredential(domain: string, token: string): Promise<VerifyResult> {
   const base = domain.replace(/\/+$/, "");
@@ -330,10 +441,66 @@ export async function verifyHealingCredential(domain: string, token: string): Pr
   }
 }
 
+/**
+ * 验证「AI员工官网 AI最前沿」授权：域名 + API Key。
+ * 1) GET /api/frontier（公开）确认站点可达且是 AI最前沿接口
+ * 2) POST 一条临时资讯 + 立即 DELETE 校验 API Key 有效性（开发模式不校验，任何密钥都通过）
+ */
+export async function verifyFrontierCredential(domain: string, token: string): Promise<VerifyResult> {
+  const base = domain.replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(base)) return { ok: false, message: "官网域名需以 http(s):// 开头" };
+  let host = base;
+  try {
+    host = new URL(base).host;
+  } catch {
+    /* 保留原串 */
+  }
+  const headers = {
+    "Content-Type": "application/json",
+    "x-api-key": token,
+    Authorization: `Bearer ${token}`
+  };
+  try {
+    const getRes = await fetch(`${base}/api/frontier`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!getRes.ok) {
+      return { ok: false, message: `AI最前沿接口 HTTP ${getRes.status}（请确认域名已部署 AI最前沿频道）` };
+    }
+    const probe = await fetch(`${base}/api/frontier`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "配置校验临时条目-可忽略", tag: "校验", summary: "", link: "" }),
+      signal: AbortSignal.timeout(15000)
+    });
+    if (probe.status === 401 || probe.status === 403) {
+      return { ok: false, message: "AI最前沿 API Key 无效" };
+    }
+    if (!probe.ok) {
+      return { ok: false, message: `AI最前沿接口 HTTP ${probe.status}` };
+    }
+    const created = (await probe.json().catch(() => ({}))) as { id?: string };
+    if (created?.id) {
+      await fetch(`${base}/api/frontier/${encodeURIComponent(created.id)}`, {
+        method: "DELETE",
+        headers,
+        signal: AbortSignal.timeout(15000)
+      }).catch(() => {});
+    }
+    return { ok: true, displayName: `${host} · AI最前沿`, externalId: "" };
+  } catch (e) {
+    return { ok: false, message: `AI最前沿连接失败：${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 /** 验证平台凭据（绑定前调用） */
 export async function verifyPlatformCredential(platform: string, cookie: string): Promise<VerifyResult> {
   if (platform === "xhs") return verifyXhs(cookie);
   if (platform === "toutiao") return verifyToutiao(cookie);
+  if (platform === "wechat") return verifyWechat(cookie);
+  if (platform === "channels") return verifyChannels(cookie);
   return { ok: false, message: `平台 ${platform} 不支持 Cookie 授权` };
 }
 
@@ -386,6 +553,10 @@ async function upsertContentMetric(row: {
   comments?: number;
   collects?: number;
   shares?: number;
+  /** 阅读人数（公众号；其他平台不提供） */
+  readers?: number;
+  /** 在看数（公众号；其他平台不提供） */
+  wows?: number;
 }) {
   const metricDate = todayKey();
   await prisma.platformContentMetric.upsert({
@@ -406,6 +577,8 @@ async function upsertContentMetric(row: {
       comments: row.comments ?? 0,
       collects: row.collects ?? 0,
       shares: row.shares ?? 0,
+      readers: row.readers ?? 0,
+      wows: row.wows ?? 0,
       accountId: row.accountId ?? null,
       visible: true,
     },
@@ -424,7 +597,34 @@ async function upsertContentMetric(row: {
       comments: row.comments ?? 0,
       collects: row.collects ?? 0,
       shares: row.shares ?? 0,
+      readers: row.readers ?? 0,
+      wows: row.wows ?? 0,
       visible: true,
+    },
+  });
+}
+
+/** 写入某平台当日的账号级指标（目前用于公众号 / 视频号的「新增关注」涨粉数）。 */
+async function upsertDailyMetric(
+  platform: string,
+  userId: string,
+  payload: { fans?: number; pv?: number; uv?: number }
+): Promise<void> {
+  const metricDate = todayKey();
+  await prisma.platformSiteMetric.upsert({
+    where: { userId_platform_metricDate: { userId, platform, metricDate } },
+    update: {
+      ...(typeof payload.fans === "number" ? { fans: payload.fans } : {}),
+      ...(typeof payload.pv === "number" ? { pv: payload.pv } : {}),
+      ...(typeof payload.uv === "number" ? { uv: payload.uv } : {}),
+    },
+    create: {
+      userId,
+      platform,
+      metricDate,
+      pv: payload.pv ?? 0,
+      uv: payload.uv ?? 0,
+      fans: payload.fans ?? 0,
     },
   });
 }
@@ -459,8 +659,11 @@ async function pruneStaleMetrics(platform: string, accountId: string | null, liv
   return removed;
 }
 
-/** 官网渠道：拉当前用户配置的官网统计接口写入本地库（站点 PV/UV + 内容浏览/点击） */
-export async function syncSiteMetrics(userId: string): Promise<{ ok: boolean; message: string; items?: number }> {
+/**
+ * 官网（好物推荐 hgwx）：拉 /api/stats 写入本地库（站点 PV/UV + 内容浏览/点击）。
+ * 心灵驿站（healing）没有流量统计接口，由 syncHealingSite 走「收录内容」维度，不在这里处理。
+ */
+async function syncHgwxSite(userId: string): Promise<{ ok: boolean; message: string; items?: number }> {
   const account = await prisma.platformAccount.findFirst({
     where: { userId, platform: "site", status: { not: "expired" } },
   });
@@ -472,16 +675,7 @@ export async function syncSiteMetrics(userId: string): Promise<{ ok: boolean; me
     await markAccountError(account.id, "官网凭据不完整或解密失败，请重新配置");
     return { ok: false, message: "官网凭据不完整或解密失败" };
   }
-  const { domain, token, kind } = loaded.credential;
-
-  // 心灵驿站官网：只有内容推送接口，没有流量统计 → 明确跳过，不当作失败。
-  if (kind === "healing") {
-    await prisma.platformAccount.update({
-      where: { id: account.id },
-      data: { lastSyncAt: new Date(), status: "active", statusMsg: "官网（心灵驿站）仅支持内容推送，暂无流量统计" },
-    });
-    return { ok: true, message: "官网（心灵驿站）仅支持内容推送，暂无流量统计接口，已跳过" };
-  }
+  const { domain, token } = loaded.credential;
 
   try {
     const res = await fetch(`${domain}/api/stats`, {
@@ -575,8 +769,163 @@ export async function syncSiteMetrics(userId: string): Promise<{ ok: boolean; me
     };
   } catch (e) {
     await markAccountError(account.id, `同步失败：${e instanceof Error ? e.message : String(e)}`).catch(() => {});
-    return { ok: false, message: `官网数据同步失败：${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, message: `官网（好物推荐）数据同步失败：${e instanceof Error ? e.message : String(e)}` };
   }
+}
+
+/**
+ * 官网-AI回忆录（healing，aimemory.cafe 心灵驿站）：同步「收录内容」维度。
+ *
+ * 心灵驿站没有流量统计接口（不像好物推荐有 /api/stats），公开可读的是
+ *   GET /api/healing/meta  → 收录总数 / 分类分布
+ *   GET /api/healing/posts → 内容列表（标题 / 分类 / 摘要 / 封面 / 发布时间）
+ * 因此这里同步的是内容清单（阅读量维度平台不提供，展示为「—」而非 0）。
+ */
+async function syncHealingSite(userId: string): Promise<{ ok: boolean; message: string; items?: number }> {
+  const loaded = await loadHealingCredential(userId);
+  if (!loaded) return { ok: false, message: "官网-AI回忆录尚未授权" };
+  const { accountId, credential } = loaded;
+  const base = credential.domain.replace(/\/+$/, "");
+  try {
+    const res = await fetch(`${base}/api/healing/posts?limit=100`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) {
+      await markAccountError(accountId, `心灵驿站内容接口 HTTP ${res.status}`);
+      return { ok: false, message: `官网-AI回忆录内容接口 HTTP ${res.status}` };
+    }
+    const data = await res.json();
+    const items: any[] = Array.isArray(data?.items) ? data.items : [];
+    let bodies = 0;
+    for (const it of items) {
+      const key = String(it?.id || "").trim();
+      if (!key) continue;
+      await upsertContentMetric({
+        platform: "healing",
+        contentKey: key,
+        title: String(it?.title || "未命名内容").slice(0, 500),
+        category: it?.category || null,
+        // 心灵驿站不提供阅读量：留 0 并在前端按「该平台不提供」显示为「—」
+        views: 0,
+        clicks: 0,
+        userId,
+        accountId,
+      });
+      // 摘要作为拆解可用的「原文」来源（正文接口未公开）
+      const text = String(it?.summary || "").trim();
+      if (text.length >= 30) {
+        const payload = {
+          title: String(it?.title || "").slice(0, 500),
+          body: text.slice(0, 20000),
+          topics: null,
+          author: null,
+          source: "healing-public",
+          fetchedAt: new Date(),
+        };
+        await prisma.contentSource.upsert({
+          where: { platform_contentKey: { platform: "healing", contentKey: key } },
+          update: payload,
+          create: { platform: "healing", contentKey: key, ...payload },
+        });
+        bodies++;
+      }
+    }
+    const removed = await pruneStaleMetrics("healing", accountId, items.map((i) => String(i?.id || "")).filter(Boolean));
+    await prisma.platformAccount.update({
+      where: { id: accountId },
+      data: {
+        lastSyncAt: new Date(),
+        status: "active",
+        statusMsg: `同步成功（收录 ${items.length} 篇${removed > 0 ? `，清理 ${removed} 条下架` : ""}）`,
+      },
+    });
+    return {
+      ok: true,
+      message: `官网-AI回忆录：收录 ${items.length} 篇${removed > 0 ? `（清理 ${removed} 条下架）` : ""}`,
+      items: items.length,
+    };
+  } catch (e) {
+    await markAccountError(accountId, `同步失败：${e instanceof Error ? e.message : String(e)}`).catch(() => {});
+    return { ok: false, message: `官网-AI回忆录同步失败：${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/**
+ * 官网-AI员工（aiworker，aiworker.aimemory.cafe AI最前沿）：同步「资讯列表」维度。
+ * 公开读取 GET /api/frontier（无需鉴权），字段 { id, date, tag, title, summary, link }。
+ * 该频道同样没有浏览统计，阅读量维度展示为「—」。
+ */
+async function syncFrontierSite(userId: string): Promise<{ ok: boolean; message: string; items?: number }> {
+  const loaded = await loadFrontierCredential(userId);
+  if (!loaded) return { ok: false, message: "官网-AI员工尚未授权" };
+  const { accountId, credential } = loaded;
+  const base = credential.domain.replace(/\/+$/, "");
+  try {
+    const res = await fetch(`${base}/api/frontier`, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) {
+      await markAccountError(accountId, `AI最前沿内容接口 HTTP ${res.status}`);
+      return { ok: false, message: `官网-AI员工内容接口 HTTP ${res.status}` };
+    }
+    const data = await res.json();
+    const items: any[] = Array.isArray(data?.items) ? data.items : [];
+    for (const it of items) {
+      const key = String(it?.id || "").trim();
+      if (!key) continue;
+      await upsertContentMetric({
+        platform: "aiworker",
+        contentKey: key,
+        title: String(it?.title || "未命名资讯").slice(0, 500),
+        category: it?.tag || null,
+        views: 0,
+        clicks: 0,
+        userId,
+        accountId,
+      });
+    }
+    const removed = await pruneStaleMetrics("aiworker", accountId, items.map((i) => String(i?.id || "")).filter(Boolean));
+    await prisma.platformAccount.update({
+      where: { id: accountId },
+      data: {
+        lastSyncAt: new Date(),
+        status: "active",
+        statusMsg: `同步成功（资讯 ${items.length} 条${removed > 0 ? `，清理 ${removed} 条下架` : ""}）`,
+      },
+    });
+    return {
+      ok: true,
+      message: `官网-AI员工：资讯 ${items.length} 条${removed > 0 ? `（清理 ${removed} 条下架）` : ""}`,
+      items: items.length,
+    };
+  } catch (e) {
+    await markAccountError(accountId, `同步失败：${e instanceof Error ? e.message : String(e)}`).catch(() => {});
+    return { ok: false, message: `官网-AI员工同步失败：${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/**
+ * 官网渠道（三类）同步调度：按当前用户在「平台授权管理」里**实际授权的官网类型**逐个取数。
+ * 同一账号授权了多类官网时全部同步（效果分析按渠道分别展示）。
+ */
+export async function syncSiteMetrics(userId: string): Promise<{ ok: boolean; message: string; items?: number }> {
+  const parts: Array<{ ok: boolean; message: string; items?: number }> = [];
+  const site = await loadSiteCredential(userId);
+  if (site && site.credential.kind === "hgwx") parts.push(await syncHgwxSite(userId));
+  if (await loadHealingCredential(userId)) parts.push(await syncHealingSite(userId));
+  if (await loadFrontierCredential(userId)) parts.push(await syncFrontierSite(userId));
+  if (parts.length === 0) {
+    return { ok: false, message: "尚未授权任何官网渠道，请先在「平台授权管理」完成配置" };
+  }
+  return {
+    ok: parts.some((p) => p.ok),
+    message: parts.map((p) => p.message).join("；"),
+    items: parts.reduce((s, p) => s + (p.items || 0), 0),
+  };
 }
 
 /**
@@ -832,22 +1181,163 @@ export async function syncToutiaoMetrics(accountId: string): Promise<{ ok: boole
   return { ok: true, message: `头条号数据同步完成：${byId.size} 条公开可见内容${extra ? "（" + extra + "）" : ""}`, items: byId.size };
 }
 
+/** 公众号 / 视频号浏览器采集器锁：10 分钟内不重复拉起 */
+const WECHAT_COLLECT_LOCK = ".wechat-collect.lock";
+
+/**
+ * 后台拉起公众号/视频号采集器（headless Chrome 走真实登录态取数）。
+ * 与小红书采集器同一套思路：数据接口需要登录态/token，服务端直连拿不到。
+ */
+function triggerWechatCollector(accountId: string): boolean {
+  const root = process.cwd();
+  const lockFile = path.join(root, WECHAT_COLLECT_LOCK);
+  try {
+    const lockStat = fs.existsSync(lockFile) ? fs.statSync(lockFile) : null;
+    if (lockStat && Date.now() - lockStat.mtimeMs < 10 * 60 * 1000) return false;
+    fs.writeFileSync(lockFile, String(Date.now()), "utf8");
+    const child = spawn(process.execPath, [path.join(root, "scripts", "wechat-collect.mjs")], {
+      cwd: root,
+      detached: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        ACCOUNT_ID: accountId,
+        COLLECT_PLATFORM: "wechat",
+        AIWORKER_API: process.env.AIWORKER_API || "http://127.0.0.1:3000",
+      },
+    });
+    child.on("exit", () => {
+      try { fs.unlinkSync(lockFile); } catch { /* 已清理 */ }
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 公众号 / 视频号数据同步。
+ *
+ * 现实约束：这两个后台的数据接口（图文分析、视频统计）都要求 URL 携带**动态 token**
+ * （登录态生成、只存在于后台页面 URL 里，Cookie 里拿不到），因此服务端直连拿不到数据。
+ * 这里做两件事：
+ *   1. 校验登录态是否有效（服务端直达后台首页即可判定）；
+ *   2. 触发本地浏览器采集器（scripts/wechat-collect.mjs），用真实浏览器登录态取数后回填
+ *      （图文清单 + 账号级阅读/分享/点赞/在看汇总）。
+ * 任何失败都如实写入账号状态，绝不伪造数据。
+ */
+async function syncWechatBackendMetrics(
+  accountId: string,
+  opts: { platform: "wechat" | "channels"; label: string; homeUrls: string[] }
+): Promise<{ ok: boolean; message: string; items?: number }> {
+  const account = await prisma.platformAccount.findUnique({ where: { id: accountId } });
+  if (!account?.credentialEnc) return { ok: false, message: "账号缺少凭据" };
+  const { decryptCredential } = await import("./platform-creds");
+  let cookie: string;
+  try {
+    cookie = decryptCredential(account.credentialEnc);
+  } catch {
+    await markAccountError(accountId, "凭据解密失败，请重新绑定");
+    return { ok: false, message: "凭据解密失败" };
+  }
+
+  const LOGIN_HINTS = /(登录|login|扫码|安全验证|请先)/i;
+  const errors: string[] = [];
+  let nick: string | null = null;
+
+  for (const url of opts.homeUrls) {
+    try {
+      const res = await fetchWithCookie(url, cookie);
+      if (res.status === 301 || res.status === 302 || res.status === 401 || res.status === 403) {
+        errors.push(`${new URL(url).host} 未授权（HTTP ${res.status}）`);
+        continue;
+      }
+      const text = await res.text();
+      const title = (/<title>([^<]*)<\/title>/i.exec(text)?.[1] || "").trim();
+      if (LOGIN_HINTS.test(title) || text.length < 200) {
+        errors.push(`${new URL(url).host} 返回登录页（${title || "响应过短"}）`);
+        continue;
+      }
+      const nickMatch = /"nick_name"\s*:\s*"([^"]{1,40})"/.exec(text) || /"nickname"\s*:\s*"([^"]{1,40})"/.exec(text);
+      if (nickMatch) nick = nickMatch[1];
+
+      // 登录态有效 → 触发浏览器采集器回填明细
+      const triggered = triggerWechatCollector(accountId);
+      const synced = await prisma.platformContentMetric.count({ where: { platform: opts.platform, accountId } });
+      const note = triggered
+        ? "已触发浏览器采集器回填数据（约需 1-2 分钟，稍后刷新查看）"
+        : synced > 0
+          ? `已有 ${synced} 条内容数据；采集器已在运行中，稍后自动刷新`
+          : "采集器已在运行中，稍后自动入库";
+      await prisma.platformAccount.update({
+        where: { id: accountId },
+        data: { lastSyncAt: new Date(), status: "active", statusMsg: `登录态有效（${note}）` },
+      });
+      return {
+        ok: true,
+        message: `${opts.label}登录态有效${nick ? `（${nick}）` : ""}；${note}`,
+        items: synced,
+      };
+    } catch (e) {
+      errors.push(`${new URL(url).host} 请求失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  await markAccountError(accountId, `凭据校验未通过：${errors.join("；")}`);
+  return { ok: false, message: `${opts.label}数据同步失败（详见账号状态）` };
+}
+
+/** 公众号渠道 */
+export async function syncWechatMetrics(accountId: string) {
+  return syncWechatBackendMetrics(accountId, {
+    platform: "wechat",
+    label: "公众号",
+    homeUrls: [
+      "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN",
+      "https://mp.weixin.qq.com/"
+    ],
+  });
+}
+
+/** 视频号渠道 */
+export async function syncChannelsMetrics(accountId: string) {
+  return syncWechatBackendMetrics(accountId, {
+    platform: "channels",
+    label: "视频号",
+    homeUrls: ["https://channels.weixin.qq.com/platform", "https://channels.weixin.qq.com/"],
+  });
+}
+
 async function markAccountError(accountId: string, msg: string) {
   await prisma.platformAccount
     .update({ where: { id: accountId }, data: { status: "error", statusMsg: msg.slice(0, 500) } })
     .catch(() => {});
 }
 
-/** 同步当前用户全部渠道：官网 + 该用户已授权的账号 */
+/** 同步当前用户全部渠道：官网（按实际授权类型）+ 该用户已授权的账号 */
 export async function syncAllPlatforms(userId: string) {
   const results: Array<{ platform: string; ok: boolean; message: string; items?: number }> = [];
-  results.push({ platform: "site", ...(await syncSiteMetrics(userId)) });
+  // 官网三类：按「平台授权管理」里该账号实际授权的官网类型分别取数
+  // （好物推荐 hgwx / AI回忆录 healing / AI员工 aiworker），各自出一行同步结果。
+  const siteCred = await loadSiteCredential(userId);
+  if (siteCred && siteCred.credential.kind === "hgwx") {
+    results.push({ platform: "site", ...(await syncHgwxSite(userId)) });
+  }
+  if (await loadHealingCredential(userId)) {
+    results.push({ platform: "healing", ...(await syncHealingSite(userId)) });
+  }
+  if (await loadFrontierCredential(userId)) {
+    results.push({ platform: "aiworker", ...(await syncFrontierSite(userId)) });
+  }
   const accounts = await prisma.platformAccount.findMany({
-    where: { userId, platform: { in: ["xhs", "toutiao"] }, status: { not: "expired" } },
+    where: { userId, platform: { in: ["xhs", "toutiao", "wechat", "channels"] }, status: { not: "expired" } },
   });
   for (const acc of accounts) {
     if (acc.platform === "xhs") results.push({ platform: "xhs", ...(await syncXhsMetrics(acc.id)) });
     if (acc.platform === "toutiao") results.push({ platform: "toutiao", ...(await syncToutiaoMetrics(acc.id)) });
+    if (acc.platform === "wechat") results.push({ platform: "wechat", ...(await syncWechatMetrics(acc.id)) });
+    if (acc.platform === "channels") results.push({ platform: "channels", ...(await syncChannelsMetrics(acc.id)) });
   }
   return results;
 }

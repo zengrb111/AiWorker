@@ -425,6 +425,7 @@ export default function PlatformClient() {
   const [contentSaving, setContentSaving] = useState(false);
   const [publishingContent, setPublishingContent] = useState(false);
   const [publishingHealing, setPublishingHealing] = useState(false);
+  const [publishingFrontier, setPublishingFrontier] = useState(false);
   const [regeneratingImage, setRegeneratingImage] = useState<string | null>(null);
   const [wechatBinding, setWechatBinding] = useState<WechatBinding | null>(null);
   const [profileQr, setProfileQr] = useState<QrData | null>(null);
@@ -1652,6 +1653,29 @@ export default function PlatformClient() {
     }
   }
 
+  /** 把当前这篇图文推送到 AI员工官网「AI最前沿」频道（aiworker.aimemory.cafe/frontier.html）。 */
+  async function publishToFrontier() {
+    if (!activeContent || publishingFrontier) return;
+    setPublishingFrontier(true);
+    setCopiedButton(null);
+    setCopyHint("");
+    try {
+      const data = await api<{ skipped?: boolean; message?: string; title: string }>(
+        `/api/content/${activeContent.id}/publish`,
+        { method: "POST", body: JSON.stringify({ channel: "aiworker" }) }
+      );
+      if (data.skipped) {
+        showCopyHint(data.message || "该内容已推送到 AI最前沿。");
+      } else {
+        showCopyHint(data.message || "已推送到 AI最前沿");
+      }
+    } catch (error) {
+      showCopyHint(error instanceof Error ? error.message : "推送失败。");
+    } finally {
+      setPublishingFrontier(false);
+    }
+  }
+
   async function ensureProfileQr() {
     if (profileQrLoading) return;
     setProfileQrLoading(true);
@@ -2234,6 +2258,14 @@ export default function PlatformClient() {
                     title="推送到 AI回忆录官网「心灵驿站」频道（aimemory.cafe/healing.html），需先在「平台授权管理」配置官网 + 心灵驿站令牌"
                   >
                     {publishingHealing ? "推送中..." : "推送心灵驿站"}
+                  </button>
+                  <button
+                    className="publish-site-button publish-frontier-button"
+                    disabled={publishingFrontier}
+                    onClick={() => void publishToFrontier()}
+                    title="推送到 AI员工官网「AI最前沿」频道（aiworker.aimemory.cafe/frontier.html），需先在「平台授权管理」配置官网-AI员工（域名 + API Key）"
+                  >
+                    {publishingFrontier ? "推送中..." : "推送 AI最前沿"}
                   </button>
                   {editingContent === "title" ? (
                     <button onClick={saveContentEdit} disabled={contentSaving}>{contentSaving ? "保存中..." : "保存"}</button>

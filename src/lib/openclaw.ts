@@ -928,7 +928,12 @@ async function requestGateway<T>(
 
 type ChatContentItem = { type: string; text: string };
 
-function deriveUserSessionKey(userId?: string | null): string {
+/**
+ * 每个登录用户独享一个网关会话（agent:main:user-<userId>）：
+ * 会话历史、agent 记忆、定时任务（automation 的 --session-key）全部按此隔离，
+ * 避免多用户在同一平台上的上下文互相串扰。
+ */
+export function deriveUserSessionKey(userId?: string | null): string {
   if (userId && typeof userId === "string" && userId.trim()) {
     const safe = userId.trim().replace(/[^a-zA-Z0-9_-]/g, "-");
     return `agent:main:user-${safe}`;
@@ -1279,7 +1284,8 @@ export const openClawClient = {
     const request = typeof input === "string" ? { message: input } : input;
     const message = request.prompt ?? request.message;
 
-    const result = await requestGatewayChat(message);
+    // 按 userId 路由到该用户专属会话，多用户上下文互不串扰。
+    const result = await requestGatewayChat(message, undefined, undefined, deriveUserSessionKey(request.userId));
 
     if (!result.content) {
       throw new Error("OpenClaw 未返回任务内容。");
@@ -1299,7 +1305,8 @@ export const openClawClient = {
     const request = typeof input === "string" ? { message: input } : input;
     const message = request.prompt ?? request.message;
 
-    const result = await requestGatewayChat(message, undefined, onDelta);
+    // 按 userId 路由到该用户专属会话，多用户上下文互不串扰。
+    const result = await requestGatewayChat(message, undefined, onDelta, deriveUserSessionKey(request.userId));
 
     if (!result.content) {
       throw new Error("OpenClaw 未返回任务内容。");

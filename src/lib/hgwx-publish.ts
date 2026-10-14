@@ -171,16 +171,16 @@ export async function publishContentToHgwx(
     if (!TOKEN) throw new Error("服务端未配置 HGWX_PUBLISH_TOKEN，发布接口未启用。");
 
     // 发布前置：封面必须是已生成本地图（非 pollinations 等占位/远程图）。
-    // 否则先触发智谱生图并等待完成，确保「封面及内容都生成后再发布到官网」。
+    // 否则先触发免费生图并等待完成，确保「封面及内容都生成后再发布到官网」。
     if (!item.coverImageUrl || !item.coverImageUrl.startsWith("/uploads/")) {
-      console.log("[hgwx-publish] 封面尚未就绪（占位图），先触发智谱生图：", item.title);
+      console.log("[hgwx-publish] 封面尚未就绪（占位图），先触发免费生图：", item.title);
       const localCover = await generateCoverImage(
         item.title,
         item.body || "",
         coverPlatformOf(item.category)
       ).catch(() => null);
       if (!localCover) {
-        throw new Error("封面尚未生成（智谱生图失败），暂缓发布，待封面就绪后重试。");
+        throw new Error("封面尚未生成（免费生图失败），暂缓发布，待封面就绪后重试。");
       }
       await prisma.contentItem.update({
         where: { id: item.id },

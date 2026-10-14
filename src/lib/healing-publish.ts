@@ -143,14 +143,14 @@ export async function publishContentToHealing(
   }
 
   try {
-    // 封面闸门：与好物推荐一致，必须先有本地封面图（占位图先触发智谱生图）
+    // 封面闸门：与好物推荐一致，必须先有本地封面图（占位图先触发免费生图）
     if (!item.coverImageUrl || !item.coverImageUrl.startsWith("/uploads/")) {
       const localCover = await generateCoverImage(
         item.title,
         item.body || "",
         coverPlatformOf(item.category)
       ).catch(() => null);
-      if (!localCover) throw new Error("封面尚未生成（智谱生图失败），暂缓推送，待封面就绪后重试。");
+      if (!localCover) throw new Error("封面尚未生成（免费生图失败），暂缓推送，待封面就绪后重试。");
       await prisma.contentItem.update({ where: { id: item.id }, data: { coverImageUrl: localCover } });
       item.coverImageUrl = localCover;
     }
