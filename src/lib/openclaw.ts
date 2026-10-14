@@ -27,6 +27,12 @@ export type OpenClawTaskRequest = {
   prompt?: string;
   conversationId?: string;
   userId?: string;
+  /**
+   * 指定会话（可选）。后台任务（如短视频渲染）应传入独立会话，
+   * 避免与用户实时对话抢同一个 agent:main:user-<id> 会话而排到队尾超时。
+   * 不传则按 userId 派生默认会话，行为与以前一致。
+   */
+  sessionKey?: string;
 };
 
 export type OpenClawTaskResult = {
@@ -1389,8 +1395,9 @@ export const openClawClient = {
     const request: OpenClawTaskRequest = typeof input === "string" ? { message: input } : input;
     const message = request.prompt ?? request.message;
 
-    // 按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
-    const sessionKey = deriveUserSessionKey(request.userId);
+    // 显式指定的 sessionKey 优先（后台任务用独立会话，避免与实时对话抢同一会话）；
+    // 否则按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
+    const sessionKey = request.sessionKey || deriveUserSessionKey(request.userId);
     // agent 冷启动/偶发空返回时自动重试一次，避免整轮对话白跑。
     let result = await requestGatewayChat(message, undefined, undefined, sessionKey);
     if (!result.content?.trim()) {
@@ -1417,8 +1424,9 @@ export const openClawClient = {
     const request: OpenClawTaskRequest = typeof input === "string" ? { message: input } : input;
     const message = request.prompt ?? request.message;
 
-    // 按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
-    const sessionKey = deriveUserSessionKey(request.userId);
+    // 显式指定的 sessionKey 优先（后台任务用独立会话，避免与实时对话抢同一会话）；
+    // 否则按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
+    const sessionKey = request.sessionKey || deriveUserSessionKey(request.userId);
     // 同上：空返回（冷启动/偶发）自动重试一次。
     let result = await requestGatewayChat(message, timeoutMs, onDelta, sessionKey);
     if (!result.content?.trim()) {
