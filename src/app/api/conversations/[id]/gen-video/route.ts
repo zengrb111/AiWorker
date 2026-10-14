@@ -11,6 +11,7 @@ import {
   burnSubtitles,
   extractCoverFrame,
   muxNarration,
+  padVideoToDuration,
 } from "@/lib/video-stitch";
 import { probeDuration } from "@/lib/ffmpeg";
 import { existsSync, readdirSync } from "node:fs";
@@ -159,7 +160,7 @@ export async function POST(request: Request, context: { params: { id: string } }
         const durMatch = requirement.match(/(\d{1,3})\s*秒/);
         let targetSeconds = durMatch ? parseInt(durMatch[1], 10) : 0;
         if (!Number.isFinite(targetSeconds) || targetSeconds < 8) targetSeconds = 30; // 未写/无效 → 兜底 30s
-        targetSeconds = Math.min(40, targetSeconds); // 封顶 40s，兼顾渲染耗时
+        targetSeconds = Math.min(60, targetSeconds); // 封顶 60s，兼顾渲染耗时
         const script = await generateNarrationScript(requirement, savedImagePaths.length, targetSeconds);
         const narrationText = script?.fullText ?? "";
         const videoTitle = script?.title ?? "";
@@ -185,18 +186,38 @@ export async function POST(request: Request, context: { params: { id: string } }
 
         // ---- 3. 调用龙虾 Remotion 渲染画面 ----
         const targetDur = audio ? Math.round(audio.durationSeconds) : 0;
+        const imageCount = agentImagePaths.length;
+        // 片尾时长：约总时长的 10%，最少 2 秒、最多 3 秒（口播在此之前已结束）。
+        const outroSec = targetDur ? Math.min(3, Math.max(2, Math.round(targetDur * 0.1))) : 0;
+        // 图片需铺满的时长 = 总时长 - 片尾。
+        const imageEndSec = targetDur ? Math.max(0, targetDur - outroSec) : 0;
+        // 每张图的建议停留时长，让分镜与总时长自洽。
+        const perImageSec = imageEndSec && imageCount ? Math.round((imageEndSec / imageCount) * 10) / 10 : 3;
         const imageList = agentImagePaths.map((path, index) => `${index + 1}. ${path}`).join("\n");
         const prompt =
           "请使用 Remotion 视频技能，根据下列参考图与整体创作要求生成一条竖版短视频。\n\n" +
           "参考图（本地绝对路径，按序号顺序使用）：\n" + imageList + "\n\n" +
           "整体创作要求：\n" + (requirement || "（未提供，按通用品牌风格生成）") + "\n\n" +
+          "【画面与动效要求】\n" +
+          "1) 必须使用竖版 profile（tiktok / instagram_reels / youtube_shorts，均为 1080x1920），不要用横版。\n" +
+          "2) 用单个 anime_scene 场景承载全部参考图（把图片路径按顺序放进 images 数组），由组件自动等分时段轮播并交叉淡化。\n" +
+          `3) 电影感运镜：animation 从 ken-burns / zoom-in / zoom-out / pan-left / pan-right / drift-up / drift-down / parallax 中选择，并让相邻场景的运镜方向交替，避免重复；\n` +
+          "4) 氛围粒子：particles 从 fireflies / petals / sparkles / mist / light-rays 中按主题挑选（温暖治愈类适合 petals/fireflies，科技资讯类适合 sparkles/light-rays），可用 particleColor 与 particleIntensity 微调。\n" +
+          "5) 光影质感：开启 vignette（暗角），并用 lightingFrom / lightingTo 设置与主题匹配的柔和渐变光。\n" +
+          "6) 不要使用 CSS animation/transition 做动效（渲染会闪烁），运镜请用组件已支持的 animation 参数或 interpolate 变换。\n\n" +
           "【重要】画面中不要出现任何文字、标题、字幕、水印或标语（所有文案由后期统一以字幕形式叠加）；" +
           "画面只做纯视觉呈现：照片、图形、色块、渐变与动效，留足画面下方约 1/4 的净空区域给字幕。\n\n" +
           (narrationText
             ? "本视频的旁白文案（画面内容需呼应旁白，节奏与句子对应）：\n" + narrationText + "\n\n"
             : "") +
           (targetDur
-            ? `旁白配音时长约 ${targetDur} 秒，请将视频总时长控制在 ${targetDur} 秒左右（±10%），并让每个场景的切换对应旁白句子。\n\n`
+            ? `【时长对齐 —— 必须严格遵守】\n` +
+              `- 旁白配音时长约 ${targetDur} 秒，视频总时长必须与之一致（${targetDur} 秒，±10% 以内），确保画面与口播同步。\n` +
+              `- 共 ${imageCount} 张参考图。图片场景必须从第 0 秒开始、**连续无间断地铺满到第 ${imageEndSec} 秒**（最后一张图的 out_seconds 正好等于 ${imageEndSec}）。\n` +
+              `- 图片之后不要留任何空白、纯色或无内容时段，否则会出现"只有背景动画但口播还在响"的画面。\n` +
+              `- 每张图停留约 ${perImageSec} 秒，据此分配各段的 in_seconds / out_seconds，并让场景切换与旁白句子对应。\n` +
+              `- 在图片之后追加一个 ${outroSec} 秒的简单片尾：使用 EndTag 组件（或一个 SectionTitle）显示「感谢观看」或品牌落版即可，样式简洁即可；片尾期间口播已结束。\n` +
+              `- 全片结构：0 ~ ${imageEndSec} 秒为图片轮播，${imageEndSec} ~ ${targetDur} 秒为片尾，总计 ${targetDur} 秒。\n\n`
             : "") +
           `请将最终渲染成片保存到：${outputAbs}\n` +
           `渲染完成后，请在本条回复的末尾仅以一行格式给出最终视频地址：VIDEO_URL=${outputUrl}`;
@@ -214,6 +235,21 @@ export async function POST(request: Request, context: { params: { id: string } }
         let coverUrl: string | undefined;
         if (existsSync(outputAbs)) {
           let currentAbs = outputAbs;
+
+          // 兜底：画面时长若明显短于旁白（AI 未铺满），用最后一帧延长补齐，
+          // 避免出现"画面已结束但口播还在播"的空档。
+          if (audio && audio.durationSeconds > 0) {
+            const vDur = await probeDuration(currentAbs);
+            const gap = audio.durationSeconds - vDur;
+            if (Number.isFinite(gap) && gap > 1.2) {
+              const paddedAbs = join(videosDir, `gen-video-${token}-pad.mp4`);
+              const pad = await padVideoToDuration(currentAbs, paddedAbs, gap, sendProgress);
+              if (pad.ok) {
+                currentAbs = paddedAbs;
+                sendProgress(`画面比口播短 ${gap.toFixed(1)} 秒，已自动延长末帧补齐`);
+              }
+            }
+          }
 
           if (audio) {
             const muxedAbs = join(videosDir, `gen-video-${token}-voice.mp4`);

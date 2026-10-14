@@ -195,6 +195,31 @@ export function buildKaraokeAss(
 }
 
 /**
+ * 用最后一帧把视频延长 extraSeconds 秒（tpad stop_mode=clone）。
+ * 用于画面短于旁白时补齐，避免出现"画面结束但口播还在播"的空档。
+ */
+export async function padVideoToDuration(
+  inputPath: string,
+  outputPath: string,
+  extraSeconds: number,
+  onProgress?: (t: string) => void,
+): Promise<StitchResult> {
+  if (!existsSync(inputPath)) return { ok: false, reason: `输入不存在：${inputPath}` };
+  if (!(extraSeconds > 0)) return { ok: false, reason: "无需延长" };
+  onProgress?.(`正在延长画面 ${extraSeconds.toFixed(1)} 秒以对齐口播...`);
+  const r = await runTool(FFMPEG, [
+    "-y", "-i", inputPath,
+    "-vf", `tpad=stop_mode=clone:stop_duration=${extraSeconds.toFixed(2)}`,
+    "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p",
+    "-c:a", "copy", outputPath,
+  ], { timeoutMs: 300000 });
+  if (!r.ok || !existsSync(outputPath)) {
+    return { ok: false, reason: `画面延长失败：${r.stderr.slice(0, 160)}` };
+  }
+  return { ok: true, outputPath };
+}
+
+/**
  * 把旁白配音混入视频：
  * - 配音比视频长 → 视频最后一帧定格延长到配音长度（保证旁白完整）；
  * - 配音比视频短 → 音频补静音到视频长度。

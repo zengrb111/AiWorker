@@ -25,7 +25,9 @@ const PREPARE_TIMEOUT_MS = Number(process.env.OPENCLAW_VIDEO_PREPARE_TIMEOUT_MS 
 /** 单张远程配图的下载超时与大小上限（第三方新闻图可能又大又慢）。 */
 const IMAGE_FETCH_TIMEOUT_MS = Number(process.env.OPENCLAW_VIDEO_PREPARE_IMAGE_TIMEOUT_MS ?? 15_000);
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-const MAX_IMAGES = 6;
+const MAX_IMAGES = 12;
+/** 候选直链探测上限：多给一些候选，下载失败时自动补位，最终凑满 MAX_IMAGES 张。 */
+const CANDIDATE_LIMIT = 26;
 
 /** 远程图 URL 常带 query，扩展名不可靠，统一按响应 content-type 归一。 */
 const MIME_TO_EXT: Record<string, string> = {
@@ -133,7 +135,10 @@ export async function POST(request: Request, context: { params: { id: string } }
     "",
     "请完成两件事：",
     "1) 整理创作要求：写明主题切入角度、旁白文案方向、分镜与节奏、画面与风格、时长建议、结尾引导，具体可执行。",
-    "2) 挑选 3~6 张与该主题高度相关的真实新闻配图（http/https 直链，优先新闻原文配图），用作视频参考图。",
+    "2) 挑选与该主题高度相关的真实新闻配图（http/https 直链），用作视频参考图。",
+    "   - 数量：尽量给出 10~14 张，宁多勿少（部分链接可能失效，系统会自动过滤）。",
+    "   - 来源：尽量覆盖多个不同的新闻站点/媒体，不要全部来自同一家。",
+    "   - 内容：优先选正文内容图（现场照片、示意图、数据图），避免站点 logo、二维码、广告位、小图标。",
     "",
     "只输出一个 JSON 代码块，不要任何其它说明文字：",
     "```json",
@@ -163,17 +168,20 @@ export async function POST(request: Request, context: { params: { id: string } }
     );
   }
 
-  // 并发下载配图；个别失败仅跳过，不阻断。全部失败也照常返回（用户可自行上传）。
+  // 并发下载配图；个别失败仅跳过，由候选池补位，最终凑满 MAX_IMAGES 张。
   const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const dirAbs = join(process.cwd(), "public", "uploads", "gen-video-prep", token);
   await mkdir(dirAbs, { recursive: true });
   const webPrefix = `/uploads/gen-video-prep/${token}`;
   const settled = await Promise.allSettled(
-    prepared.imageUrls.slice(0, MAX_IMAGES).map((imageUrl, index) => downloadPreparedImage(imageUrl, dirAbs, webPrefix, index)),
+    prepared.imageUrls.slice(0, CANDIDATE_LIMIT).map((imageUrl, index) => downloadPreparedImage(imageUrl, dirAbs, webPrefix, index)),
   );
   const images = settled
     .map((r) => (r.status === "fulfilled" ? r.value : null))
-    .filter((v): v is { url: string; name: string } => Boolean(v));
+    .filter((v): v is { url: string; name: string } => Boolean(v))
+    .slice(0, MAX_IMAGES)
+    // 重新编号为 ref-0..ref-N，避免候选用尽后文件名出现空洞（如 ref-13）。
+    .map((image, index) => ({ url: image.url, name: `ref-${index}.${image.name.split(".").pop() || "jpg"}` }));
 
   return jsonOk({ requirement: prepared.requirement, images });
 }

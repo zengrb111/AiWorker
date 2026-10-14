@@ -134,8 +134,8 @@ export async function generateNarrationScript(
 ): Promise<NarrationScript | null> {
   if (!ZHIPU_API_KEY) return null;
 
-  // 目标时长（秒）→ 目标字数（中文口播约 4.5 字/秒）。封顶 40s、下限 8s。
-  const safeTarget = Math.min(40, Math.max(8, Math.round(targetSeconds || 30)));
+  // 目标时长（秒）→ 目标字数（中文口播约 4.5 字/秒）。封顶 60s、下限 8s。
+  const safeTarget = Math.min(60, Math.max(8, Math.round(targetSeconds || 30)));
   const targetChars = Math.round(safeTarget * 4.5);
 
   const prompt = [
