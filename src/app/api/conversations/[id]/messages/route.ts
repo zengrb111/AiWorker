@@ -1,5 +1,5 @@
 import { jsonError, readJson } from "@/lib/http";
-import { deriveUserSessionKey, openClawClient } from "@/lib/openclaw";
+import { openClawClient } from "@/lib/openclaw";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { generateCoverImage, generateImageUrls, coverPlatformOf, type CoverPlatform } from "@/lib/image-gen";
@@ -162,6 +162,18 @@ function buildReferenceProcessMarkdown(
   return lines.join("\n");
 }
 
+/**
+ * 按登录用户派生专属网关会话 key（与 lib/openclaw 内部保持同一算法）。
+ * 这里本地实现是为了让 prompt 里的「用户专属 sessionKey」与实际路由 key 严格一致，
+ * 不额外依赖其它模块的导出。
+ */
+function userSessionKeyOf(userId?: string | null): string {
+  if (userId && typeof userId === "string" && userId.trim()) {
+    return `agent:main:user-${userId.trim().replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  }
+  return process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
+}
+
 function buildTaskPrompt(contextText: string, content: string, kbText?: string, authText?: string, userId?: string): string {
   // 图文/文案类请求：约定输出格式（# 一级标题开头），让自动入库判定稳定命中，
   // 也保证 generateArticleTitle 能提到干净的标题。
@@ -169,7 +181,7 @@ function buildTaskPrompt(contextText: string, content: string, kbText?: string, 
   // 热点类快捷指令：约定编号列表格式，前端据此渲染可点选的热点卡片。
   const isHotTopicsRequest = /今日全网热点|今日产品热点/.test(content);
   // 多用户隔离：每个登录用户独享网关会话与定时任务，规则作为最高优先级指令注入。
-  const userSessionKey = deriveUserSessionKey(userId);
+  const userSessionKey = userSessionKeyOf(userId);
   const userScopeTag = userId ? `user-${userId.replace(/[^a-zA-Z0-9_-]/g, "-")}` : "user-anonymous";
   const isolationBlock = [
     "【多用户隔离规则（最高优先级，必须遵守）】",
