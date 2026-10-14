@@ -296,13 +296,42 @@ export async function generateNarration(
   return result;
 }
 
-/** 智谱 TTS 配置：默认启用，作为解说首选（音质自然稳定）；可用环境变量覆盖/关闭。 */
+/**
+ * 智谱 TTS 配置（依据官方《文本转语音》文档）：
+ * 所有参数都放在请求体「顶层」，不是嵌套 parameters —— 放错位置会被静默忽略。
+ * 可用环境变量覆盖/关闭。
+ */
 const ZHIPU_TTS_ENABLED = process.env.ZHIPU_TTS_ENABLED !== "0";
-const ZHIPU_TTS_MODEL = process.env.ZHIPU_TTS_MODEL || "cogtts";
-const ZHIPU_TTS_SAMPLE_RATE = Number(process.env.ZHIPU_TTS_SAMPLE_RATE || 24000); // cogtts 返回 24kHz s16le mono
+const ZHIPU_TTS_MODEL = process.env.ZHIPU_TTS_MODEL || "glm-tts";
 const ZHIPU_TTS_API = process.env.ZHIPU_TTS_API || "https://open.bigmodel.cn/api/paas/v4/audio/speech";
-/** 智谱 cogtts 音色：视频旁白固定用女声（female）。可用 ZHIPU_TTS_VOICE 覆盖。 */
-const ZHIPU_TTS_VOICE = process.env.ZHIPU_TTS_VOICE || "female";
+/** 音色（必填）：tongtong 彤彤(默认) / chuichui 锤锤 / xiaochen 小陈 / jam / kazi / douji / luodo */
+const ZHIPU_TTS_VOICE = process.env.ZHIPU_TTS_VOICE || "xiaochen";
+/** 语速 [0.5, 2]，默认 1；音量 (0, 10]，默认 1。 */
+const ZHIPU_TTS_SPEED = Number(process.env.ZHIPU_TTS_SPEED || 1);
+const ZHIPU_TTS_VOLUME = Number(process.env.ZHIPU_TTS_VOLUME || 1);
+/** 官方未提供 sample_rate 配置项，固定按 24kHz 处理裸 PCM。 */
+const ZHIPU_TTS_SAMPLE_RATE = 24000;
+/** 官方限制 input 最长 1024 字符，超出需分段合成后拼接。 */
+const ZHIPU_INPUT_LIMIT = 1024;
+
+/** 按句边界把文本切成不超过 limit 字符的若干段（避免智谱 1024 上限报错）。 */
+function chunkTextForTTS(text: string, limit = ZHIPU_INPUT_LIMIT): string[] {
+  const trimmed = (text ?? "").trim();
+  if (!trimmed) return [""];
+  if (trimmed.length <= limit) return [trimmed];
+  const parts: string[] = [];
+  let buf = "";
+  for (const s of trimmed.split(/(?<=[。！？!?；;\n])/)) {
+    if (buf && (buf + s).length > limit) {
+      parts.push(buf);
+      buf = s;
+    } else {
+      buf += s;
+    }
+  }
+  if (buf.trim()) parts.push(buf);
+  return parts.length ? parts : [trimmed.slice(0, limit)];
+}
 
 /** 把智谱返回的裸 PCM（s16le mono）包装成标准 WAV（补 44 字节头），便于 ffmpeg/时长解析。 */
 function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
@@ -326,27 +355,41 @@ function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
 }
 
 /**
- * 首选通道：智谱 TTS（cogtts）。返回 audio/pcm（24kHz s16le mono），
- * 这里封装成 WAV 并按句估算字幕（智谱不返回时间戳）。
+ * 首选通道：智谱 TTS（glm-tts）。按官方文档在请求体顶层传 voice/speed/volume，
+ * 返回裸 PCM（24kHz s16le mono），这里封装成 WAV并按句估算字幕（智谱不返回时间戳）。
+ * input 超 1024 字符时自动分段合成再拼接。
  */
 async function generateZhipuTTS(text: string, outputWavPath: string): Promise<TTSResult> {
   const apiKey = process.env.ZHIPU_API_KEY ?? "";
   if (!apiKey) throw new Error("ZHIPU_API_KEY 未配置");
 
-  const res = await fetch(ZHIPU_TTS_API, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: ZHIPU_TTS_MODEL, input: text, voice: ZHIPU_TTS_VOICE }),
-    signal: AbortSignal.timeout(60_000),
-  });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`智谱TTS失败 HTTP ${res.status}: ${detail.slice(0, 200)}`);
+  const chunks = chunkTextForTTS(text);
+  const pcmParts: Buffer[] = [];
+  for (const chunk of chunks) {
+    const res = await fetch(ZHIPU_TTS_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      // 注意：voice/speed/volume/response_format 必须放在顶层（旧文档里的嵌套 parameters 会被忽略）。
+      body: JSON.stringify({
+        model: ZHIPU_TTS_MODEL,
+        input: chunk,
+        voice: ZHIPU_TTS_VOICE,
+        speed: ZHIPU_TTS_SPEED,
+        volume: ZHIPU_TTS_VOLUME,
+        response_format: "pcm",
+      }),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`智谱TTS失败 HTTP ${res.status}: ${detail.slice(0, 200)}`);
+    }
+    const pcm = Buffer.from(await res.arrayBuffer());
+    if (pcm.length < 100) throw new Error("智谱TTS返回空音频");
+    pcmParts.push(pcm);
   }
 
-  const pcm = Buffer.from(await res.arrayBuffer());
-  if (pcm.length < 100) throw new Error("智谱TTS返回空音频");
-
+  const pcm = Buffer.concat(pcmParts);
   writeFileSync(outputWavPath, pcmToWav(pcm, ZHIPU_TTS_SAMPLE_RATE));
   const duration = pcm.length / (ZHIPU_TTS_SAMPLE_RATE * 2); // s16le mono => *2 bytes/sample
   return { audioPath: outputWavPath, audioPublicPath: "", durationSeconds: duration, captions: buildEstimatedCaptions(text, duration) };
