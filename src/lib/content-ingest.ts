@@ -5,12 +5,18 @@ import {
   generateImageUrls,
   type CoverPlatform
 } from "@/lib/image-gen";
+import { generateContentVideo } from "@/lib/gen-video";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 /**
  * 外部内容入库（定时任务产物 → 内容库）。
  *
  * 定时任务跑在 OpenClaw 侧，产出的图文只是 Markdown 文件；本模块负责把它们
  * 落成内容库里的 ContentItem，让用户能在「内容库」里直接审核、编辑、复制。
+ *
+ * 「视频」类内容额外处理：入库后自动调用视频生成链路产出**真实 MP4**并写回
+ * videoUrl —— 定时任务不再只交付一段视频文案脚本。
  */
 
 export type IngestItem = {
@@ -18,8 +24,13 @@ export type IngestItem = {
   title?: string;
   /** Markdown 正文 */
   body?: string;
-  /** 平台分类：小红书 / 公众号 */
+  /** 平台分类：小红书 / 公众号 / 视频 */
   category?: string;
+  /**
+   * 是否生成短视频（默认按 category 自动判断：含「视频」即生成）。
+   * 生成是后台异步的，不阻塞入库；成片就绪后回填 videoUrl。
+   */
+  generateVideo?: boolean;
 };
 
 export type IngestSaved = { id: string; title: string; category: string };
@@ -83,6 +94,90 @@ function startOfToday(): Date {
   return d;
 }
 
+/** 是否视频类内容（category 含「视频」）。 */
+function isVideoCategory(category: string): boolean {
+  return /视频|短视频|video/i.test(category);
+}
+
+/**
+ * 确保条目有本地封面图（视频生成的参考图必须是本地文件）。
+ * 已有本地封面直接用；否则现场生成一张并落库。
+ */
+async function ensureLocalCover(
+  contentItemId: string,
+  title: string,
+  body: string,
+  platform: CoverPlatform
+): Promise<string | null> {
+  const item = await prisma.contentItem.findUnique({ where: { id: contentItemId } });
+  const current = item?.coverImageUrl || "";
+  if (current.startsWith("/uploads/covers/")) {
+    const abs = join(process.cwd(), "public", current);
+    if (existsSync(abs)) return abs;
+  }
+  try {
+    const url = await generateCoverImage(title, body, platform);
+    await prisma.contentItem.update({ where: { id: contentItemId }, data: { coverImageUrl: url } });
+    const abs = join(process.cwd(), "public", url);
+    return existsSync(abs) ? abs : null;
+  } catch (error) {
+    console.error("[content-ingest] 视频参考图（封面）生成失败：", error);
+    return null;
+  }
+}
+
+/** 串行队列：同批多篇视频逐条生成，避免并发抢 OpenClaw 会话与 TTS 资源。 */
+let videoQueue: Promise<void> = Promise.resolve();
+
+function enqueueVideoTask(task: () => Promise<void>): void {
+  videoQueue = videoQueue.then(task).catch(() => undefined);
+}
+
+/**
+ * 视频类内容的后台成片：封面（参考图）就绪 → 生成短视频 → 回填 videoUrl/封面。
+ * 任何失败只打日志，内容条目本身保持可用（正文仍可手动处理）。
+ */
+function generateVideoInBackground(
+  contentItemId: string,
+  userId: string,
+  title: string,
+  body: string,
+  platform: CoverPlatform
+): void {
+  enqueueVideoTask(async () => {
+    try {
+      console.log(`[content-ingest] 开始生成短视频：${title}`);
+      const coverAbs = await ensureLocalCover(contentItemId, title, body, platform);
+      if (!coverAbs) {
+        console.error(`[content-ingest] 视频生成跳过（无可用参考图）：${title}`);
+        return;
+      }
+      const result = await generateContentVideo({
+        userId,
+        title,
+        body,
+        imagePaths: [coverAbs],
+        targetSeconds: 30,
+        onProgress: (text) => console.log(`[content-ingest] 视频「${title.slice(0, 16)}」：${text}`),
+      });
+      if (!result.ok || !result.videoUrl) {
+        console.error(`[content-ingest] 视频生成失败（${result.reason}）：${title}`);
+        return;
+      }
+      await prisma.contentItem.update({
+        where: { id: contentItemId },
+        data: {
+          videoUrl: result.videoUrl,
+          ...(result.coverUrl ? { coverImageUrl: result.coverUrl } : {}),
+        },
+      });
+      console.log(`[content-ingest] 短视频已生成：${result.videoUrl}（${title}）`);
+    } catch (error) {
+      console.error("[content-ingest] 视频生成异常：", error);
+    }
+  });
+}
+
 /**
  * 批量入库。幂等性：同一天内、同一账号下、标题相同的条目会被跳过，
  * 这样定时任务重复跑（调试、补跑）不会灌出一堆重复内容。
@@ -133,7 +228,12 @@ export async function ingestContentItems(
 
     seenTitles.add(title);
     saved.push({ id: created.id, title: created.title, category: created.category ?? category });
-    void upgradeCoverInBackground(created.id, title, body, platform);
+    if (raw?.generateVideo ?? isVideoCategory(category)) {
+      // 视频类：后台直接产出真实成片并回填 videoUrl（封面由视频流程内部保证）
+      generateVideoInBackground(created.id, userId, title, body, platform);
+    } else {
+      void upgradeCoverInBackground(created.id, title, body, platform);
+    }
   }
 
   return { saved, skipped };
