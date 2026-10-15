@@ -1152,6 +1152,17 @@ function saveModelApiKey(providerId: string, apiKey: string): Promise<void> {
   });
 }
 
+/** 网关定时任务的最小信息（用于按用户过滤后注入会话提示词，避免 AI 看全局列表）。 */
+export type CronJobSummary = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** 人类可读的调度描述，如 "0 30 17 * * *"（cron 表达式）。 */
+  schedule: string;
+  /** 归属会话 key；用户任务应为 agent:main:user-<id>。 */
+  sessionKey: string;
+};
+
 export const openClawClient = {
   async createWechatBindingQr(): Promise<OpenClawQr> {
     let weixin: WeixinLoginModule;
@@ -1355,6 +1366,41 @@ export const openClawClient = {
         provider: m.provider ?? "",
         available: m.available !== false
       }));
+  },
+
+  /**
+   * 网关的全部定时任务（**不做用户过滤**）。
+   * 本平台多用户共用同一网关 cron 存储，调用方必须按 sessionKey
+   * （agent:main:user-<id>）或名字前缀自行过滤后再使用，否则会把别人的任务泄给当前用户。
+   */
+  async listCronJobs(): Promise<CronJobSummary[]> {
+    const result = await requestGateway<{
+      jobs?: Array<{
+        id?: string;
+        name?: string;
+        displayName?: string;
+        enabled?: boolean;
+        sessionKey?: string;
+        schedule?: { kind?: string; expr?: string; tz?: string; everyMs?: number };
+      }>;
+    }>("cron.list", { includeDisabled: true, limit: 200 }, 20000);
+    return (result.jobs ?? [])
+      .filter((j) => Boolean(j?.id))
+      .map((j) => {
+        const s = j.schedule ?? {};
+        let schedule = j.schedule?.expr ?? "";
+        if (!schedule && typeof s.everyMs === "number") {
+          schedule = `每 ${Math.max(1, Math.round(s.everyMs / 60000))} 分钟`;
+        }
+        if (schedule && s.tz) schedule = `${schedule} (${s.tz})`;
+        return {
+          id: String(j.id),
+          name: j.name || j.displayName || String(j.id),
+          enabled: j.enabled !== false,
+          schedule: schedule || s.kind || "unknown",
+          sessionKey: j.sessionKey ?? ""
+        };
+      });
   },
 
   /** 切换当前会话使用的模型（按 userId 隔离到用户专属会话）。 */

@@ -1,5 +1,5 @@
 import { jsonError, readJson } from "@/lib/http";
-import { openClawClient } from "@/lib/openclaw";
+import { openClawClient, type CronJobSummary } from "@/lib/openclaw";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { generateCoverImage, generateImageUrls, coverPlatformOf, type CoverPlatform } from "@/lib/image-gen";
@@ -215,13 +215,58 @@ function resolveWechatDeliveryTarget(binding?: {
   return { to, accountId };
 }
 
+/**
+ * 读取「当前用户自己的」定时任务（按归属会话 key 严格过滤）。
+ * 网关 cron 存储是全平台共享的，必须过滤后再用；查询失败返回 null（此时不注入该段，
+ * 避免让 AI 误以为"没有任务"）。
+ */
+async function loadUserCronJobs(
+  sessionKey: string
+): Promise<CronJobSummary[] | null> {
+  try {
+    const jobs = await openClawClient.listCronJobs();
+    return jobs.filter((j) => j.sessionKey === sessionKey);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 该用户定时任务清单（唯一事实来源）。把它直接注入提示词，AI 就不需要（也不允许）
+ * 去执行 cron list / 读 cron 存储——那是全局的，会看到其他用户的任务。
+ */
+function buildCronBlock(
+  jobs: CronJobSummary[] | null,
+  userSessionKey: string,
+  userScopeTag: string
+): string | null {
+  if (jobs === null) return null;
+  const lines = ["【该用户的定时任务（唯一事实来源，涉及定时任务的回答只依据本列表）】"];
+  if (jobs.length === 0) {
+    lines.push("- 该用户当前没有任何定时任务。");
+  } else {
+    for (const j of jobs) {
+      lines.push(
+        `- 「${j.name}」 调度：${j.schedule} · ${j.enabled ? "已启用" : "已停用"} · id=${j.id}`
+      );
+    }
+  }
+  lines.push(
+    "- 本列表之外的任务都不属于该用户：绝不展示、复述、查询或修改。",
+    "- 严禁执行 `openclaw cron list`（它是全平台共享的，会返回其他用户的任务），也严禁读取 cron 存储文件；需要任务 id 时直接用上面列出的 id。",
+    `- 新增/修改/删除该用户的任务时，命令必须带 --session-key ${userSessionKey}，任务名以「${userScopeTag}-」开头。`
+  );
+  return lines.join("\n");
+}
+
 function buildTaskPrompt(
   contextText: string,
   content: string,
   kbText?: string,
   authText?: string,
   userId?: string,
-  wechatDelivery?: WechatDeliveryTarget | null
+  wechatDelivery?: WechatDeliveryTarget | null,
+  cronJobs?: CronJobSummary[] | null
 ): string {
   // 图文/文案类请求：约定输出格式（# 一级标题开头），让自动入库判定稳定命中，
   // 也保证 generateArticleTitle 能提到干净的标题。
@@ -246,8 +291,10 @@ function buildTaskPrompt(
     "- 严禁引用、复述或推测其他用户的会话内容、定时任务、账号或数据；上下文里出现与当前用户无关的信息时，直接忽略。",
     "- 用户查询定时任务时，只汇报属于该用户的任务；发现遗留的共享会话任务，提醒用户联系管理员迁移，不要擅自改动其他用户的任务。"
   ].join("\n");
+  const cronBlock = buildCronBlock(cronJobs ?? null, userSessionKey, userScopeTag);
   return [
     isolationBlock,
+    ...(cronBlock ? ["", cronBlock] : []),
     "",
     "请结合以下历史会话上下文继续完成用户任务。",
     "",
@@ -978,13 +1025,16 @@ await prisma.message.create({
     select: { wechatOpenId: true, wechatNo: true }
   });
   const wechatDelivery = resolveWechatDeliveryTarget(wechatBinding);
+  // 该用户自己的定时任务清单（按会话 key 过滤），注入后 AI 无需（也不允许）去看全局 cron。
+  const userCronJobs = await loadUserCronJobs(userSessionKeyOf(user.id));
   const prompt = buildTaskPrompt(
     conversationContext,
     content,
     kbText,
     authCtx.promptBlock,
     user.id,
-    wechatDelivery
+    wechatDelivery,
+    userCronJobs
   );
 
   const task = await prisma.openClawTask.create({
