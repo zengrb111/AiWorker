@@ -4,7 +4,7 @@
  * 封面（主图）两步走，保证「图上的文字永远正确」：
  *   1. 背景：pollinations.ai 免费生图（无需任何 Key），简约风格、纯图像不含文字；
  *      生成失败时退化为程序绘制的极简渐变背景（完全离线，必定成功）。
- *   2. 文字：用 @napi-rs/canvas + 随仓库内置的中文字体（assets/fonts/simhei.ttf）
+ *   2. 文字：用 @napi-rs/canvas + 随仓库内置的中文字体（assets/fonts/NotoSansSC-VF.ttf）
  *      把正确的标题绘制到图上。AI 模型只画背景不画字，文字由程序渲染，
  *      因此不存在 AI 画错字的问题。
  *
@@ -175,13 +175,17 @@ async function fetchPollinationsImage(prompt: string, width: number, height: num
 
 const COVER_FONT_FAMILY = "AiWorkerCover";
 
-/** 依次尝试：仓库内置字体 → 本机常见中文字体。注册成功后全局复用。 */
+/**
+ * 封面字体候选：**只允许免费可商用字体**。
+ *
+ * 历史坑：早先候选里是 `simhei.ttf`（黑体，中易授权）与 `msyh.ttc`（微软雅黑，方正授权），
+ * 两者都**不是免费可商用**。现改为 Noto Sans SC（SIL OFL 1.1），并优先用仓库内那一份。
+ */
 const COVER_FONT_CANDIDATES = [
-  path.join(process.cwd(), "assets", "fonts", "simhei.ttf"),
-  "C:\\Windows\\Fonts\\simhei.ttf",
-  "C:\\Windows\\Fonts\\msyh.ttc",
-  "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+  path.join(process.cwd(), "assets", "fonts", "NotoSansSC-VF.ttf"),
+  "C:\\Windows\\Fonts\\NotoSansSC-VF.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"
 ];
 
 let coverFontReady = false;
@@ -197,7 +201,7 @@ function ensureCoverFont(): boolean {
       // 换下一个候选
     }
   }
-  console.error("[image-gen] 封面中文字体注册失败，标题可能显示为方块。请确认 assets/fonts/simhei.ttf 存在。");
+  console.error("[image-gen] 封面中文字体注册失败，标题可能显示为方块。请确认 assets/fonts/NotoSansSC-VF.ttf 存在。");
   return false;
 }
 
