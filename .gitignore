@@ -23,6 +23,9 @@ public/uploads/
 public/videos/
 .platform-cred.key
 
+# Remotion 每次渲染落盘的素材与 props（src/lib/video/render.ts 生成并清理）
+/remotion/public/generated/
+
 .xhs-cookie.txt
 
 .toutiao-cookie.txt

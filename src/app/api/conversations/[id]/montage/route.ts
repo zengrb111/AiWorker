@@ -1,13 +1,21 @@
 import { jsonError } from "@/lib/http";
-import { transcribeVideoToSrt } from "@/lib/asr";
-import { burnSubtitles, concatVideoClips, normalizeToVertical } from "@/lib/video-stitch";
+import { parseSrtCues, transcribeVideoToSrt } from "@/lib/asr";
+import { concatVideoClips } from "@/lib/video-stitch";
 import { prisma } from "@/lib/prisma";
+import { probeDuration } from "@/lib/ffmpeg";
 import { requireUser } from "@/lib/session";
+import { pickBgm, runVideoPipeline } from "@/lib/video/pipeline";
 import { mkdir, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 
 const maxUploadBytes = 500 * 1024 * 1024;
 const allowedExtensions = new Set([".mp4", ".mov", ".m4v", ".webm", ".jpg", ".jpeg", ".png", ".webp"]);
+
+/**
+ * SSE 心跳间隔（毫秒）。出片是几十秒起步的长任务，中间纯渲染阶段没有任何事件，
+ * 不发 ping 会被反向代理当成空闲连接掐掉。参照 messages/route.ts。
+ */
+const HEARTBEAT_MS = 15_000;
 
 function sseEncode(data: unknown): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
@@ -57,7 +65,7 @@ export async function POST(request: Request, context: { params: { id: string } }
   const speechDir = join(uploadsDir, `speech-${token}`);
 
   const task = await prisma.openClawTask.create({
-    data: { userId: user.id, type: "openmontage-edit", prompt: file.name, status: "RUNNING" },
+    data: { userId: user.id, type: "video-montage", prompt: file.name, status: "RUNNING" },
   });
   const progress = ["已接收视频，正在准备智能剪辑任务…"];
   const progressMessage = await prisma.message.create({
@@ -66,7 +74,12 @@ export async function POST(request: Request, context: { params: { id: string } }
   let progressWrite = Promise.resolve();
   const stream = new ReadableStream({
     async start(controller) {
+      const heartbeat = setInterval(() => {
+        controller.enqueue(sseEncode({ type: "ping", at: Date.now() }));
+      }, HEARTBEAT_MS);
+
       const sendProgress = (text: string) => {
+        if (!text.trim()) return;
         progress.push(text);
         progressWrite = progressWrite.then(() =>
           prisma.message.update({ where: { id: progressMessage.id }, data: { content: formatProgressMessage(progress) } }).then(() => undefined),
@@ -74,30 +87,40 @@ export async function POST(request: Request, context: { params: { id: string } }
         controller.enqueue(sseEncode({ type: "delta", text: `${text}\n` }));
       };
       try {
+        // ---- 1. 语音识别：口播文本既用于烧字幕，也用于让 DeepSeek 决定剪辑点 ----
         sendProgress("视频上传完成，正在识别语音并生成字幕...");
         const asr = await transcribeVideoToSrt(inputPath, speechDir, sendProgress);
-        let mainClip = inputPath;
+        const captions = asr.ok ? parseSrtCues(asr.srtPath) : [];
         if (asr.ok) {
-          sendProgress(`已生成 ${asr.cueCount} 条语音字幕，开始烧录并剪辑成片...`);
-          const normalized = join(uploadsDir, `norm-${token}.mp4`);
-          const n = await normalizeToVertical(inputPath, normalized, sendProgress);
-          if (n.ok) {
-            const burned = join(uploadsDir, `captioned-${token}.mp4`);
-            const b = await burnSubtitles(normalized, asr.srtPath, burned, sendProgress);
-            if (b.ok) mainClip = burned;
-          }
+          sendProgress(`已生成 ${asr.cueCount} 条语音字幕，正在规划剪辑节奏...`);
         } else {
           sendProgress(`语音字幕未生成：${asr.reason}（将输出无字幕版本）`);
-          const normalized = join(uploadsDir, `norm-${token}.mp4`);
-          const n = await normalizeToVertical(inputPath, normalized, sendProgress);
-          if (n.ok) mainClip = normalized;
         }
 
-        const allClips = [mainClip, ...clipPaths];
-        const stitched = await concatVideoClips(allClips, outputPath, { onProgress: sendProgress });
-        if (!stitched.ok) throw new Error(stitched.reason);
+        // ---- 2. Remotion 竖版成片（DeepSeek 决定片段顺序 / 裁切点 / 转场） ----
+        const sourceDuration = await probeDuration(inputPath);
+        const result = await runVideoPipeline({
+          mode: "montage",
+          token,
+          materials: [inputPath, ...clipPaths],
+          requirement: String(form.get("requirement") ?? "").trim() || "把这段口播剪成节奏干脆的竖版短视频",
+          theme: String(form.get("theme") ?? "").trim() || undefined,
+          targetSeconds: Math.max(6, Math.round(sourceDuration || 30)),
+          captions,
+          bgmPath: pickBgm(),
+          onProgress: sendProgress,
+        });
 
-        const videoUrl = `/videos/${outputName}`;
+        let videoUrl = result.videoUrl;
+        if (!result.ok || !videoUrl) {
+          // ---- 3. 兜底：Remotion 渲染失败时退回原来的纯 ffmpeg 拼接 ----
+          sendProgress(`智能剪辑失败（${result.error ?? "未知原因"}），已切换到保底拼接模式...`);
+          const mainClip = inputPath;
+          const stitched = await concatVideoClips([mainClip, ...clipPaths], outputPath, { onProgress: sendProgress });
+          if (!stitched.ok) throw new Error(stitched.reason);
+          videoUrl = `/videos/${outputName}`;
+        }
+
         await progressWrite;
         const assistantMessage = await prisma.message.update({
           where: { id: progressMessage.id },
@@ -108,7 +131,16 @@ export async function POST(request: Request, context: { params: { id: string } }
         });
         await prisma.openClawTask.update({
           where: { id: task.id },
-          data: { status: "SUCCEEDED", resultJson: JSON.stringify({ videoUrl, messageId: assistantMessage.id, contentId: saved.id }) },
+          data: {
+            status: "SUCCEEDED",
+            resultJson: JSON.stringify({
+              videoUrl,
+              messageId: assistantMessage.id,
+              contentId: saved.id,
+              engine: result.engineUsed,
+              captionCount: captions.length,
+            }),
+          },
         });
         controller.enqueue(sseEncode({ type: "final", videoUrl, contentSaved: { id: saved.id, title: saved.title, category: saved.category, videoUrl } }));
       } catch (error) {
@@ -121,6 +153,8 @@ export async function POST(request: Request, context: { params: { id: string } }
         await prisma.openClawTask.update({ where: { id: task.id }, data: { status: "FAILED", error: message } });
         controller.enqueue(sseEncode({ type: "error", error: message }));
       } finally {
+        // 必须清掉心跳：流 close 之后继续 enqueue 会抛错
+        clearInterval(heartbeat);
         controller.close();
       }
     },

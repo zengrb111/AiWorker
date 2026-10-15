@@ -342,6 +342,25 @@ function renderQr(data?: QrData | null, loading?: boolean) {
   return <div className="qr-empty">暂未获取到绑定二维码，请点击下方按钮重新生成。</div>;
 }
 
+/**
+ * 视频风格说明。与 remotion/src/theme.ts 的 THEMES.description 对应。
+ *
+ * 刻意在前端复制一份而不是从 theme.ts import：theme.ts 是 Remotion 侧的模块，
+ * 引入前端会让打包器把整个 Remotion 依赖树拖进浏览器 bundle。
+ * 代价是新增主题时要同步两处 —— 所以下面写明了对应关系，避免漏改。
+ */
+const VIDEO_THEME_HINTS: Record<string, string> = {
+  "warm-default": "暖褐颗粒感，适合怀旧、人文、生活记录类内容",
+  "cool-night": "冷蓝夜色，适合科技、情感、夜景类内容",
+  "clean-light": "明亮清爽，适合知识分享、产品介绍类内容",
+  "film-revive": "暖褐胶片质感，适合怀旧、故事叙述类内容",
+  "acid-graphics": "高饱和流体渐变与金属光泽，适合潮玩、电音、潮流文化类内容",
+  "glitch-art": "RGB 错位与画面撕裂，适合科技、悬疑、游戏、赛博类内容",
+  "collage-zine": "撕纸边与手写贴纸，适合种草、好物分享、青年文化类内容",
+  "swiss-grid": "严格网格与大留白，适合知识科普、商业分析、专业解读类内容",
+  "mono-ink": "黑白灰加一笔朱红，适合人文、书法、东方美学类内容",
+};
+
 export default function PlatformClient() {
   const [checkingSession, setCheckingSession] = useState(true);
   const [user, setUser] = useState<User | null>(null);
@@ -385,6 +404,14 @@ export default function PlatformClient() {
   const [referenceVideoUrl, setReferenceVideoUrl] = useState("");
   const [referenceVideoFile, setReferenceVideoFile] = useState<File | null>(null);
   const [genVideoPreviewUrl, setGenVideoPreviewUrl] = useState<string | null>(null);
+  const [genVideoTtsProvider, setGenVideoTtsProvider] = useState<"zhipu" | "qwen">("qwen");
+  /**
+   * 视频风格。空串 = 自动（由后端按素材色调推断）。
+   *
+   * 选项与 remotion/src/theme.ts 的 THEMES 一一对应，新增主题时这里要同步加，
+   * 否则用户选不到。theme.ts 是唯一事实来源。
+   */
+  const [genVideoTheme, setGenVideoTheme] = useState("");
   /** 热点「一键生成视频」：后端正在联网收集信息 / 整理创作要求 / 下载关联配图。 */
   const [videoPreparingTopic, setVideoPreparingTopic] = useState<string | null>(null);
 
@@ -1121,6 +1148,9 @@ export default function PlatformClient() {
       const form = new FormData();
       for (const file of files) form.append("image", file);
       if (requirement) form.append("requirement", requirement);
+      form.append("ttsProvider", genVideoTtsProvider);
+      // 空串不传，后端收到即视为「自动选风格」
+      if (genVideoTheme) form.append("theme", genVideoTheme);
       const response = await fetch(`/api/conversations/${conversationId}/gen-video`, { method: "POST", body: form, signal: controller.signal });
       if (!response.ok) {
         const payload = (await response.json().catch(() => ({ error: "视频生成请求失败。" }))) as ApiResponse<unknown>;
@@ -1194,6 +1224,9 @@ export default function PlatformClient() {
       const payload = (await response.json()) as ApiResponse<{
         requirement: string;
         images: Array<{ url: string; name: string }>;
+        /** 联网检索不可用，已退化为本地整理创作要求（无配图）。 */
+        degraded?: boolean;
+        degradedReason?: string;
       }>;
       if (!payload.ok) {
         throw new Error(payload.error || "短视频准备失败。");
@@ -1218,7 +1251,14 @@ export default function PlatformClient() {
       setGenVideoImages(files);
       setGenVideoRequirement(prepared.requirement ?? "");
       setGenVideoPanelOpen(true);
-      if (!files.length) {
+      if (prepared.degraded) {
+        // 降级模式：没有联网资讯与新闻配图，只有本地整理出的创作要求。
+        // 说清代价，否则用户会以为「配图加载失败」是 bug。
+        setChatError(
+          `联网检索不可用（${prepared.degradedReason ?? "OpenClaw 网关未启动"}），已改用本地模式整理创作要求。` +
+            "配图需要你在面板中自行上传参考图，出片不受影响。",
+        );
+      } else if (!files.length) {
         setChatError("已整理好创作要求，但未能取回关联配图，请在面板中自行上传参考图。");
       }
     } catch (error) {
@@ -2179,6 +2219,38 @@ export default function PlatformClient() {
                         </div>
                         <div className="viral-remake-summary">{genVideoImages.length === 0 ? "暂未选择参考图（点击缩略图可看大图）" : `已选择 ${genVideoImages.length} 张参考图：点击缩略图看大图，右上角 × 可删除`}</div>
                         <label className="viral-remake-file" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>整体创作要求（多行）<textarea value={genVideoRequirement} onChange={(event) => setGenVideoRequirement(event.target.value)} placeholder={"例如：竖版 1080×1920，时长 30 秒左右，轻松治愈口播风\n第一张图做开场封面，配文案「爸，我又想你了」\n第二张图做正文，强调一个温暖细节\n结尾引导关注 + 品牌落版"} style={{ minHeight: 88, resize: "vertical", border: "1px solid var(--line)", borderRadius: 7, padding: "8px 10px", fontSize: 12, fontFamily: "inherit", lineHeight: 1.6 }} /></label>
+                        <label className="gen-video-engine">
+                          <span className="gen-video-engine-label">解说语音引擎</span>
+                          <select value={genVideoTtsProvider} onChange={(event) => setGenVideoTtsProvider(event.target.value === "zhipu" ? "zhipu" : "qwen")}>
+                            <option value="qwen">千问 TTS（默认，英文更好）</option>
+                            <option value="zhipu">智谱 GLM-TTS（中文自然）</option>
+                          </select>
+                          <span className="gen-video-engine-hint">
+                            {genVideoTtsProvider === "zhipu"
+                              ? "中文解说用智谱更自然；若智谱不可用会自动切到千问。"
+                              : "默认千问；若千问不可用会自动切回智谱，保证不断音。"}
+                          </span>
+                        </label>
+                        <label className="gen-video-engine">
+                          <span className="gen-video-engine-label">视频风格</span>
+                          <select value={genVideoTheme} onChange={(event) => setGenVideoTheme(event.target.value)}>
+                            <option value="">自动（按素材色调挑选）</option>
+                            <option value="warm-default">温暖治愈</option>
+                            <option value="cool-night">冷调夜色</option>
+                            <option value="clean-light">明亮清新</option>
+                            <option value="film-revive">胶片复古</option>
+                            <option value="acid-graphics">酸性设计</option>
+                            <option value="glitch-art">故障艺术</option>
+                            <option value="collage-zine">拼贴胶带</option>
+                            <option value="swiss-grid">瑞士网格</option>
+                            <option value="mono-ink">单色水墨</option>
+                          </select>
+                          <span className="gen-video-engine-hint">
+                            {genVideoTheme
+                              ? VIDEO_THEME_HINTS[genVideoTheme] ?? ""
+                              : "自动模式会先识别参考图的色调与情绪，再挑一套最协调的风格；识别不可用时退回温暖治愈。"}
+                          </span>
+                        </label>
                         <div className="viral-remake-actions"><button type="button" onClick={() => { setGenVideoPanelOpen(false); setGenVideoPreviewUrl(null); }}>取消</button><button type="button" disabled={!genVideoImages.length || sending} onClick={() => void createGenVideo()}>开始生成</button></div>
                       </div>
                     )}
