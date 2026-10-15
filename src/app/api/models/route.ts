@@ -12,7 +12,7 @@ export async function GET() {
   try {
     const [current, models] = await Promise.all([
       openClawClient.getCurrentModel(user.id),
-      openClawClient.listModels()
+      openClawClient.listModels(user.id)
     ]);
     return jsonOk({ current, models });
   } catch (error) {

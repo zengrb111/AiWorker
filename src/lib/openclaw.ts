@@ -945,31 +945,39 @@ function deriveUserSessionKey(userId?: string | null): string {
 /** 网关「启动中 / 未运行」类瞬时错误：可自动等待重试。 */
 function isGatewayTransientError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /gateway starting|startup-sidecars|ECONNREFUSED|socket hang up|ECONNRESET/i.test(msg);
+  // 注意：「调用超时」必须算瞬时错误——端口已监听但 agent/sidecar 尚未就绪时，
+  // chat.startup 会挂起 15s 后超时，此时网关实际还在启动，应重试而不是直接抛给用户。
+  return /gateway starting|startup-sidecars|调用超时|ECONNREFUSED|socket hang up|ECONNRESET/i.test(msg);
 }
 
 /** 把网关的技术性英文错误转成用户能看懂的中文提示（避免把原始 JSON 抛到界面上）。 */
 export function friendlyGatewayError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (/gateway starting|startup-sidecars/i.test(msg)) {
-    return "AI 网关正在启动中（通常需要 1-3 分钟），系统已自动等待，请稍后重试。";
+    return "AI 网关正在启动中（通常需要 3-5 分钟），系统已自动等待，请稍后重试。";
+  }
+  if (/调用超时/i.test(msg)) {
+    // 端口已监听但 sidecar/agent 未就绪，chat.startup 挂起超时。
+    return "AI 网关正在启动中（通常需要 3-5 分钟），系统已自动等待，请稍后重试。";
   }
   if (/ECONNREFUSED|socket hang up|ECONNRESET/i.test(msg)) {
-    // 注意：走到这里说明已按预算自动重试过（默认约 150 秒），网关确实还没就绪，
+    // 注意：走到这里说明已按预算自动重试过（默认约 300 秒），网关确实还没就绪，
     // 而不是「用户没启动网关」，所以不要写成让用户去检查网关。
-    return "AI 网关正在重启或暂时不可用（重启通常需要 1-3 分钟）。系统已自动等待重试仍未就绪，请 1 分钟后再发送一次。";
+    return "AI 网关正在重启或暂时不可用（重启通常需要 3-5 分钟）。系统已自动等待重试仍未就绪，请 1 分钟后再发送一次。";
   }
   return msg;
 }
 
-/** 网关启动中会自动等待重试的 request（间隔递增，累计约 80 秒）。 */
+/** 网关启动中会自动等待重试的 request（间隔递增，累计约 210 秒等待 + 各次 attempt 超时）。 */
 async function gatewayRequestWithRetry<T>(
   conn: { request: <R>(method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<R> },
   method: string,
   params: Record<string, unknown>,
   timeoutMs: number
 ): Promise<T> {
-  const delays = [0, 15000, 25000, 40000];
+  // 覆盖 4-5 分钟的慢启动窗口：端口已监听但 sidecar 未就绪时，
+  // chat.startup 会以「调用超时」形式失败，必须重试到网关真正 ready。
+  const delays = [0, 15000, 30000, 45000, 60000, 60000];
   let lastErr: unknown;
   for (let i = 0; i < delays.length; i++) {
     if (delays[i] > 0) await new Promise((r) => setTimeout(r, delays[i]));
@@ -992,11 +1000,12 @@ async function requestGatewayChat(
   const effectiveTimeout =
     timeoutMs ?? Number(process.env.OPENCLAW_CHAT_TIMEOUT_MS ?? 120000);
   // 网关可能正在启动（startup-sidecars）或尚未起来。
-  // 实测：网关重启一次约需 100~120 秒才 ready（bootstrap 22s → config.auth 46s →
-  // channels/sidecars 61s，累计 total≈117s），期间端口完全无监听（ECONNREFUSED）。
-  // 因此连接阶段按「总时间预算」重试，覆盖整个重启窗口，而不是固定试几次。
+  // 实测（2026-10-15）：本次重启总耗时约 4-5 分钟才 ready——端口在 database-readiness
+  // 之后还要经历微信 sidecar 同步（2 个 im-bot 长轮询 ilinkai.weixin.qq.com）才最终监听。
+  // 期间端口完全无监听（ECONNREFUSED），监听后 chat.startup 仍会挂起超时。
+  // 因此连接预算放到 300 秒，覆盖整个重启窗口，而不是固定试几次。
   let conn: Awaited<ReturnType<typeof connectGateway>> | null = null;
-  const connectBudgetMs = Number(process.env.OPENCLAW_CONNECT_BUDGET_MS ?? 150000);
+  const connectBudgetMs = Number(process.env.OPENCLAW_CONNECT_BUDGET_MS ?? 300000);
   const retryIntervalMs = 10000;
   const connectStart = Date.now();
   let connectErr: unknown;
@@ -1307,8 +1316,34 @@ export const openClawClient = {
     return { provider: session.modelProvider ?? "", model: session.model };
   },
 
-  /** 网关已配置的模型列表。 */
-  async listModels(): Promise<Array<{ id: string; name: string; provider: string; available: boolean }>> {
+  /**
+   * 网关已配置的模型列表。
+   * - 不传 userId：返回全局模型列表（所有已配置模型）。
+   * - 传 userId：按用户专属会话（agent:main:user-<id>）读取「该用户在龙虾中可选的模型」，
+   *   网关会套用该会话的模型投影 + 操作员模型策略（prepareOperatorModelPresentation），
+   *   即 OpenClaw 里该用户实际能切换的模型集合。
+   * 若按用户查询失败或返回空（如会话尚未初始化），降级回全局列表，保证选择器不空白。
+   */
+  async listModels(userId?: string): Promise<Array<{ id: string; name: string; provider: string; available: boolean }>> {
+    if (userId) {
+      try {
+        const scoped = await requestGateway<{
+          models?: Array<{ id?: string; name?: string; provider?: string; available?: boolean }>;
+        }>("models.list", { sessionKey: deriveUserSessionKey(userId) }, 20000);
+        const models = (scoped.models ?? [])
+          .filter((m) => Boolean(m?.id))
+          .map((m) => ({
+            id: String(m.id),
+            name: m.name || String(m.id),
+            provider: m.provider ?? "",
+            available: m.available !== false
+          }));
+        if (models.length > 0) return models;
+      } catch {
+        // 会话级 models.list 异常（如 scope 解析失败），降级为全局列表。
+      }
+      return listModels();
+    }
     const result = await requestGateway<{
       models?: Array<{ id?: string; name?: string; provider?: string; available?: boolean }>;
     }>("models.list", {}, 20000);
