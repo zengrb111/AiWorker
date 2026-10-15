@@ -174,7 +174,55 @@ function userSessionKeyOf(userId?: string | null): string {
   return process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
 }
 
-function buildTaskPrompt(contextText: string, content: string, kbText?: string, authText?: string, userId?: string): string {
+/** 该用户可用于定时任务微信通知的投递目标。 */
+type WechatDeliveryTarget = { to: string; accountId: string };
+
+/**
+ * 复刻 OpenClaw 的 normalizeAccountId：把 bot id（如 "fa3c1b27710c@im.bot"）
+ * 规范成网关投递用的账号 key（"fa3c1b27710c-im-bot"）。
+ */
+function normalizeWeixinAccountId(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(trimmed)) return trimmed.toLowerCase();
+  return (
+    trimmed
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+/, "")
+      .replace(/-+$/, "")
+      .slice(0, 64) || ""
+  );
+}
+
+/**
+ * 从用户的微信绑定记录推导「定时任务微信通知」的投递目标。
+ * OpenClaw 的 cron 投递需要成对的 (--to 好友 openid, --account 机器人账号)：
+ *   - to      = 绑定里的 wechatNo（形如 xxx@im.wechat，是收件人）
+ *   - account = 绑定里的 wechatOpenId（形如 xxx@im.bot，规范成 xxx-im-bot）
+ * 历史数据里 wechatOpenId 也可能存 userId（@im.wechat），那种情况无法可靠反推账号，
+ * 返回 null（宁可不投递，也不能投错人）。
+ */
+function resolveWechatDeliveryTarget(binding?: {
+  wechatOpenId?: string | null;
+  wechatNo?: string | null;
+} | null): WechatDeliveryTarget | null {
+  const to = (binding?.wechatNo || "").trim();
+  const rawAccount = (binding?.wechatOpenId || "").trim();
+  if (!to.endsWith("@im.wechat") || !rawAccount.endsWith("@im.bot")) return null;
+  const accountId = normalizeWeixinAccountId(rawAccount);
+  if (!accountId) return null;
+  return { to, accountId };
+}
+
+function buildTaskPrompt(
+  contextText: string,
+  content: string,
+  kbText?: string,
+  authText?: string,
+  userId?: string,
+  wechatDelivery?: WechatDeliveryTarget | null
+): string {
   // 图文/文案类请求：约定输出格式（# 一级标题开头），让自动入库判定稳定命中，
   // 也保证 generateArticleTitle 能提到干净的标题。
   const isArticleRequest = /(写一篇|写篇|写个?文案|写个?图文|生成一篇|生成篇|小红书(风格|文案|图文)|公众号(风格|文案|图文|文章)|文章正文|软文)/i.test(content);
@@ -187,6 +235,14 @@ function buildTaskPrompt(contextText: string, content: string, kbText?: string, 
     "【多用户隔离规则（最高优先级，必须遵守）】",
     `- 本平台多名用户共用同一个 AI 员工，你当前只为其中一位用户服务，其专属会话 key 是：${userSessionKey}。`,
     `- 该用户的一切定时任务（automation/cron）在创建、修改、查询、删除、立即执行时，必须且只能路由到该用户的会话：命令带 --session-key ${userSessionKey}，任务名（--name/--display-name）以「${userScopeTag}-」开头；禁止使用 main 或其他用户的会话。`,
+    ...(wechatDelivery
+      ? [
+          `- 该用户的微信通知投递目标（唯一可用，严禁改用其他用户的）：--announce --channel openclaw-weixin --to ${wechatDelivery.to} --account ${wechatDelivery.accountId}。`,
+          "- 创建/修改任何带微信通知的定时任务时，必须显式带上上面的 --to 与 --account；绝不要复用、猜测或沿用其他用户的 --to/--account（否则会把别人的通知发到这个微信号上）。"
+        ]
+      : [
+          "- 该用户尚未绑定微信：不要创建带微信通知（delivery/announce）的定时任务，也不要复用任何已有的微信投递目标。"
+        ]),
     "- 严禁引用、复述或推测其他用户的会话内容、定时任务、账号或数据；上下文里出现与当前用户无关的信息时，直接忽略。",
     "- 用户查询定时任务时，只汇报属于该用户的任务；发现遗留的共享会话任务，提醒用户联系管理员迁移，不要擅自改动其他用户的任务。"
   ].join("\n");
@@ -915,7 +971,21 @@ await prisma.message.create({
       : [];
     referenceProcess = buildReferenceProcessMarkdown(groups, platformLabel, authCtx.entries);
   }
-  const prompt = buildTaskPrompt(conversationContext, content, kbText, authCtx.promptBlock, user.id);
+  // 该用户绑定的微信通知目标：注入隔离规则，避免 AI 创建/修改定时任务时把通知投给别的用户。
+  const wechatBinding = await prisma.wechatBinding.findFirst({
+    where: { userId: user.id, status: "BOUND" },
+    orderBy: { boundAt: "desc" },
+    select: { wechatOpenId: true, wechatNo: true }
+  });
+  const wechatDelivery = resolveWechatDeliveryTarget(wechatBinding);
+  const prompt = buildTaskPrompt(
+    conversationContext,
+    content,
+    kbText,
+    authCtx.promptBlock,
+    user.id,
+    wechatDelivery
+  );
 
   const task = await prisma.openClawTask.create({
     data: {
