@@ -19,8 +19,9 @@ export async function POST(request: Request) {
 
   try {
     await openClawClient.switchModel(model, user.id);
-    // 回读一次，确认网关真的切过去了（切换是异步落盘的）
-    const current = await openClawClient.getCurrentModel();
+    // 回读一次，确认网关真的切过去了（切换是异步落盘的）。必须按 userId 读，
+    // 否则读到的是其他会话的模型。
+    const current = await openClawClient.getCurrentModel(user.id);
     return jsonOk({ current });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "切换模型失败。", 502);
