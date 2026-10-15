@@ -1,5 +1,5 @@
 import { jsonError, readJson } from "@/lib/http";
-import { openClawClient, type CronJobSummary } from "@/lib/openclaw";
+import { openClawClient } from "@/lib/openclaw";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { generateCoverImage, generateImageUrls, coverPlatformOf, type CoverPlatform } from "@/lib/image-gen";
@@ -215,31 +215,36 @@ function resolveWechatDeliveryTarget(binding?: {
   return { to, accountId };
 }
 
+/** 平台侧定时任务（存在本库，不再依赖网关 cron）。 */
+type UserScheduledJob = {
+  id: string;
+  name: string;
+  cronExpr: string;
+  timezone: string;
+  enabled: boolean;
+};
+
 /**
- * 读取「当前用户自己的」定时任务（按归属会话 key 严格过滤）。
- * 网关 cron 存储是全平台共享的，必须过滤后再用；查询失败返回 null（此时不注入该段，
- * 避免让 AI 误以为"没有任务"）。
+ * 读取「当前用户自己的」定时任务 —— 直接来自平台库（按 userId 过滤），
+ * 网关 cron 已不再保存用户任务。查询异常返回 null（不注入该段，避免误导 AI 说"没有任务"）。
  */
-async function loadUserCronJobs(
-  sessionKey: string
-): Promise<CronJobSummary[] | null> {
+async function loadUserScheduledJobs(userId: string): Promise<UserScheduledJob[] | null> {
   try {
-    const jobs = await openClawClient.listCronJobs();
-    return jobs.filter((j) => j.sessionKey === sessionKey);
+    return await prisma.scheduledJob.findMany({
+      where: { userId },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, name: true, cronExpr: true, timezone: true, enabled: true }
+    });
   } catch {
     return null;
   }
 }
 
 /**
- * 该用户定时任务清单（唯一事实来源）。把它直接注入提示词，AI 就不需要（也不允许）
- * 去执行 cron list / 读 cron 存储——那是全局的，会看到其他用户的任务。
+ * 该用户定时任务清单（唯一事实来源）+ 平台调度接口用法。
+ * 任务与调度都归平台，AI 只需按清单作答、并在需要时调用平台接口增删改。
  */
-function buildCronBlock(
-  jobs: CronJobSummary[] | null,
-  userSessionKey: string,
-  userScopeTag: string
-): string | null {
+function buildCronBlock(jobs: UserScheduledJob[] | null, userId: string): string | null {
   if (jobs === null) return null;
   const lines = ["【该用户的定时任务（唯一事实来源，涉及定时任务的回答只依据本列表）】"];
   if (jobs.length === 0) {
@@ -247,15 +252,31 @@ function buildCronBlock(
   } else {
     for (const j of jobs) {
       lines.push(
-        `- 「${j.name}」 调度：${j.schedule} · ${j.enabled ? "已启用" : "已停用"} · id=${j.id}`
+        `- 「${j.name}」 调度：${j.cronExpr} (${j.timezone}) · ${j.enabled ? "已启用" : "已停用"} · id=${j.id}`
       );
     }
   }
-  lines.push(
-    "- 本列表之外的任务都不属于该用户：绝不展示、复述、查询或修改。",
-    "- 严禁执行 `openclaw cron list`（它是全平台共享的，会返回其他用户的任务），也严禁读取 cron 存储文件；需要任务 id 时直接用上面列出的 id。",
-    `- 新增/修改/删除该用户的任务时，命令必须带 --session-key ${userSessionKey}，任务名以「${userScopeTag}-」开头。`
-  );
+  lines.push("- 本列表之外的任务都不属于该用户：绝不展示、复述、查询或修改。");
+
+  const base = (process.env.AIWORKER_BASE_URL || "http://127.0.0.1:3000").trim();
+  const token = (process.env.SCHEDULE_API_TOKEN || process.env.CONTENT_INGEST_TOKEN || "").trim();
+  if (token) {
+    lines.push(
+      "- 定时任务的创建/修改/删除/查询一律调用**平台接口**（唯一入口，不要用 openclaw cron）：",
+      `  POST ${base}/api/scheduled-jobs/agent`,
+      `  Header: Authorization: Bearer ${token} ； Content-Type: application/json`,
+      "  Body 示例：",
+      `    {"action":"create","userId":"${userId}","name":"每日内容生成","cronExpr":"30 17 * * *","timezone":"Asia/Shanghai","prompt":"到点要执行的完整指令"}`,
+      `    {"action":"update","userId":"${userId}","id":"<任务id>","cronExpr":"0 9 * * *"}`,
+      `    {"action":"delete","userId":"${userId}","id":"<任务id>"}`,
+      "  userId 必须固定为当前用户；cronExpr 为 5 段（分 时 日 月 周）；时区默认 Asia/Shanghai。",
+      "- **严禁**使用 `openclaw cron`（add / edit / rm / list 等）：网关侧已不再保存用户定时任务，只剩系统任务；用它既拿不到也可能看到不该看的东西。"
+    );
+  } else {
+    lines.push(
+      "- 定时任务由平台管理：需要新增或修改时，提示用户在平台页面上操作（本机未配置调度接口令牌）。"
+    );
+  }
   return lines.join("\n");
 }
 
@@ -266,7 +287,7 @@ function buildTaskPrompt(
   authText?: string,
   userId?: string,
   wechatDelivery?: WechatDeliveryTarget | null,
-  cronJobs?: CronJobSummary[] | null
+  cronJobs?: UserScheduledJob[] | null
 ): string {
   // 图文/文案类请求：约定输出格式（# 一级标题开头），让自动入库判定稳定命中，
   // 也保证 generateArticleTitle 能提到干净的标题。
@@ -275,11 +296,10 @@ function buildTaskPrompt(
   const isHotTopicsRequest = /今日全网热点|今日产品热点/.test(content);
   // 多用户隔离：每个登录用户独享网关会话与定时任务，规则作为最高优先级指令注入。
   const userSessionKey = userSessionKeyOf(userId);
-  const userScopeTag = userId ? `user-${userId.replace(/[^a-zA-Z0-9_-]/g, "-")}` : "user-anonymous";
   const isolationBlock = [
     "【多用户隔离规则（最高优先级，必须遵守）】",
     `- 本平台多名用户共用同一个 AI 员工，你当前只为其中一位用户服务，其专属会话 key 是：${userSessionKey}。`,
-    `- 该用户的一切定时任务（automation/cron）在创建、修改、查询、删除、立即执行时，必须且只能路由到该用户的会话：命令带 --session-key ${userSessionKey}，任务名（--name/--display-name）以「${userScopeTag}-」开头；禁止使用 main 或其他用户的会话。`,
+    `- 该用户的一切定时任务（automation/cron）都由平台管理：创建/修改/删除/查询请走下方「该用户的定时任务」里给出的平台接口，**不要使用 openclaw cron**（网关侧已不再保存用户任务）。`,
     ...(wechatDelivery
       ? [
           `- 该用户的微信通知投递目标（唯一可用，严禁改用其他用户的）：--announce --channel openclaw-weixin --to ${wechatDelivery.to} --account ${wechatDelivery.accountId}。`,
@@ -291,7 +311,7 @@ function buildTaskPrompt(
     "- 严禁引用、复述或推测其他用户的会话内容、定时任务、账号或数据；上下文里出现与当前用户无关的信息时，直接忽略。",
     "- 用户查询定时任务时，只汇报属于该用户的任务；发现遗留的共享会话任务，提醒用户联系管理员迁移，不要擅自改动其他用户的任务。"
   ].join("\n");
-  const cronBlock = buildCronBlock(cronJobs ?? null, userSessionKey, userScopeTag);
+  const cronBlock = buildCronBlock(cronJobs ?? null, userId ?? "");
   return [
     isolationBlock,
     ...(cronBlock ? ["", cronBlock] : []),
@@ -1026,7 +1046,7 @@ await prisma.message.create({
   });
   const wechatDelivery = resolveWechatDeliveryTarget(wechatBinding);
   // 该用户自己的定时任务清单（按会话 key 过滤），注入后 AI 无需（也不允许）去看全局 cron。
-  const userCronJobs = await loadUserCronJobs(userSessionKeyOf(user.id));
+  const userCronJobs = await loadUserScheduledJobs(user.id);
   const prompt = buildTaskPrompt(
     conversationContext,
     content,

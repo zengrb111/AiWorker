@@ -3,7 +3,9 @@ const nextConfig = {
   experimental: {
     // pdf-parse 依赖的 pdfjs-dist 是 ESM 包，不能进 webpack 服务端打包，必须在运行时原生 require
     // @napi-rs/canvas 是原生 .node 模块（封面绘制用），同样不能进打包
-    serverComponentsExternalPackages: ["pdf-parse", "pdfjs-dist", "@napi-rs/canvas"]
+    serverComponentsExternalPackages: ["pdf-parse", "pdfjs-dist", "@napi-rs/canvas"],
+    // 启用 instrumentation.ts：服务启动时拉起平台侧定时任务调度器（只做本机 fetch，不引入重模块）
+    instrumentationHook: true
   },
   images: {
     remotePatterns: [

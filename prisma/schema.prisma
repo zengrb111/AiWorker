@@ -22,6 +22,35 @@ model User {
   platformAccounts       PlatformAccount[]
   platformSiteMetrics    PlatformSiteMetric[]
   platformContentMetrics PlatformContentMetric[]
+  scheduledJobs          ScheduledJob[]
+}
+
+/// 平台自持的定时任务（替代网关上跨用户共享的 cron）。
+/// 到点由 AiWorker 调度器在该用户的专属会话里执行 prompt，网关不再保存用户任务数据。
+model ScheduledJob {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  enabled    Boolean   @default(true)
+  /// 标准 5 段 cron：分 时 日 月 周（支持通配、单值、逗号列表、区间、步进 /n）
+  cronExpr   String
+  timezone   String    @default("Asia/Shanghai")
+  /// 到点在「该用户专属会话」里执行的指令（原网关任务 payload.message）
+  prompt     String
+  /// 迁移溯源：原网关任务 id（可空）
+  gatewayJobId String? @unique
+  lastRunAt  DateTime?
+  /// SUCCEEDED | FAILED | RUNNING
+  lastStatus String?
+  lastError  String?
+  lastResult String?
+  runCount   Int       @default(0)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([enabled])
 }
 
 model WechatBinding {
