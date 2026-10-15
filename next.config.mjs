@@ -12,6 +12,25 @@ const nextConfig = {
         hostname: "images.unsplash.com"
       }
     ]
+  },
+  webpack: (config, { isServer }) => {
+    // 修复 @napi-rs/canvas（原生 .node 二进制）被 webpack 错误打包导致的
+    // "Module parse failed: Unexpected character '�' (1:2)" 构建错误。
+    // 服务端直接 external 给 Node 运行时 require；客户端不应引用，兜底映射到空模块。
+    if (isServer) {
+      config.externals.push(({ request }, callback) => {
+        if (/^@napi-rs\/canvas/.test(request) || /\.node$/.test(request)) {
+          return callback(null, `commonjs ${request}`);
+        }
+        callback();
+      });
+    } else {
+      config.resolve.alias = {
+        ...config.resolve.alias,
+        "@napi-rs/canvas": false
+      };
+    }
+    return config;
   }
 };
 

@@ -1342,7 +1342,7 @@ export const openClawClient = {
       } catch {
         // 会话级 models.list 异常（如 scope 解析失败），降级为全局列表。
       }
-      return listModels();
+      return openClawClient.listModels();
     }
     const result = await requestGateway<{
       models?: Array<{ id?: string; name?: string; provider?: string; available?: boolean }>;
