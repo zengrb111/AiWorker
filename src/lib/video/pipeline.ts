@@ -111,8 +111,14 @@ export type PipelineInput = {
    * 后台批量出片历史上用的是 content-video-，那条链路要显式传进来保持落库路径不变。
    */
   outputPrefix?: string;
-  /** 归属用户。旧引擎据此派生隔离会话（多用户共用默认会话会串上下文）。 */
-  userId?: string;
+  /**
+   * 归属用户（**必填**）。
+   *
+   * 识图、配音、分镜规划都用它去取该用户在「系统配置 → 模型配置」里的模型服务，
+   * 漏传会让这三项各自静默降级（识图退轮播、配音退本机 TTS、分镜退固定节奏），
+   * 而且不报错、只在进度里留一句提示，极难排查 —— 所以在类型上强制。
+   */
+  userId: string;
   /**
    * 替换「分镜 + 渲染」这一步（VIDEO_RENDER_ENGINE=openclaw 时由旧路径提供）。
    *
@@ -270,12 +276,12 @@ export async function runVideoPipeline(input: PipelineInput): Promise<PipelineRe
     let autoThemeKey: string | null = null;
     const wantVision = input.mode === "generate" && materials.some((m) => m.kind === "image");
     if (wantVision) {
-      const status = visionStatus();
-      if (status.ok) {
+      const status = await visionStatus({ userId: input.userId });
+      if (status.ok && input.userId) {
         notify("正在识别素材图片内容…");
         try {
           const imagePaths = materials.filter((m) => m.kind === "image").map((m) => m.absolutePath);
-          const found = await insightImages(imagePaths);
+          const found = await insightImages(imagePaths, { userId: input.userId });
           // 只保留图片类结果，且与 materials 的下标对齐
           const imageIndexes = materials
             .map((m, i) => (m.kind === "image" ? i : -1))
@@ -323,7 +329,7 @@ export async function runVideoPipeline(input: PipelineInput): Promise<PipelineRe
           record("素材识图", false, `识别异常，已忽略：${(error as Error).message}`);
         }
       } else {
-        record("素材识图", false, `识图不可用（${status.reason}），按原顺序轮播`);
+        record("素材识图", false, `识图不可用（${!status.ok ? status.reason : "缺少登录用户"}），按原顺序轮播`);
       }
     }
 
@@ -348,7 +354,9 @@ export async function runVideoPipeline(input: PipelineInput): Promise<PipelineRe
     if (needVoice) {
       notify(`正在用${TTS_ENGINE_LABELS[ttsProvider]}合成配音…`);
       try {
-        const tts = await synthesizeNarration(narrationText, workDir, undefined, ttsProvider);
+        const tts = await synthesizeNarration(narrationText, workDir, undefined, ttsProvider, {
+          userId: input.userId
+        });
         audio = { audioPath: tts.audioPath, durationSeconds: tts.durationSeconds, captions: tts.captions };
         diagnostics.narrationSeconds = tts.durationSeconds;
         if (tts.engine && tts.engine !== ttsProvider) {
@@ -383,7 +391,7 @@ export async function runVideoPipeline(input: PipelineInput): Promise<PipelineRe
     let plan: StoryboardPlanResult | null = null;
     let beats: TimelineBeat[] = [];
     if (!input.renderOverride) {
-      const dsh = await getDshStatus();
+      const dsh = await getDshStatus(input.userId);
       diagnostics.dshAvailable = dsh.ok;
       if (!dsh.ok) diagnostics.dshReason = dsh.reason;
 
@@ -617,7 +625,7 @@ async function planStoryboardFor(
 ): Promise<StoryboardPlanResult> {
   const run = async (prompt: string): Promise<string | null> => {
     if (!dshAvailable) return null;
-    return runDshText({ prompt, sessionId: `storyboard-${input.token}` });
+    return runDshText({ userId: input.userId, prompt, sessionId: `storyboard-${input.token}` });
   };
 
   if (input.mode === "generate") {

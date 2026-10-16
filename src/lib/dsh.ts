@@ -14,6 +14,14 @@ import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { resolveDshPython } from "./python";
 import { readPositiveNumberEnv, readStringEnv } from "./env";
+import { resolveCapabilityConfig, type ResolvedModelConfig } from "./model-credentials";
+
+/**
+ * 分镜规划的模型配置归属用户：能力 = storyboard。
+ * DSH 是 spawn 出来的子进程（无法注入 HTTP 头），所以用「独立 DSH_HOME + env 注入密钥」
+ * 的方式做隔离：不同用户的 profile / cache / workspace 互不串号。
+ */
+const DSH_CAPABILITY = "storyboard" as const;
 
 /** 分镜是纯文本任务，180s 足够；与渲染的 900s 是两码事，不要混用。 */
 const DEFAULT_TIMEOUT_MS = 180_000;
@@ -23,17 +31,22 @@ const STARTUP_GRACE_MS = 30_000;
 
 export type DshStatus = { ok: true; python: string; model: string } | { ok: false; reason: string };
 
-/** DSH 可用性缓存：探测一次即可，缺 key 属于部署配置问题，不会自己变好。 */
-let availability: DshStatus | null = null;
+/** DSH 可用性缓存：**按用户**缓存，避免每个用户重复探测，也避免 A 用户的结论污染 B 用户。 */
+const availability = new Map<string, DshStatus>();
 
 /**
  * DSH_HOME 目录。允许在 .env.local 里写相对路径（如 `.dsh-home`），
  * 这里统一按项目根解析 —— 子进程的 cwd 可能与 Next 进程不同，
  * 直接 mkdir 一个相对路径会散落到别处。
+ *
+ * 按 userId 派生二级目录：DSH 会在 HOME 下写 profile / cache / session，
+ * 共用同一个目录会让多用户的分镜上下文与缓存串号。
  */
-function dshHomeDir(): string {
+function dshHomeDir(userId?: string): string {
   const configured = readStringEnv("DSH_HOME");
-  return configured ? resolve(process.cwd(), configured) : join(process.cwd(), ".dsh-home");
+  const root = configured ? resolve(process.cwd(), configured) : join(process.cwd(), ".dsh-home");
+  const safeUser = (userId ?? "").trim().replace(/[^A-Za-z0-9_-]/g, "-");
+  return safeUser ? join(root, safeUser) : root;
 }
 
 function bridgeDir(): string {
@@ -56,35 +69,50 @@ function readEnv(name: string): string {
   return readStringEnv(name);
 }
 
-/**
- * DSH 是否可用（缺 key / 找不到合格 Python 时给出可读原因）。
- * 结果会缓存，避免每次出片都重复探测。
- */
-export async function getDshStatus(): Promise<DshStatus> {
-  if (availability) return availability;
+/** 取该用户为「分镜规划」配置的模型服务；未配置返回 null。 */
+async function resolveStoryboardCredential(
+  userId?: string
+): Promise<ResolvedModelConfig | null> {
+  if (!userId) return null;
+  return resolveCapabilityConfig(userId, DSH_CAPABILITY).catch(() => null);
+}
 
-  if (!readEnv("DEEPSEEK_API_KEY")) {
-    availability = {
+/**
+ * DSH 是否可用（缺配置 / 找不到合格 Python 时给出可读原因）。
+ * 结果按用户缓存，避免每次出片都重复探测。
+ */
+export async function getDshStatus(userId?: string): Promise<DshStatus> {
+  const cacheKey = userId ?? "";
+  const cached = availability.get(cacheKey);
+  if (cached) return cached;
+
+  const credential = await resolveStoryboardCredential(userId);
+  if (!credential?.apiKey) {
+    const status: DshStatus = {
       ok: false,
-      reason:
-        "未配置 DEEPSEEK_API_KEY，分镜规划将使用确定性兜底分镜。请在 .env.local 中设置后重启。",
+      reason: userId
+        ? "尚未配置「分镜规划」模型服务，分镜将使用确定性兜底分镜。请在「系统配置」中指定并填写 API Key。"
+        : "缺少登录用户，无法确定分镜规划使用的模型服务。",
     };
-    return availability;
+    availability.set(cacheKey, status);
+    return status;
   }
 
   try {
     const python = await resolveDshPython();
-    availability = { ok: true, python, model: readEnv("DSH_MODEL") || "(SDK 默认)" };
-    return availability;
+    const status: DshStatus = { ok: true, python, model: credential.model || readEnv("DSH_MODEL") || "(SDK 默认)" };
+    availability.set(cacheKey, status);
+    return status;
   } catch (err) {
-    availability = { ok: false, reason: (err as Error).message };
-    return availability;
+    const status: DshStatus = { ok: false, reason: (err as Error).message };
+    availability.set(cacheKey, status);
+    return status;
   }
 }
 
-/** 复位可用性缓存（改了环境变量后可调用，主要给测试用）。 */
+/** 复位可用性缓存（改了配置后可调用，主要给测试用）。 */
 export function resetDshStatusCache(): void {
-  availability = null;
+  availability.clear();
 }
 
 /**
@@ -129,6 +157,8 @@ function sanitizeSessionId(raw: string): string {
 
 export type DshRunOptions = {
   prompt: string;
+  /** 归属用户：决定用哪份密钥与哪个 DSH_HOME。 */
+  userId?: string;
   /**
    * session id 前缀，便于在 DSH 侧按任务排查。
    * 实际会追加随机后缀 —— DSH 的 session 是有状态的，重复 id 会报
@@ -138,7 +168,7 @@ export type DshRunOptions = {
   sessionId?: string | null;
   /** 覆盖默认超时（毫秒）。 */
   timeoutMs?: number;
-  /** 隔离工作目录；不给则用系统临时目录下的固定子目录。 */
+  /** 隔离工作目录；不给则用该用户 DSH_HOME 下的固定子目录。 */
   workspaceDir?: string;
 };
 
@@ -149,10 +179,15 @@ export type DshRunOptions = {
  * （storyboard.planStoryboard）会转成兜底分镜，不会让出片失败。
  */
 export async function runDshText(options: DshRunOptions): Promise<string> {
-  const status = await getDshStatus();
+  const status = await getDshStatus(options.userId);
   if (!status.ok) throw new Error(status.reason);
 
-  const dshHome = dshHomeDir();
+  const credential = await resolveStoryboardCredential(options.userId);
+  if (!credential?.apiKey) {
+    throw new Error("尚未配置「分镜规划」模型服务，请在「系统配置」中指定并填写 API Key。");
+  }
+
+  const dshHome = dshHomeDir(options.userId);
   const workspaceDir = options.workspaceDir || join(dshHome, "workspace", "storyboard");
   const timeoutMs = options.timeoutMs ?? readPositiveNumberEnv("DSH_STORYBOARD_TIMEOUT_MS", DEFAULT_TIMEOUT_MS);
 
@@ -174,12 +209,12 @@ export async function runDshText(options: DshRunOptions): Promise<string> {
     // 受限 profile：SDK 只接受 --profile + --patch 两种覆盖方式，
     // patch 是幂等的，不依赖 $DSH_HOME 里的残留状态
     patch: profilePatchPath(),
-    model: readEnv("DSH_MODEL") || null,
+    model: credential.model || readEnv("DSH_MODEL") || null,
     timeout_ms: timeoutMs,
   };
 
   // stdin 直接管道传参，不落临时文件：避免并发调用互相覆盖，也不用清理
-  const stdout = await runBridge(status.python, request, timeoutMs + STARTUP_GRACE_MS, dshHome);
+  const stdout = await runBridge(status.python, request, timeoutMs + STARTUP_GRACE_MS, dshHome, credential);
 
   let parsed: { ok?: boolean; final_response?: string; error?: string };
   try {
@@ -202,6 +237,7 @@ function runBridge(
   request: unknown,
   timeoutMs: number,
   dshHome: string,
+  credential: ResolvedModelConfig
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const child = spawn(python, [join(bridgeDir(), "main.py")], {
@@ -210,8 +246,9 @@ function runBridge(
       shell: false,
       env: {
         ...process.env,
-        DEEPSEEK_API_KEY: readEnv("DEEPSEEK_API_KEY"),
-        DEEPSEEK_BASE_URL: readEnv("DEEPSEEK_BASE_URL") || undefined,
+        // 密钥来自该用户自己的「分镜规划」配置；baseUrl 缺省才回落到部署级 env。
+        DEEPSEEK_API_KEY: credential.apiKey,
+        DEEPSEEK_BASE_URL: credential.baseUrl || readEnv("DEEPSEEK_BASE_URL") || undefined,
         DSH_HOME: dshHome,
         NO_COLOR: "1",
         // CodeBuddy 的 safe-delete shim 会通过 NODE_OPTIONS 注入，
@@ -273,7 +310,6 @@ export async function selfCheck(): Promise<{ ok: boolean; detail: string }> {
   const dshHome = dshHomeDir();
   mkdirSync(dshHome, { recursive: true });
   ensureProfile(dshHome);
-
   const marker = join(dshHome, "profile-installed.json");
   writeFileSync(
     marker,

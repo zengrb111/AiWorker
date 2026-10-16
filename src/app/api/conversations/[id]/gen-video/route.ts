@@ -22,7 +22,24 @@ function sseEncode(data: unknown): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
 }
 
+/**
+ * 生成视频时用于回显「本次输入」的素材：参考图与创作要求。
+ *
+ * 为什么放进消息正文而不是新增字段：Message.content 本身就是 Markdown，
+ * 而 renderMarkdown（src/lib/markdown.ts:29-40）已支持整行 `![alt](url)` 图片，
+ * 且只放行以 `/` 或 http(s) 开头的同源/外链 URL。所以把参考图按
+ * `/uploads/gen-video-refs/{token}/ref-N.ext` 写成 Markdown 图片即可直接显示，
+ * 前端零改动；同时这份内容天然随消息落库，刷新页面后依然在。
+ */
+type VideoInputContext = {
+  /** 参考图的可访问 URL（不是落盘绝对路径——那个只有服务端能读）。 */
+  referenceImages: string[];
+  /** 用户填写的创作要求/提示词，可空。 */
+  requirement: string;
+};
+
 function formatProgressMessage(
+  input: VideoInputContext,
   progress: string[],
   videoUrl?: string,
   error?: string,
@@ -30,6 +47,16 @@ function formatProgressMessage(
   title?: string
 ): string {
   const lines = ["## 一键生成视频", "", ...progress.map((item) => `- ${item}`)];
+  // 输入回显：放在进度之后、标题之前。这个函数每次从头重建整段，
+  // 所以 progress 持续增长也不会打乱各区块的相对顺序。
+  if (input.referenceImages.length) {
+    lines.push("", "### 参考图", "");
+    input.referenceImages.forEach((url, i) => lines.push(`![参考图 ${i + 1}](${url})`));
+  }
+  if (input.requirement) {
+    // 走引用块：保留原样换行，且 renderMarkdown 会对文本做 HTML 转义。
+    lines.push("", "### 创作要求", "", ...input.requirement.split(/\r?\n/).map((l) => `> ${l}`));
+  }
   if (title) lines.push("", "## 视频标题", `> ${title}`);
   if (narration) lines.push("", "## 旁白文案", `> ${narration}`);
   if (videoUrl) lines.push("", "## 视频生成完成", `视频成片：${videoUrl}`);
@@ -62,6 +89,9 @@ export async function POST(request: Request, context: { params: { id: string } }
   await mkdir(uploadsRoot, { recursive: true });
 
   const savedImagePaths: string[] = [];
+  // 参考图的对外可访问 URL。落盘路径是本机绝对路径，只有服务端能读；
+  // 前端要回显必须用 /uploads/... 形式。两者在同一次循环里 push，索引天然对齐。
+  const referenceImageUrls: string[] = [];
   for (let i = 0; i < imageFiles.length; i++) {
     const file = imageFiles[i];
     const extension = extname(file.name).toLowerCase();
@@ -70,8 +100,12 @@ export async function POST(request: Request, context: { params: { id: string } }
     const target = join(uploadsRoot, `ref-${i}${extension}`);
     await writeFile(target, Buffer.from(await file.arrayBuffer()));
     savedImagePaths.push(target);
+    referenceImageUrls.push(`/uploads/gen-video-refs/${token}/ref-${i}${extension}`);
   }
   if (!savedImagePaths.length) return jsonError("参考图格式不支持，请上传 JPG / PNG / WebP。");
+
+  // 本次输入的回显上下文，全程传给 formatProgressMessage（占位 / 进度 / 完成 / 失败四处共用）。
+  const inputContext: VideoInputContext = { referenceImages: referenceImageUrls, requirement };
 
   const engine = resolveRenderEngine();
   const task = await prisma.openClawTask.create({
@@ -79,7 +113,7 @@ export async function POST(request: Request, context: { params: { id: string } }
   });
   const progress = ["已接收参考图，正在准备 Remotion 视频创作任务…"];
   const progressMessage = await prisma.message.create({
-    data: { conversationId: conversation.id, role: "ASSISTANT", content: formatProgressMessage(progress) },
+    data: { conversationId: conversation.id, role: "ASSISTANT", content: formatProgressMessage(inputContext, progress) },
   });
   let progressWrite = Promise.resolve();
   const stream = new ReadableStream({
@@ -94,7 +128,7 @@ export async function POST(request: Request, context: { params: { id: string } }
         progress.push(text);
         progressWrite = progressWrite.then(() =>
           prisma.message
-            .update({ where: { id: progressMessage.id }, data: { content: formatProgressMessage(progress) } })
+            .update({ where: { id: progressMessage.id }, data: { content: formatProgressMessage(inputContext, progress) } })
             .then(() => undefined)
         );
         controller.enqueue(sseEncode({ type: "delta", text: `${text}\n` }));
@@ -112,6 +146,8 @@ export async function POST(request: Request, context: { params: { id: string } }
           ttsProvider,
           theme,
           bgmPath: pickBgm(),
+          // 归属用户：配音 / 分镜 / 识图都按该用户「系统配置」里的模型服务来调用
+          userId: user.id,
           renderOverride: engine === "openclaw" ? renderViaOpenClaw : undefined,
           onProgress: sendProgress,
         });
@@ -128,7 +164,7 @@ export async function POST(request: Request, context: { params: { id: string } }
         const finalMessage = await prisma.message.update({
           where: { id: progressMessage.id },
           data: {
-            content: formatProgressMessage(progress, finalUrl ?? undefined, undefined, narrationText || undefined, videoTitle || undefined),
+            content: formatProgressMessage(inputContext, progress, finalUrl ?? undefined, undefined, narrationText || undefined, videoTitle || undefined),
           },
         });
         let saved: { id: string; title: string; category: string; videoUrl: string; coverImageUrl?: string } | undefined;
@@ -141,6 +177,10 @@ export async function POST(request: Request, context: { params: { id: string } }
               category: "视频",
               videoUrl: finalUrl,
               coverImageUrl: coverUrl,
+              // 参考图一并入库：内容库的「主图」区按 inlineImagesJson 平铺展示
+              // （platform-client.tsx 的 parseInlineImages 已通用），
+              // 这样出片后仍能回看「这条视频是用哪几张图做出来的」。
+              inlineImagesJson: JSON.stringify(referenceImageUrls),
               sourceConversationId: conversation.id,
             },
           });
@@ -187,7 +227,7 @@ export async function POST(request: Request, context: { params: { id: string } }
         await prisma.message
           .update({
             where: { id: progressMessage.id },
-            data: { content: formatProgressMessage(progress, undefined, message) },
+            data: { content: formatProgressMessage(inputContext, progress, undefined, message) },
           })
           .catch(() => undefined);
         await prisma.openClawTask.update({ where: { id: task.id }, data: { status: "FAILED", error: message } });

@@ -1,12 +1,10 @@
 import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
-import {
-  classifyGatewayError,
-  friendlyGatewayError,
-  openClawClient,
-  type GatewayFailureKind,
-} from "@/lib/openclaw";
+import { chatComplete, UpstreamModelError } from "@/lib/llm-client";
+import { searchWeb, isBuiltinHotBoard } from "@/lib/web-search";
+import { searchImages, refererFor } from "@/lib/image-search";
+import { ModelConfigError, snapshotUserConfig } from "@/lib/model-credentials";
 import { getDshStatus, runDshText } from "@/lib/dsh";
 import { loadUserKbContext, retrieveReferenceChunks } from "@/lib/kb-hot-topics";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -46,10 +44,16 @@ const MIME_TO_EXT: Record<string, string> = {
   "image/avif": "avif",
 };
 
-/** 从 agent 的自由文本里提取 { requirement, imageUrls }，多级容错。 */
-function parsePrepared(text: string): { requirement: string; imageUrls: string[] } {
+/**
+ * 从模型输出里提取 { requirement, imageKeywords }，多级容错。
+ *
+ * 配图不再由模型给 URL —— 它能看到的素材链接全是榜单页（不是图片），
+ * 让它"挑 URL"只会挑出一堆下载失败的页面地址。改为让它出检索词，
+ * 图片直链由 image-search 去图库取。
+ */
+function parsePrepared(text: string): { requirement: string; imageKeywords: string[] } {
   const raw = (text ?? "").trim();
-  if (!raw) return { requirement: "", imageUrls: [] };
+  if (!raw) return { requirement: "", imageKeywords: [] };
   const unfenced = raw.replace(/```json\s*([\s\S]*?)```/i, "$1").replace(/```/g, "").trim();
   const candidates: string[] = [unfenced];
   const brace = unfenced.match(/\{[\s\S]*\}/);
@@ -57,18 +61,29 @@ function parsePrepared(text: string): { requirement: string; imageUrls: string[]
 
   for (const candidate of candidates) {
     try {
-      const obj = JSON.parse(candidate) as { requirement?: unknown; imageUrls?: unknown; images?: unknown };
+      const obj = JSON.parse(candidate) as {
+        requirement?: unknown;
+        imageKeywords?: unknown;
+        keywords?: unknown;
+        // 兼容老格式：模型仍可能输出 imageUrls，届时当作关键词来源之一
+        imageUrls?: unknown;
+      };
       const requirement = typeof obj.requirement === "string" ? obj.requirement.trim() : "";
-      const list = Array.isArray(obj.imageUrls) ? obj.imageUrls : Array.isArray(obj.images) ? obj.images : [];
-      const imageUrls = (list as unknown[])
-        .map((item) => (typeof item === "string" ? item.trim() : typeof item === "object" && item && typeof (item as { url?: unknown }).url === "string" ? (item as { url: string }).url.trim() : ""))
-        .filter((u) => /^https?:\/\//i.test(u));
-      if (requirement) return { requirement, imageUrls };
+      const rawList = Array.isArray(obj.imageKeywords)
+        ? obj.imageKeywords
+        : Array.isArray(obj.keywords)
+          ? obj.keywords
+          : [];
+      const imageKeywords = (rawList as unknown[])
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter((item) => item.length >= 2 && item.length <= 40)
+        .slice(0, 6);
+      if (requirement) return { requirement, imageKeywords };
     } catch {
       // 尝试下一个候选片段
     }
   }
-  return { requirement: "", imageUrls: [] };
+  return { requirement: "", imageKeywords: [] };
 }
 
 /**
@@ -124,11 +139,16 @@ async function downloadPreparedImage(
   imageUrl: string,
   dirAbs: string,
   webPrefix: string,
-  index: number
+  index: number,
+  referer?: string
 ): Promise<{ url: string; name: string } | null> {
   try {
     const resp = await fetch(imageUrl, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; ChuangxingyunAIWorker/1.0)" },
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; ChuangxingyunAIWorker/1.0)",
+        // 第三方新闻图/图库普遍有防盗链，回源 Referer 能显著提高成功率
+        ...(referer ? { Referer: referer } : {})
+      },
       signal: AbortSignal.timeout(IMAGE_FETCH_TIMEOUT_MS),
     });
     if (!resp.ok) return null;
@@ -180,21 +200,21 @@ export async function POST(request: Request, context: { params: { id: string } }
   }
 
   const prompt = [
-    "你是一名短视频编导。请围绕下面这个热点主题，联网检索该主题的最新资讯，并结合给定的产品知识，产出一条竖版短视频的创作方案。",
+    "你是一名短视频编导。请围绕下面这个热点主题，结合给定的真实资讯素材与产品知识，产出一条竖版短视频的创作方案。",
     "",
     `【热点主题】${topic}`,
     kbText ? `\n【可参考的产品知识】\n${kbText}` : "",
     "",
     "请完成两件事：",
     "1) 整理创作要求：写明主题切入角度、旁白文案方向、分镜与节奏、画面与风格、时长建议、结尾引导，具体可执行。",
-    "2) 挑选与该主题高度相关的真实新闻配图（http/https 直链），用作视频参考图。",
-    "   - 数量：尽量给出 10~14 张，宁多勿少（部分链接可能失效，系统会自动过滤）。",
-    "   - 来源：尽量覆盖多个不同的新闻站点/媒体，不要全部来自同一家。",
-    "   - 内容：优先选正文内容图（现场照片、示意图、数据图），避免站点 logo、二维码、广告位、小图标。",
+    "2) 给出 3~6 个配图检索词（imageKeywords），用于系统去图库检索真实新闻配图。",
+    "   - 每个检索词是可独立检索到新闻现场照片的**具体名词短语**，例如「深圳 禁鸣喇叭 新规」「火箭队 雷霆 季后赛」。",
+    "   - 不要输出网址、不要输出图片链接：素材里的链接都是榜单页面，不能直接当图片用。",
+    "   - 从不同角度拆分（事件主体、现场画面、相关行业、数据图表等），避免全部围绕同一个词。",
     "",
     "只输出一个 JSON 代码块，不要任何其它说明文字：",
     "```json",
-    '{"requirement":"（创作要求全文）","imageUrls":["https://...1.jpg","https://...2.jpg"]}',
+    '{"requirement":"（创作要求全文）","imageKeywords":["检索词1","检索词2","检索词3"]}',
     "```",
   ]
     .filter(Boolean)
@@ -202,48 +222,73 @@ export async function POST(request: Request, context: { params: { id: string } }
 
   let agentText = "";
   let taskError: string | null = null;
-  let gatewayKind: GatewayFailureKind | null = null;
+  let failureKind: string | null = null;
+  let usedBuiltinBoards = false;
+  // 快照一次配置：搜索与对话用同一份用户配置。
+  const snapshot = await snapshotUserConfig(user.id);
   try {
-    const result = await openClawClient.sendTaskStream({ message: prompt, prompt, userId: user.id }, () => {}, PREPARE_TIMEOUT_MS);
+    // 第一步：真实联网搜索（失败不编造，直接走下面的 DSH 降级整理创作要求）。
+    const hits = await searchWeb({ userId: user.id, query: topic, topK: 12, config: snapshot.search });
+    usedBuiltinBoards = isBuiltinHotBoard(hits);
+    const material = hits
+      .map((hit, index) => `${index + 1}. ${hit.title}\n   链接：${hit.url}\n   摘要：${hit.snippet}`)
+      .join("\n");
+    const fullPrompt = [
+      `【资讯素材】\n${material}`,
+      "",
+      prompt
+    ].join("\n");
+
+    // 第二步：交给用户配置的对话模型整理创作要求并挑选配图。
+    const result = await chatComplete({
+      userId: user.id,
+      capability: "chat",
+      config: snapshot.chat ?? undefined,
+      prompt: fullPrompt,
+      timeoutMs: PREPARE_TIMEOUT_MS
+    });
     agentText = result.content ?? "";
   } catch (error) {
     // 存原始 message 与分类 kind：分类用于降级判断与日志，
     // 原始 message 供下面的 DSH 降级路径展示「为什么降级」。
     taskError = error instanceof Error ? error.message : "未知错误";
-    gatewayKind = classifyGatewayError(error).kind;
-    if (process.env.NODE_ENV !== "production") {
-      console.error(`[gen-video/prepare] 网关调用失败 kind=${gatewayKind} ${taskError}`);
-    }
+    failureKind =
+      error instanceof UpstreamModelError || error instanceof ModelConfigError
+        ? error.kind
+        : "unknown";
+    console.error(`[gen-video/prepare] 联网检索或模型整理失败 kind=${failureKind} ${taskError}`);
   }
 
   const prepared = parsePrepared(agentText);
 
-  // ---- 降级：OpenClaw 网关不可用时，改用 DSH 纯文本整理创作要求 ----
+  // ---- 降级：联网检索或模型调用不可用时，改用 DSH 纯文本整理创作要求 ----
   //
-  // 网关是独立进程（默认 localhost:18789），没启动是常态而非异常。
-  // 而这一步的本质是「把热点主题 + 产品知识整理成一份可执行的创作要求」，
+  // 这一步的本质是「把热点主题 + 产品知识整理成一份可执行的创作要求」，
   // 属于纯文本任务，DSH 完全能胜任 —— 它只是拿不到联网资讯和新闻配图。
   // 所以宁可退化成「只有创作要求、没有配图」，也不要让整条出片链路卡死：
   // 参考图可以由用户在面板里手动上传。
   if (!prepared.requirement) {
-    const dsh = await getDshStatus();
+    const dsh = await getDshStatus(user.id);
     if (dsh.ok) {
       try {
-        const dshText = await runDshText({ prompt: localPreparePrompt(topic, kbText), sessionId: `prepare-${topic}` });
+        const dshText = await runDshText({
+          userId: user.id,
+          prompt: localPreparePrompt(topic, kbText),
+          sessionId: `prepare-${topic}`
+        });
         const local = parseRequirement(dshText);
         if (local) {
-          console.warn("[gen-video/prepare] OpenClaw 不可用，已降级为 DSH 本地整理创作要求（无联网配图）");
+          console.warn("[gen-video/prepare] 联网检索或模型调用不可用，已降级为 DSH 本地整理创作要求（无联网配图）");
           return jsonOk({
             requirement: local,
             images: [],
             degraded: true,
-            // 同样走友好文案：降级提示会直接展示给用户，不能带技术细节或空串
-            degradedReason: taskError ? friendlyGatewayError(taskError) : "联网检索不可用",
+            degradedReason: taskError ? `${taskError}（已降级为本地整理，无联网配图）` : "联网检索不可用",
           });
         }
       } catch (error) {
         // 降级是最后一道防线，它失败时必须留下可定位的痕迹 ——
-        // 否则用户只会看到「网关不可用」这条错误文案，完全不知道真实原因。
+        // 否则用户只会看到一条笼统错误，完全不知道真实原因。
         console.error(
           `[gen-video/prepare] DSH降级整理失败：${
             error instanceof Error ? error.message : String(error)
@@ -256,28 +301,44 @@ export async function POST(request: Request, context: { params: { id: string } }
   }
 
   if (!prepared.requirement) {
-    // 记录原始返回，便于排查 agent 是否按 JSON 格式输出。
-    console.error("[gen-video/prepare] agent 未返回可用 requirement，原始内容：", agentText.slice(0, 600) || "(空)");
-    const gatewayHint = "请启动 OpenClaw 网关（默认 http://localhost:18789），或直接在本面板手动填写创作要求。";
-    // 走 friendlyGatewayError 转换：此前直接拼原始 message，
-    // 会把「OpenClaw Gateway 连接失败：」这种空串尾巴暴露给用户。
-    const friendly = taskError ? friendlyGatewayError(taskError) : "";
+    // 记录原始返回，便于排查模型是否按 JSON 格式输出。
+    console.error("[gen-video/prepare] 模型未返回可用 requirement，原始内容：", agentText.slice(0, 600) || "(空)");
+    const hint = "请在「系统配置」中检查联网搜索与对话模型的配置，或直接在本面板手动填写创作要求。";
     return jsonError(
       taskError
-        ? `短视频创作要求整理失败：${friendly}。${gatewayHint}`
-        : `未能根据该热点整理出有效的短视频创作要求。${gatewayHint}`,
+        ? `短视频创作要求整理失败：${taskError}。${hint}`
+        : `未能根据该热点整理出有效的短视频创作要求。${hint}`,
       400,
-      { kind: gatewayKind ?? "unknown" },
+      { kind: failureKind ?? "unknown" },
     );
   }
 
-  // 并发下载配图；个别失败仅跳过，由候选池补位，最终凑满 MAX_IMAGES 张。
+  // 配图：模型只给检索词，图片直链一律去图库取（模型看到的素材是榜单页，不是图片）。
   const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const dirAbs = join(process.cwd(), "public", "uploads", "gen-video-prep", token);
   await mkdir(dirAbs, { recursive: true });
   const webPrefix = `/uploads/gen-video-prep/${token}`;
+
+  let candidates: Array<{ url: string; host: string; title: string; keyword: string }> = [];
+  let imageSearchNote = "";
+  if (prepared.imageKeywords.length > 0) {
+    try {
+      candidates = await searchImages(prepared.imageKeywords, CANDIDATE_LIMIT);
+    } catch (error) {
+      imageSearchNote = error instanceof Error ? error.message : String(error);
+      console.error(`[gen-video/prepare] 图片检索失败：${imageSearchNote}`);
+    }
+  } else {
+    imageSearchNote = "模型未给出配图检索词";
+  }
+
+  // 并发下载配图；个别失败仅跳过，由候选池补位，最终凑满 MAX_IMAGES 张。
   const settled = await Promise.allSettled(
-    prepared.imageUrls.slice(0, CANDIDATE_LIMIT).map((imageUrl, index) => downloadPreparedImage(imageUrl, dirAbs, webPrefix, index)),
+    candidates
+      .slice(0, CANDIDATE_LIMIT)
+      .map((candidate, index) =>
+        downloadPreparedImage(candidate.url, dirAbs, webPrefix, index, refererFor(candidate))
+      )
   );
   const images = settled
     .map((r) => (r.status === "fulfilled" ? r.value : null))
@@ -286,5 +347,12 @@ export async function POST(request: Request, context: { params: { id: string } }
     // 重新编号为 ref-0..ref-N，避免候选用尽后文件名出现空洞（如 ref-13）。
     .map((image, index) => ({ url: image.url, name: `ref-${index}.${image.name.split(".").pop() || "jpg"}` }));
 
-  return jsonOk({ requirement: prepared.requirement, images });
+  // 数据来源如实回传：内置公开热榜是零 key 的公开榜单，不等于用户付费搜出来的结果，
+  // 界面上据此给一句轻提示，避免用户以为已经用上了自己的搜索服务。
+  return jsonOk({
+    requirement: prepared.requirement,
+    images,
+    sourceKind: usedBuiltinBoards ? "builtin-hot-boards" : "user-search-service",
+    ...(imageSearchNote ? { imageSearchNote } : {})
+  });
 }

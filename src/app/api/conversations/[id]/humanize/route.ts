@@ -1,7 +1,7 @@
 import { jsonError, readJson } from "@/lib/http";
-import { openClawClient } from "@/lib/openclaw";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
+import { chatCompleteStream } from "@/lib/llm-client";
 import { buildHumanizerPrompt } from "@/lib/humanizer-prompt";
 import { normalizeHumanizerOutput } from "@/lib/humanizer-parse";
 
@@ -80,10 +80,12 @@ export async function POST(request: Request, context: { params: { id: string } }
           }
         }));
 
-        const result = await openClawClient.sendTaskStream(
-          { message: prompt, prompt, userId: user.id },
-          (deltaText) => controller.enqueue(sseEncode({ type: "delta", text: deltaText }))
-        );
+        const result = await chatCompleteStream({
+          userId: user.id,
+          capability: "chat",
+          prompt,
+          onDelta: (deltaText) => controller.enqueue(sseEncode({ type: "delta", text: deltaText }))
+        });
 
         const { display, body: articleBody } = normalizeHumanizerOutput(result.content);
 
@@ -110,7 +112,7 @@ export async function POST(request: Request, context: { params: { id: string } }
           where: { id: task.id },
           data: {
             status: "SUCCEEDED",
-            resultJson: JSON.stringify(result.raw ?? null)
+            resultJson: JSON.stringify({ provider: result.providerLabel, model: result.model })
           }
         });
 

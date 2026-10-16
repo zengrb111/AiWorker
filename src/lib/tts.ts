@@ -20,6 +20,7 @@ import { basename, join } from "node:path";
 import { spawn } from "node:child_process";
 import { FFMPEG, probeDuration, runTool } from "./ffmpeg";
 import { resolvePythonPath } from "./python";
+import { resolveCapabilityConfig, type ResolvedModelConfig } from "./model-credentials";
 
 export type WordCaption = {
   word: string;
@@ -99,6 +100,39 @@ const DEFAULT_VOLUME = process.env.TTS_VOLUME || "+0%";
  * 3. Collects WordBoundary events (offset + duration in ticks, 10ns units)
  * 4. Outputs a JSON line with word timestamps
  */
+/** edge-tts 单次合成的硬超时（毫秒）。
+ *
+ * 为什么要这个：edge-tts 是「本地进程 + 远端 WebSocket」，一旦微软侧握手被拒
+ * 或网络半开，进程既不报错也不退出，会一直挂到用户以为界面卡死
+ * （实测降级到 SAPI 前白白等了 76 秒）。超时后主动 kill，保证降级链能继续往下走。
+ * 超时按文本长度放宽：中文约 4 字/秒，长文本来就慢。
+ */
+const EDGE_TIMEOUT_BASE_MS = 45_000;
+const EDGE_TIMEOUT_PER_CHAR_MS = 120;
+
+/**
+ * 把 edge-tts 的原始报错翻译成人能直接照做的提示。
+ *
+ * 实测踩坑：edge-tts 7.2.x 的 Sec-MS-GEC 令牌算法已被微软废弃，握手一律 403，
+ * 报的是 `WSServerHandshakeError: 403, message='Invalid response status'`，
+ * 从字面完全看不出「升级 pip 包就能好」。更坑的是本机有两套 Python
+ * （托管 3.13 / PATH 3.12），`pip install -U` 装的那个和项目实际用的可能不是同一个，
+ * 于是「明明升级过了还是 403」。所以这里必须把解释器路径一起打出来。
+ */
+function explainEdgeFailure(stderr: string, pythonPath: string): string {
+  const raw = stderr.slice(-300);
+  const which = `（本次使用的解释器：${pythonPath}）`;
+  if (/WSServerHandshakeError/i.test(stderr) && /\b403\b/.test(stderr)) {
+    return `edge-tts 被微软服务端拒绝（403，Sec-MS-GEC 令牌过期）。${which}`
+      + "用这个解释器升级即可："
+      + `& "${pythonPath}" -m pip install -U edge-tts`;
+  }
+  if (/ModuleNotFoundError.*edge_tts/i.test(stderr) || /No module named ['"]?edge_tts/i.test(stderr)) {
+    return `未安装 edge-tts。${which}安装命令：& "${pythonPath}" -m pip install edge-tts`;
+  }
+  return raw;
+}
+
 export function generateTTS(
   text: string,
   outputPath: string,
@@ -109,6 +143,7 @@ export function generateTTS(
     const rate = prosody.rate ?? DEFAULT_RATE;
     const pitch = prosody.pitch ?? DEFAULT_PITCH;
     const volume = prosody.volume ?? DEFAULT_VOLUME;
+    const timeoutMs = EDGE_TIMEOUT_BASE_MS + text.length * EDGE_TIMEOUT_PER_CHAR_MS;
     // Python script — collects both WordBoundary and SentenceBoundary
     const script = `
 import asyncio
@@ -147,14 +182,19 @@ async def main():
     
     print(json.dumps({"cues": cues, "count": len(cues), "audioSize": len(audio_data)}, ensure_ascii=False))
 
-asyncio.run(main())
+# 双保险：Python 内层 asyncio 超时先抛，TS 外层 kill 兜底（Python 卡在解释器层时内层也救不了）。
+try:
+    asyncio.run(asyncio.wait_for(main(), timeout=float(sys.argv[7])))
+except asyncio.TimeoutError:
+    print("edge-tts synthesize timeout", file=sys.stderr)
+    sys.exit(2)
 `;
 
     // Write the script to a temp file
     const scriptPath = join(outputPath.replace(/\.mp3$/, "") + "_tts_script.py");
     writeFileSync(scriptPath, script, "utf-8");
 
-    const args = [scriptPath, text, outputPath, voice, rate, pitch, volume];
+    const args = [scriptPath, text, outputPath, voice, rate, pitch, volume, String(Math.round(timeoutMs / 1000))];
     const child = spawn(PYTHON_PATH, args, {
       shell: false,
       // Windows 下 Python stdout 默认 GBK，必须显式设为 UTF-8，否则中文时间戳 JSON 会乱码。
@@ -163,6 +203,18 @@ asyncio.run(main())
 
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    // 兜底 kill：Python 侧 wait_for 只管得了 asyncio 协程，卡在解释器/导入阶段就失效。
+    const killTimer = setTimeout(() => {
+      if (settled) return;
+      try {
+        child.kill();
+      } catch {
+        /* 进程可能已退出 */
+      }
+      settled = true;
+      reject(new Error(`edge-tts 超时 ${Math.round(timeoutMs / 1000)} 秒无响应（可能被网络或微软服务端阻断）`));
+    }, timeoutMs + 5000);
 
     child.stdout?.on("data", (data: Buffer) => {
       stdout += data.toString();
@@ -173,8 +225,11 @@ asyncio.run(main())
     });
 
     child.on("close", (code: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
       if (code !== 0) {
-        reject(new Error(`edge-tts failed (exit ${code}): ${stderr.slice(-300)}`));
+        reject(new Error(`edge-tts failed (exit ${code}): ${explainEdgeFailure(stderr, PYTHON_PATH)}`));
         return;
       }
 
@@ -209,6 +264,9 @@ asyncio.run(main())
     });
 
     child.on("error", (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
       reject(new Error(`edge-tts spawn error: ${err.message}`));
     });
   });
@@ -371,20 +429,31 @@ function pcmToWav(pcm: Buffer, sampleRate: number): Buffer {
  * 首选通道：智谱 TTS（glm-tts）。按官方文档在请求体顶层传 voice/speed/volume，
  * 返回裸 PCM（24kHz s16le mono），这里封装成 WAV并按句估算字幕（智谱不返回时间戳）。
  * input 超 1024 字符时自动分段合成再拼接。
+ *
+ * 端点与密钥来自当前用户「配音」能力分配的配置（apiFormat=zhipu-tts），
+ * 不再读全局 env —— 否则所有用户共用一份 key。
  */
-async function generateZhipuTTS(text: string, outputWavPath: string): Promise<TTSResult> {
-  const apiKey = process.env.ZHIPU_API_KEY ?? "";
-  if (!apiKey) throw new Error("ZHIPU_API_KEY 未配置");
+async function generateZhipuTTS(
+  text: string,
+  outputWavPath: string,
+  credential: ResolvedModelConfig
+): Promise<TTSResult> {
+  const apiKey = credential.apiKey;
+  if (!apiKey) throw new Error("智谱配音未配置密钥");
+
+  const endpoint = credential.baseUrl.includes("/audio/speech")
+    ? credential.baseUrl
+    : `${credential.baseUrl.replace(/\/+$/, "")}/audio/speech`;
 
   const chunks = chunkTextForTTS(text);
   const pcmParts: Buffer[] = [];
   for (const chunk of chunks) {
-    const res = await fetch(ZHIPU_TTS_API, {
+    const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       // 注意：voice/speed/volume/response_format 必须放在顶层（旧文档里的嵌套 parameters 会被忽略）。
       body: JSON.stringify({
-        model: ZHIPU_TTS_MODEL,
+        model: credential.model || ZHIPU_TTS_MODEL,
         input: chunk,
         voice: ZHIPU_TTS_VOICE,
         speed: ZHIPU_TTS_SPEED,
@@ -413,9 +482,16 @@ async function generateZhipuTTS(text: string, outputWavPath: string): Promise<TT
  * 注意：DASHSCOPE_BASE_URL 在本项目历史上被指向了智谱（见 .env.local），
  * 这里不使用它，千问端点与 key 均显式读取，避免串到错误的服务商。
  *
- * 实测（2026-10-14，自定义 maas 端点）：只有 qwen3-tts-flash 可用，
- * qwen-audio-3.1-tts-flash 会返回 400「url error, please check url」。
- * 返回 output.audio.url（24h 有效，需二次下载），音频为 WAV 且不返回 format 字段。
+ * 实测（2026-10-14）：只有 qwen3-tts-flash 可用，qwen-audio-3.1-tts-flash 会返回
+ * 400「url error, please check url」。返回 output.audio.url（24h 有效，需二次下载），
+ * 音频为 WAV 且不返回 format 字段。
+ *
+ * 2026-10-16 故障复盘：曾把 QWEN_TTS_API 指向百炼的「应用专属端点」
+ * （llm-*.cn-beijing.maas.aliyuncs.com）。该端点会随应用实例状态一起失效，
+ * 失效后返回 HTTP 400 且**响应体为空 {}** —— 连标准错误码都没有，
+ * 排查时极易误判成参数写错或模型不可用。
+ * 判定方法：同 key、同模型、同 payload 打官方端点能 200，就说明问题在端点不在参数。
+ * 因此默认端点固定为官方域名，QWEN_TTS_API 只在确认专属实例状态正常时再覆盖。
  */
 const QWEN_TTS_ENABLED = process.env.QWEN_TTS_ENABLED !== "0";
 const QWEN_TTS_MODEL = process.env.QWEN_TTS_MODEL || "qwen3-tts-flash";
@@ -451,9 +527,19 @@ export const QWEN_TTS_VOICE_OPTIONS = [
  * 与智谱不同，千问返回的是真实音频文件（wav/mp3），时长用 ffprobe 精确探测。
  * 千问不返回时间戳，字幕按句估算（与智谱一致）。
  */
-async function generateQwenTTS(text: string, outputDir: string, baseName: string): Promise<TTSResult> {
-  const apiKey = process.env.DASHSCOPE_API_KEY ?? "";
-  if (!apiKey) throw new Error("DASHSCOPE_API_KEY 未配置（千问 TTS 需要阿里云百炼 key）");
+async function generateQwenTTS(
+  text: string,
+  outputDir: string,
+  baseName: string,
+  credential: ResolvedModelConfig
+): Promise<TTSResult> {
+  const apiKey = credential.apiKey;
+  if (!apiKey) throw new Error("千问配音未配置密钥");
+
+  const base = credential.baseUrl.replace(/\/+$/, "").replace(/\/compatible-mode\/v1$/, "");
+  const endpoint = credential.baseUrl.includes("/multimodal-generation/generation")
+    ? credential.baseUrl
+    : `${base}/api/v1/services/aigc/multimodal-generation/generation`;
 
   const chunks = chunkTextForTTS(text, QWEN_INPUT_LIMIT);
   const parts: string[] = [];
@@ -465,10 +551,10 @@ async function generateQwenTTS(text: string, outputDir: string, baseName: string
     };
     if (QWEN_TTS_STYLE) input.style = QWEN_TTS_STYLE;
 
-    const res = await fetch(QWEN_TTS_API, {
+    const res = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: QWEN_TTS_MODEL, input }),
+      body: JSON.stringify({ model: credential.model || QWEN_TTS_MODEL, input }),
       signal: AbortSignal.timeout(90_000),
     });
     if (!res.ok) {
@@ -558,28 +644,37 @@ async function runWithRateLimitRetry<T>(run: () => Promise<T>, retries = 2): Pro
   throw lastError;
 }
 
-/** 依次尝试：用户选中的云引擎 → 另一家云 TTS → edge-tts → 本机 SAPI。任一成功即返回。 */
+/** 依次尝试：用户配置的云配音 → edge-tts → 本机 SAPI。任一成功即返回。 */
 async function synthesizeWithFallback(
   text: string,
   outDir: string,
   baseName: string,
-  provider: TtsProvider = DEFAULT_TTS_PROVIDER
+  provider: TtsProvider = DEFAULT_TTS_PROVIDER,
+  credential: ResolvedModelConfig | null = null
 ): Promise<TTSResult> {
   const errors: string[] = [];
-  const cloud: Array<{ engine: TtsEngine; run: () => Promise<TTSResult> }> = [
-    {
+  const cloud: Array<{ engine: TtsEngine; run: () => Promise<TTSResult> }> = [];
+  // 只有该用户确实配置了对应接口形态的云配音，才把它放进候选链；
+  // 没配置就直接走本地通道（edge-tts / SAPI），保证没云端 key 也能出片。
+  if (credential?.apiFormat === "zhipu-tts") {
+    cloud.push({
       engine: "zhipu",
       run: () =>
         runWithRateLimitRetry(async () => ({
-          ...(await generateZhipuTTS(text, join(outDir, `${baseName}.wav`))),
+          ...(await generateZhipuTTS(text, join(outDir, `${baseName}.wav`), credential)),
           engine: "zhipu" as const,
         })),
-    },
-    {
+    });
+  }
+  if (credential?.apiFormat === "dashscope-tts") {
+    cloud.push({
       engine: "qwen",
-      run: () => runWithRateLimitRetry(() => generateQwenTTS(text, outDir, baseName)),
-    },
-  ];
+      run: () => runWithRateLimitRetry(() => generateQwenTTS(text, outDir, baseName, credential)),
+    });
+  }
+  if (!cloud.length) {
+    errors.push("cloud:未在系统配置中指定云端配音模型");
+  }
 
   // 用户选中的先试，另一家紧随其后做兜底。
   const ordered = [...cloud].sort((a, b) => {
@@ -588,8 +683,6 @@ async function synthesizeWithFallback(
   });
 
   for (const channel of ordered) {
-    if (channel.engine === "zhipu" && !ZHIPU_TTS_ENABLED) continue;
-    if (channel.engine === "qwen" && !QWEN_TTS_ENABLED) continue;
     try {
       const result = await channel.run();
       // errors 非空说明前面的通道（含用户选中的首选引擎）失败过 —— 把原因带出去，
@@ -621,16 +714,25 @@ async function synthesizeWithFallback(
 
 /**
  * 「一键生成视频」用：把旁白文本合成为音频，输出到指定目录。
- * provider 为用户在界面上选的云引擎（zhipu / qwen）；失败会自动回退到另一家云TTS，
- * 再退到edge-tts 与本机 SAPI，保证不断音。结果的 engine 字段标明实际生效的通道。
+ *
+ * 云端配音的端点与密钥来自当前用户在「系统配置 → 模型配置」里为「配音」指定的服务
+ * （apiFormat 决定走智谱还是千问）；未配置时自动回退到本地 edge-tts / SAPI，
+ * 保证没有云端 key 也能出片。结果的 engine 字段标明实际生效的通道。
  * 调用方负责容错：全部通道失败时应降级为「无配音」版本，不阻断出片。
  */
 export async function synthesizeNarration(
   text: string,
   outDir: string,
   voice: string = DEFAULT_VOICE,
-  provider: TtsProvider = DEFAULT_TTS_PROVIDER
+  provider: TtsProvider = DEFAULT_TTS_PROVIDER,
+  options: { userId?: string; config?: ResolvedModelConfig | null } = {}
 ): Promise<TTSResult> {
   if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
-  return synthesizeWithFallback(text, outDir, `narration-${Date.now()}`, provider);
+  let credential: ResolvedModelConfig | null = null;
+  if (options.config !== undefined) {
+    credential = options.config;
+  } else if (options.userId) {
+    credential = await resolveCapabilityConfig(options.userId, "tts").catch(() => null);
+  }
+  return synthesizeWithFallback(text, outDir, `narration-${Date.now()}`, provider, credential);
 }

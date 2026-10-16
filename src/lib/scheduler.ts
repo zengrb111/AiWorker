@@ -3,11 +3,11 @@
  *
  * 背景：OpenClaw 网关的 cron 存储是**全平台共享**的，任何 session 里的 agent 都能
  * `openclaw cron list` 看到别人的任务（已造成过跨用户泄露事故）。因此把用户级调度
- * 收到平台侧：任务存在本库，到点由本调度器在**该用户的专属会话**里执行 prompt。
+ * 收到平台侧：任务存在本库，到点由本调度器用**该用户自己配置的模型与密钥**执行 prompt。
  * 网关侧不再保存任何用户任务数据 → 外部通道（微信等）即使被诱导去查，也查不到。
  */
 import { prisma } from "@/lib/prisma";
-import { openClawClient } from "@/lib/openclaw";
+import { chatComplete } from "@/lib/llm-client";
 
 /** 调度轮询间隔。 */
 const TICK_MS = 30_000;
@@ -165,7 +165,7 @@ export async function runScheduledJob(jobId: string): Promise<SchedulerRunResult
     .update({ where: { id: jobId }, data: { lastStatus: "RUNNING", lastError: null } })
     .catch(() => undefined);
   try {
-    const result = await openClawClient.sendTask({ message: job.prompt, userId: job.userId });
+    const result = await chatComplete({ userId: job.userId, capability: "chat", prompt: job.prompt });
     const content = (result.content || "").trim();
     await prisma.scheduledJob.update({
       where: { id: jobId },

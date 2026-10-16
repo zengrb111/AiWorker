@@ -7,6 +7,7 @@ import KnowledgePanel from "./knowledge-panel";
 import PublishPanel from "./publish-panel";
 import AnalyticsPanel from "./analytics-panel";
 import AccountsPanel from "./accounts-panel";
+import SettingsPanel from "./settings-panel";
 import ModelPicker, { type ModelOption, type CurrentModel } from "./model-picker";
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: string };
@@ -63,8 +64,8 @@ const sectionTitles: Record<Section, string> = {
   profile: "个人中心"
 };
 
-/** 尚未落地实现、以静态原型（iframe）方式引入平台的分区 */
-const prototypeSections: Section[] = ["settings", "users"];
+/** 尚未落地实现、以静态原型（iframe）方式引入平台的分区（系统配置已改为真实面板） */
+const prototypeSections: Section[] = ["users"];
 type MessageRole = "USER" | "ASSISTANT";
 type BindingStatus = "PENDING" | "BOUND" | "UNBOUND";
 
@@ -383,6 +384,8 @@ export default function PlatformClient() {
   /** 点「效果分析」「平台授权管理」时自增，让面板重新拉数据。 */
   const [analyticsResetToken, setAnalyticsResetToken] = useState(0);
   const [accountsResetToken, setAccountsResetToken] = useState(0);
+  /** 点「系统配置」时自增，让模型配置面板重新拉数据。 */
+  const [settingsResetToken, setSettingsResetToken] = useState(0);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState("");
   const [chatInput, setChatInput] = useState("");
@@ -588,9 +591,8 @@ export default function PlatformClient() {
   }, []);
 
   /**
-   * 拉取网关模型列表与当前会话实际使用的模型。
-   * 网关可能比页面晚起来（本地开发常见），所以失败时记下原因，
-   * 供「选择模型」面板在打开时重试——不能只拉一次就静默放弃。
+   * 拉取当前用户自己配置的模型服务列表与「对话与写作」的当前分配。
+   * 失败时记下原因，供「选择模型」面板在打开时重试——不能只拉一次就静默放弃。
    */
   async function loadModels() {
     if (modelsLoading) return;
@@ -627,14 +629,14 @@ export default function PlatformClient() {
    * 切换模型：切换期间锁定输入框，并在对话流里展示切换过程
    * （切换只是改会话配置，不会触发一次模型调用）。
    */
-  async function handleSwitchModel(modelId: string, label: string) {
+  async function handleSwitchModel(modelId: string, label: string, providerRowId: string) {
     if (switchingModel || sending) return;
     setSwitchingModel(true);
     setModelNotice({ text: `正在切换到 ${label}…`, status: "running" });
     try {
       const data = await api<{ current: CurrentModel }>(
         "/api/models/switch",
-        { method: "POST", body: JSON.stringify({ model: modelId }) },
+        { method: "POST", body: JSON.stringify({ model: modelId, providerRowId }) },
         40000
       );
       setCurrentModel(data.current);
@@ -647,7 +649,6 @@ export default function PlatformClient() {
       });
     } finally {
       setSwitchingModel(false);
-      // 模型列表可能因为新接入的供应商而变化，顺手刷新一次
       void loadModels();
     }
   }
@@ -1227,6 +1228,10 @@ export default function PlatformClient() {
         /** 联网检索不可用，已退化为本地整理创作要求（无配图）。 */
         degraded?: boolean;
         degradedReason?: string;
+        /** builtin-hot-boards = 内置公开热榜；user-search-service = 用户自己的搜索服务 */
+        sourceKind?: "builtin-hot-boards" | "user-search-service";
+        /** 图片检索失败时的原因（图片直链来自图库检索，与热点素材不同源） */
+        imageSearchNote?: string;
       }>;
       if (!payload.ok) {
         throw new Error(payload.error || "短视频准备失败。");
@@ -1255,12 +1260,20 @@ export default function PlatformClient() {
         // 降级模式：没有联网资讯与新闻配图，只有本地整理出的创作要求。
         // 说清代价，否则用户会以为「配图加载失败」是 bug。
         setChatError(
-          `联网检索不可用（${prepared.degradedReason ?? "OpenClaw 网关未启动"}），已改用本地模式整理创作要求。` +
+          `联网检索不可用（${prepared.degradedReason ?? "所有公开热榜源都没响应"}），已改用本地模式整理创作要求。` +
             "配图需要你在面板中自行上传参考图，出片不受影响。",
         );
       } else if (!files.length) {
-        setChatError("已整理好创作要求，但未能取回关联配图，请在面板中自行上传参考图。");
+        setChatError(
+          prepared.imageSearchNote
+            ? `创作要求已整理好，但配图检索未成功（${prepared.imageSearchNote}），请在面板中自行上传参考图。`
+            : prepared.sourceKind === "builtin-hot-boards"
+              ? "已按内置公开热榜整理好创作要求，但未能取回关联配图，请在面板中自行上传参考图。"
+              : "已整理好创作要求，但未能取回关联配图，请在面板中自行上传参考图。"
+        );
       }
+      // 正常出片时不再提示数据源：内置公开热榜是零配置的默认通道，
+      // 每次都提醒「你还没配搜索服务」属于噪音，把它留在「系统配置」里说明即可。
     } catch (error) {
       setChatError(error instanceof Error ? error.message : "短视频准备失败，请稍后重试。");
     } finally {
@@ -1635,6 +1648,11 @@ export default function PlatformClient() {
     if (key === "publish") setPublishResetToken((token) => token + 1);
     if (key === "analytics") setAnalyticsResetToken((token) => token + 1);
     if (key === "accounts") setAccountsResetToken((token) => token + 1);
+    if (key === "settings") {
+      setSettingsResetToken((token) => token + 1);
+      // 模型配置改完，回到对话页时模型选择器要反映最新的 chat 分配
+      void loadModels();
+    }
   }
 
   async function saveContentEdit() {
@@ -2295,7 +2313,7 @@ export default function PlatformClient() {
                           switching={switchingModel}
                           busy={sending}
                           onSwitch={handleSwitchModel}
-                          onModelsChanged={setModelOptions}
+                          onGoToSettings={() => selectSection("settings")}
                           onRefresh={loadModels}
                           refreshing={modelsLoading}
                           errorText={modelsError}
@@ -2579,6 +2597,7 @@ export default function PlatformClient() {
         {section === "publish" && <PublishPanel resetToken={publishResetToken} />}
         {section === "analytics" && <AnalyticsPanel resetToken={analyticsResetToken} />}
         {section === "accounts" && <AccountsPanel resetToken={accountsResetToken} />}
+        {section === "settings" && <SettingsPanel resetToken={settingsResetToken} />}
 
         {prototypeSections.includes(section) && (
           <div className="prototype-frame">

@@ -26,6 +26,9 @@ public/videos/
 # Remotion 每次渲染落盘的素材与 props（src/lib/video/render.ts 生成并清理）
 /remotion/public/generated/
 
+# DSH 分镜规划：按 userId 派生的工作目录（profile / cache / workspace，含用户密钥上下文）
+.dsh-home/
+
 .xhs-cookie.txt
 
 .toutiao-cookie.txt

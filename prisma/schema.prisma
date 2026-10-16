@@ -23,6 +23,55 @@ model User {
   platformSiteMetrics    PlatformSiteMetric[]
   platformContentMetrics PlatformContentMetric[]
   scheduledJobs          ScheduledJob[]
+  modelProviders         UserModelProvider[]
+  modelAssignments       UserModelAssignment[]
+}
+
+/// 用户自有的模型服务（一行 = 一个服务，如「智谱 GLM + 我的 key」）。
+/// 凭据 AES-256-GCM 加密后存 credentialEnc（内容为 {apiKey,apiSecret?} 的 JSON）。
+/// userId 参与唯一约束：不同用户可各配一份同 providerId，互不干扰。
+model UserModelProvider {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// 预置供应商 id（zhipu/qwen/doubao/hunyuan/tavily/bocha…）或自定义标识
+  providerId    String
+  /// 展示名（默认取预置 label，可自定义以区分同供应商多份配置）
+  label         String
+  /// 接口形态：openai-completions | deepseek | dashscope-tts | zhipu-tts | pollinations-video | tavily-search | bocha-search
+  apiFormat     String   @default("openai-completions")
+  baseUrl       String
+  /// 加密后的凭据 JSON：{"apiKey":"...","apiSecret":"..."}
+  credentialEnc String
+  /// 可选模型列表 JSON：[{"id":"glm-4.6","name":"GLM-4.6"}]
+  modelsJson    String   @default("[]")
+  /// untested | ok | invalid
+  status        String   @default("untested")
+  statusMsg     String   @default("")
+  lastVerifyAt  DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([userId, providerId, apiFormat, label])
+  @@index([userId])
+}
+
+/// 用户的能力→模型默认分配（一行 = 一项能力）。
+/// 用 capability 枚举而非多列：新增能力只需插数据，不改 schema。
+/// providerRowId 指向 UserModelProvider.id（行级引用），这样同一供应商配多份 key 时也能精确区分。
+model UserModelAssignment {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// chat | vision | ocr | tts | video | storyboard | embedding | search
+  capability   String
+  providerRowId String
+  model        String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([userId, capability])
+  @@index([userId])
 }
 
 /// 平台自持的定时任务（替代网关上跨用户共享的 cron）。

@@ -108,6 +108,8 @@ export async function POST(request: Request, context: { params: { id: string } }
           targetSeconds: Math.max(6, Math.round(sourceDuration || 30)),
           captions,
           bgmPath: pickBgm(),
+          // 归属用户：分镜规划与配音都按该用户「系统配置」里的模型服务来调用
+          userId: user.id,
           onProgress: sendProgress,
         });
 

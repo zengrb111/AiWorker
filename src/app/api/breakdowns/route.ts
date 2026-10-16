@@ -42,7 +42,7 @@ export async function POST(req: Request) {
   }
   let aiBreakdown: string;
   try {
-    aiBreakdown = await decomposeContent({ platform, contentKey, title, views });
+    aiBreakdown = await decomposeContent({ userId: user.id, platform, contentKey, title, views });
   } catch (e) {
     return NextResponse.json({
       ok: false,

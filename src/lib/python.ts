@@ -50,6 +50,12 @@ function existing(candidates: string[]): string[] {
  * 找不到时返回 "python"，交给系统 PATH 解析，失败会在调用处报出真实原因。
  *
  * 注意这里刻意不含 .dsh-venv：那个环境只装了 DSH，没有 edge-tts。
+ *
+ * ⚠ 维护提醒：本机有多套 Python（托管 3.13 与 PATH 3.12 各自独立 site-packages），
+ * 升级依赖**必须用本函数实际选中的那个解释器**，否则会出现「升级过了但依然报错」
+ * 的假象。2026-10-16 就踩过：`pip install -U edge-tts` 装进了 PATH 的 3.12，
+ * 而本函数选的是托管 3.13（还停在 7.2.8），结果 edge-tts 握手持续 403。
+ * tts.ts 的报错里已强制打印解释器路径，排查时先看那一行。
  */
 export function resolvePythonPath(): string {
   const ordered = [...existing([process.env.PYTHON_PATH ?? ""]), ...existing(managedCandidates())];

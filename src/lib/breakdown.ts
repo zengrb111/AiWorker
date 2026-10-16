@@ -1,5 +1,5 @@
 import { prisma } from "./prisma";
-import { openClawClient } from "./openclaw";
+import { chatComplete } from "./llm-client";
 import path from "node:path";
 import fs from "node:fs";
 
@@ -121,6 +121,7 @@ export function buildAnalyticsDecomposePrompt(opts: {
 
 /** 触发一次 AI 拆解，返回 Markdown 文本；拿不到原文直接抛错 */
 export async function decomposeContent(opts: {
+  userId: string;
   platform: string;
   contentKey: string;
   title: string;
@@ -136,7 +137,7 @@ export async function decomposeContent(opts: {
     throw new Error("该内容原文过短（不足 30 字），没有可拆解的结构。");
   }
   const prompt = buildAnalyticsDecomposePrompt({ ...opts, original });
-  const result = await openClawClient.sendTask(prompt);
+  const result = await chatComplete({ userId: opts.userId, capability: "chat", prompt });
   const text = result?.content?.trim();
   if (!text) throw new Error("模型未返回拆解内容");
   return text;

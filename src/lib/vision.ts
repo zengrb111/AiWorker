@@ -16,6 +16,7 @@
 
 import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
+import { ModelConfigError, resolveCapabilityConfig } from "@/lib/model-credentials";
 
 /** 识图结果。 */
 export type ImageInsight = {
@@ -44,6 +45,8 @@ export type VisionOptions = {
   timeoutMs?: number;
   /** 最大并发。 */
   concurrency?: number;
+  /** 归属用户：缺省时从该用户的「识图」能力分配里解析凭据。 */
+  userId?: string;
 };
 
 const DEFAULT_TIMEOUT_MS = 45_000;
@@ -55,36 +58,49 @@ function isZhipuEndpoint(baseUrl: string): boolean {
 }
 
 /**
- * 按端点选 key。
+ * 解析识图凭据：只认当前用户自己在「系统配置」里配置的识图模型。
  *
  * 历史坑：.env.local 里 DASHSCOPE_API_KEY 定义了两次（一次空串、一次阿里云格式），
- * 而 DASHSCOPE_BASE_URL 指向智谱、VISION_MODEL 是 glm-4.6v。三者不匹配必然 401。
- * 这里让端点决定 key，而不是无条件信 DASHSCOPE_API_KEY。
+ * 而 DASHSCOPE_BASE_URL 指向智谱、VISION_MODEL 是 glm-4.6v。三者不匹配必然 401，
+ * 且所有用户共用同一份 key。现在这两者都不再成立 —— key 与端点都来自用户配置。
  */
-export function resolveApiKey(baseUrl: string): string {
-  const dashscope = process.env.DASHSCOPE_API_KEY?.trim() ?? "";
-  const zhipu = process.env.ZHIPU_API_KEY?.trim() ?? "";
-  if (isZhipuEndpoint(baseUrl)) return zhipu || dashscope;
-  return dashscope || zhipu;
-}
-
-/** 识图是否可用（缺 key 或缺模型时给出可读原因）。 */
-export function visionStatus(options: VisionOptions = {}): { ok: true } | { ok: false; reason: string } {
-  const baseUrl = options.baseUrl || process.env.DASHSCOPE_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1";
-  const key = options.apiKey || resolveApiKey(baseUrl);
-  const model = options.model || process.env.VISION_MODEL;
-  if (!key) {
+async function resolveVisionCredential(options: VisionOptions): Promise<{
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+} | null> {
+  if (options.apiKey && options.baseUrl) {
     return {
-      ok: false,
-      reason: isZhipuEndpoint(baseUrl)
-        ? "未配置 ZHIPU_API_KEY（当前 DASHSCOPE_BASE_URL 指向智谱，需用智谱 key）"
-        : "未配置 DASHSCOPE_API_KEY",
+      baseUrl: options.baseUrl,
+      apiKey: options.apiKey,
+      model: options.model || "glm-4.6v"
     };
   }
-  if (!model) {
-    return { ok: false, reason: "未配置 VISION_MODEL" };
+  const userId = options.userId?.trim();
+  if (!userId) return null;
+  const config = await resolveCapabilityConfig(userId, "vision");
+  return {
+    baseUrl: options.baseUrl || config.baseUrl,
+    apiKey: options.apiKey || config.apiKey,
+    model: options.model || config.model
+  };
+}
+
+/** 识图是否可用（缺配置时给出可读原因，指向系统配置）。 */
+export async function visionStatus(options: VisionOptions = {}): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (options.apiKey && options.model) return { ok: true };
+  if (!options.userId?.trim()) {
+    return { ok: false, reason: "缺少登录用户，无法确定该用哪个识图模型。" };
   }
-  return { ok: true };
+  try {
+    await resolveVisionCredential(options);
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof ModelConfigError ? error.message : error instanceof Error ? error.message : "识图配置不可用"
+    };
+  }
 }
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -275,14 +291,31 @@ class Semaphore {
  * @returns 与输入等长的结果数组；识别失败的项为 null，**不会**整体失败
  */
 export async function insightImages(paths: string[], options: VisionOptions = {}): Promise<ImageInsight[]> {
-  const baseUrl = options.baseUrl || process.env.DASHSCOPE_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1";
-  const apiKey = options.apiKey || resolveApiKey(baseUrl);
-  const model = options.model || process.env.VISION_MODEL || "glm-4.6v";
+  const emptyResult = paths.map((path) => ({
+    path,
+    caption: "",
+    mood: "",
+    subject: "",
+    dominantColor: "",
+    isDark: false
+  }));
+  if (paths.length === 0) return [];
+
+  let credential: { baseUrl: string; apiKey: string; model: string } | null = null;
+  try {
+    credential = await resolveVisionCredential(options);
+  } catch (error) {
+    // 识图是增强项：未配置识图模型时静默降级为「按顺序轮播」，但把原因写进日志便于排查。
+    console.warn(
+      `[vision] 识图跳过：${error instanceof ModelConfigError ? error.message : error instanceof Error ? error.message : String(error)}`
+    );
+    return emptyResult;
+  }
+  if (!credential) return emptyResult;
+
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
-
-  if (!apiKey) return paths.map((path) => ({ path, caption: "", mood: "", subject: "", dominantColor: "", isDark: false }));
-  if (paths.length === 0) return [];
+  const { baseUrl, apiKey, model } = credential;
 
   const gate = new Semaphore(concurrency);
   const settled = await Promise.all(

@@ -10,7 +10,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { openClawClient } from "../openclaw";
+import { chatCompleteStream } from "../llm-client";
 import { readPositiveNumberEnv } from "../env";
 import type { RenderContext } from "./pipeline";
 
@@ -102,15 +102,20 @@ export async function renderViaOpenClaw(ctx: RenderContext): Promise<{
   detail: string;
 }> {
   const { outputPath, notify } = ctx;
+  if (!ctx.userId) {
+    return { ok: false, outputPath, detail: "旧引擎需要登录用户才能调用其自有的模型配置。" };
+  }
   notify(`已上传 ${ctx.materials.length} 张参考图，正在调用龙虾(OpenClaw) Remotion 技能规划脚本…`);
   try {
     const prompt = buildLegacyPrompt(ctx);
-    // 传 userId 走隔离会话：多用户共用默认会话会串上下文与记忆
-    const result = await openClawClient.sendTaskStream(
-      { message: prompt, prompt, userId: ctx.userId },
-      (delta) => notify(delta.replace(/\s+$/, "")),
-      readPositiveNumberEnv("OPENCLAW_VIDEO_TIMEOUT_MS", LEGACY_TIMEOUT_MS),
-    );
+    // 用该用户自己配置的模型与密钥（旧引擎仅用于回滚验证）。
+    const result = await chatCompleteStream({
+      userId: ctx.userId,
+      capability: "chat",
+      prompt,
+      timeoutMs: readPositiveNumberEnv("OPENCLAW_VIDEO_TIMEOUT_MS", LEGACY_TIMEOUT_MS),
+      onDelta: (delta) => notify(delta.replace(/\s+$/, ""))
+    });
     if (!existsSync(outputPath)) {
       const hinted = extractVideoUrl(result.content);
       return {

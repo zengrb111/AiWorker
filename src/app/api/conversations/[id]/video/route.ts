@@ -24,7 +24,7 @@ export async function POST(request: Request, context: { params: { id: string } }
       controller.enqueue(sseEncode({ type: "delta", text: "正在根据你的文字描述生成动态视频...\n" }));
       const videosDir = join(process.cwd(), "public", "videos");
       if (!existsSync(videosDir)) mkdirSync(videosDir, { recursive: true });
-      const videoUrl = await generateVideoFromText(content, videosDir);
+      const videoUrl = await generateVideoFromText(content, videosDir, { userId: user.id });
       const assistantMessage = await prisma.message.create({ data: { conversationId: conversation.id, role: "ASSISTANT", content: `视频已根据文字描述生成完成。\n\n主题：${content}\n\n文件：${videoUrl}` } });
       const saved = await prisma.contentItem.create({ data: { userId: user.id, title: titleFrom(content), body: "", category: "视频", videoUrl, sourceConversationId: conversation.id } });
       await prisma.openClawTask.update({ where: { id: task.id }, data: { status: "SUCCEEDED", resultJson: JSON.stringify({ videoUrl }) } });

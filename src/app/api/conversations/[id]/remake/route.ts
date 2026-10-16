@@ -116,6 +116,8 @@ export async function POST(request: Request, context: { params: { id: string } }
             theme: String(form.get("theme") ?? "").trim() || undefined,
             targetSeconds,
             bgmPath: pickBgm(),
+            // 归属用户：分镜规划与配音都按该用户「系统配置」里的模型服务来调用
+            userId: user.id,
             onProgress: sendProgress,
           });
           if (!result.ok) throw new Error(result.error ?? "视频复刻失败。");

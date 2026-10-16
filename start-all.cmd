@@ -102,7 +102,7 @@ goto :start_next
 echo [2/4] [WARN] Gateway still not listening after 30s.
 echo         It probably crashed on startup or is restart-looping.
 echo         Log: %PROJECT_DIR%\openclaw-gateway.out.log
-echo         Full diagnosis: node scripts\diagnose-openclaw.mjs
+echo         Full diagnosis: node scripts\diagnose-openclaw.mts
 
 :start_next
 REM ---------- start Next.js ----------

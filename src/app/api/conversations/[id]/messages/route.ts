@@ -1,7 +1,9 @@
 import { jsonError, readJson } from "@/lib/http";
-import { openClawClient } from "@/lib/openclaw";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
+import { chatComplete, chatCompleteStream } from "@/lib/llm-client";
+import { searchWeb } from "@/lib/web-search";
+import { snapshotUserConfig, resolveCapabilityConfig, type ResolvedModelConfig } from "@/lib/model-credentials";
 import { generateCoverImage, generateImageUrls, coverPlatformOf, type CoverPlatform } from "@/lib/image-gen";
 import { ocrImageText } from "@/lib/ocr";
 import { generateRewriteImages } from "@/lib/rewrite-images";
@@ -162,18 +164,6 @@ function buildReferenceProcessMarkdown(
   return lines.join("\n");
 }
 
-/**
- * 按登录用户派生专属网关会话 key（与 lib/openclaw 内部保持同一算法）。
- * 这里本地实现是为了让 prompt 里的「用户专属 sessionKey」与实际路由 key 严格一致，
- * 不额外依赖其它模块的导出。
- */
-function userSessionKeyOf(userId?: string | null): string {
-  if (userId && typeof userId === "string" && userId.trim()) {
-    return `agent:main:user-${userId.trim().replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-  }
-  return process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
-}
-
 /** 该用户可用于定时任务微信通知的投递目标。 */
 type WechatDeliveryTarget = { to: string; accountId: string };
 
@@ -262,7 +252,7 @@ function buildCronBlock(jobs: UserScheduledJob[] | null, userId: string): string
   const token = (process.env.SCHEDULE_API_TOKEN || process.env.CONTENT_INGEST_TOKEN || "").trim();
   if (token) {
     lines.push(
-      "- 定时任务的创建/修改/删除/查询一律调用**平台接口**（唯一入口，不要用 openclaw cron）：",
+      "- 定时任务的创建/修改/删除/查询一律走**平台接口**（唯一入口，不要用 openclaw cron）：",
       `  POST ${base}/api/scheduled-jobs/agent`,
       `  Header: Authorization: Bearer ${token} ； Content-Type: application/json`,
       "  Body 示例：",
@@ -274,7 +264,7 @@ function buildCronBlock(jobs: UserScheduledJob[] | null, userId: string): string
     );
   } else {
     lines.push(
-      "- 定时任务由平台管理：需要新增或修改时，提示用户在平台页面上操作（本机未配置调度接口令牌）。"
+      "- 定时任务由平台管理：需要新增或修改时，提示用户在平台页面上操作。"
     );
   }
   return lines.join("\n");
@@ -294,12 +284,11 @@ function buildTaskPrompt(
   const isArticleRequest = /(写一篇|写篇|写个?文案|写个?图文|生成一篇|生成篇|小红书(风格|文案|图文)|公众号(风格|文案|图文|文章)|文章正文|软文)/i.test(content);
   // 热点类快捷指令：约定编号列表格式，前端据此渲染可点选的热点卡片。
   const isHotTopicsRequest = /今日全网热点|今日产品热点/.test(content);
-  // 多用户隔离：每个登录用户独享网关会话与定时任务，规则作为最高优先级指令注入。
-  const userSessionKey = userSessionKeyOf(userId);
+  // 多用户隔离：每个登录用户的会话与模型密钥都独立，规则作为最高优先级指令注入。
   const isolationBlock = [
     "【多用户隔离规则（最高优先级，必须遵守）】",
-    `- 本平台多名用户共用同一个 AI 员工，你当前只为其中一位用户服务，其专属会话 key 是：${userSessionKey}。`,
-    `- 该用户的一切定时任务（automation/cron）都由平台管理：创建/修改/删除/查询请走下方「该用户的定时任务」里给出的平台接口，**不要使用 openclaw cron**（网关侧已不再保存用户任务）。`,
+    "- 本平台多名用户共用同一个 AI 员工，你当前只为其中一位用户服务，回答里不得出现其他用户的任何数据。",
+    "- 该用户的一切定时任务都由平台管理：你无法直接创建/修改定时任务，需要变更时请引导用户在平台的「定时任务」界面操作。",
     ...(wechatDelivery
       ? [
           `- 该用户的微信通知投递目标（唯一可用，严禁改用其他用户的）：--announce --channel openclaw-weixin --to ${wechatDelivery.to} --account ${wechatDelivery.accountId}。`,
@@ -725,17 +714,40 @@ export async function POST(request: Request, context: { params: { id: string } }
             return;
           }
 
-          controller.enqueue(sseEncode({ type: "delta", text: "正在获取今日全网热点，并结合知识库中的产品知识逐条比对筛选…" }));
+          controller.enqueue(sseEncode({ type: "delta", text: "正在联网获取今日真实热点…" }));
 
           const task = await prisma.openClawTask.create({
             data: { userId: user.id, type: "conversation", prompt: "今日全网热点推荐", status: "RUNNING" }
           });
           taskId = task.id;
 
-          const hotResult = await openClawClient.sendTask({
-            message: "今日全网热点推荐",
-            prompt: "请推荐今日全网热点（各行业热门话题、社会热点、平台热点均可），以编号列表输出 10 条左右，每条一行，格式：1. 热点简述。不要展开分析。",
-            userId: user.id
+          // 快照一次配置：同一次请求里搜索与对话用同一份用户配置，不会中途换模型/换密钥。
+          const snapshot = await snapshotUserConfig(user.id);
+
+          // 第一步：真实联网搜索（失败即报错，绝不让模型在没有素材时编造今日热点）。
+          const hits = await searchWeb({
+            userId: user.id,
+            query: "今日全网热点",
+            topK: 12,
+            config: snapshot.search
+          });
+          controller.enqueue(
+            sseEncode({ type: "delta", text: `已联网获取 ${hits.length} 条当日热点，正在结合知识库中的产品知识逐条比对筛选…\n\n` })
+          );
+
+          // 第二步：交给用户配置的对话模型做去重与影响力排序。
+          const material = hits
+            .map((hit, index) => `${index + 1}. ${hit.title}\n   来源：${hit.url}\n   摘要：${hit.snippet}`)
+            .join("\n");
+          const hotResult = await chatComplete({
+            userId: user.id,
+            capability: "chat",
+            config: snapshot.chat ?? undefined,
+            prompt:
+              "以下是联网搜索抓取到的今日热点素材（真实结果，未经加工）：\n\n" +
+              `${material}\n\n` +
+              "请从中挑选 10 条左右最值得关注的热点，去掉重复与明显无关内容，按影响力从高到低排序，" +
+              "以编号列表输出，每条一行，格式：1. 热点简述。不要展开分析，不要编造素材里没有的热点。"
           });
 
           const topics = parseTopicLines(hotResult.content);
@@ -805,6 +817,9 @@ export async function POST(request: Request, context: { params: { id: string } }
           });
           taskId = task.id;
 
+          // 快照一次配置：拆解与仿写两阶段用同一份用户配置。
+          const rewriteSnapshot = await snapshotUserConfig(user.id);
+
           // 对小红书链接：先试服务端直连解析，失败则走「已登录浏览器通道」（CDP）读原文。
           // App 分享链接（xsec_source=app_share）被小红书限制为仅 App 内可看，会明确提示用户换链接。
           let xhsParsed: string | null = null;
@@ -841,7 +856,7 @@ export async function POST(request: Request, context: { params: { id: string } }
           if (mainImage) {
             try {
               controller.enqueue(sseEncode({ type: "delta", text: "正在 OCR 识别主图文字…\n" }));
-              ocrText = await ocrImageText(mainImage);
+              ocrText = await ocrImageText(mainImage, { userId: user.id });
               if (ocrText) {
                 controller.enqueue(sseEncode({ type: "delta", text: `✅ 主图 OCR 文字：\n${ocrText}\n\n` }));
               }
@@ -854,18 +869,16 @@ export async function POST(request: Request, context: { params: { id: string } }
           // 阶段一：爆款内容拆解（流式）
           controller.enqueue(sseEncode({ type: "delta", text: "\n## 一、爆款内容拆解\n" }));
           let decomposeText = "";
-          const decomposeResult = await openClawClient.sendTaskStream(
-            {
-              message: "一键仿写爆款-内容拆解",
-              prompt: buildDecomposePrompt(url, xhsParsed, xhsFailNote),
-              conversationId: conversation.id,
-              userId: user.id
-            },
-            (delta) => {
+          const decomposeResult = await chatCompleteStream({
+            userId: user.id,
+            capability: "chat",
+            config: rewriteSnapshot.chat ?? undefined,
+            prompt: buildDecomposePrompt(url, xhsParsed, xhsFailNote),
+            onDelta: (delta) => {
               decomposeText += delta;
               controller.enqueue(sseEncode({ type: "delta", text: delta }));
             }
-          );
+          });
           decomposeText = (decomposeText || decomposeResult.content || "").trim();
 
           // 阶段二：基于拆解 + 知识库仿写（流式）
@@ -880,18 +893,16 @@ export async function POST(request: Request, context: { params: { id: string } }
             );
           }
           let rewriteText = "";
-          const rewriteResult = await openClawClient.sendTaskStream(
-            {
-              message: "一键仿写爆款-仿写",
-              prompt: buildRewritePrompt(url, decomposeText, kbText, xhsParsed, ocrText),
-              conversationId: conversation.id,
-              userId: user.id
-            },
-            (delta) => {
+          const rewriteResult = await chatCompleteStream({
+            userId: user.id,
+            capability: "chat",
+            config: rewriteSnapshot.chat ?? undefined,
+            prompt: buildRewritePrompt(url, decomposeText, kbText, xhsParsed, ocrText),
+            onDelta: (delta) => {
               rewriteText += delta;
               controller.enqueue(sseEncode({ type: "delta", text: delta }));
             }
-          );
+          });
           rewriteText = (rewriteText || rewriteResult.content || "").trim();
 
           // 保存：拆解消息 + 仿写消息（仿写自动入库）
@@ -1066,6 +1077,36 @@ await prisma.message.create({
     }
   });
 
+  // 先解析该用户的「对话与写作」模型配置：未配置时直接给出明确引导，
+  // 不建任务、不让前端空等 SSE。
+  let chatConfig: ResolvedModelConfig | null = null;
+  let chatConfigError = "";
+  try {
+    chatConfig = await resolveCapabilityConfig(user.id, "chat");
+  } catch (error) {
+    chatConfigError = error instanceof Error ? error.message : "尚未配置对话模型。";
+  }
+  if (!chatConfig) {
+    await prisma.openClawTask.update({
+      where: { id: task.id },
+      data: { status: "FAILED", error: chatConfigError }
+    });
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(sseEncode({ type: "error", error: chatConfigError }));
+        controller.close();
+      }
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no"
+      }
+    });
+  }
+
   const stream = new ReadableStream({
     async start(controller) {
       // SSE 保活：Agent 执行工具（联网搜索、读写文件、跑脚本）时可能几分钟不产生
@@ -1091,10 +1132,13 @@ await prisma.message.create({
           safeEnqueue(sseEncode({ type: "delta", text: referenceProcess }));
         }
 
-        const result = await openClawClient.sendTaskStream(
-          { message: content, context: conversationContext, prompt, conversationId: conversation.id, userId: user.id },
-          (deltaText) => safeEnqueue(sseEncode({ type: "delta", text: deltaText }))
-        );
+        const result = await chatCompleteStream({
+          userId: user.id,
+          capability: "chat",
+          config: chatConfig,
+          prompt,
+          onDelta: (deltaText) => safeEnqueue(sseEncode({ type: "delta", text: deltaText }))
+        });
 
         if (!result.content.trim()) {
           throw new Error("助手返回了空回复，请重试。");
@@ -1112,7 +1156,10 @@ await prisma.message.create({
           where: { id: task.id },
           data: {
             status: "SUCCEEDED",
-            resultJson: JSON.stringify(result.raw ?? null)
+            resultJson: JSON.stringify({
+              provider: result.providerLabel,
+              model: result.model
+            })
           }
         });
 

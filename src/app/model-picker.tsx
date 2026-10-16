@@ -1,11 +1,36 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
-import { MODEL_PRESETS, findPreset } from "@/lib/model-presets";
 
-export type ModelOption = { id: string; name: string; provider: string; available: boolean };
-export type CurrentModel = { provider: string; model: string } | null;
+/**
+ * 模型选择器。
+ *
+ * 数据源改为「当前用户自己在系统配置里添加的模型服务」（/api/models），
+ * 切换写的是该用户的 chat 能力分配（/api/models/switch）。
+ * 新增模型服务统一到「系统配置 → 模型配置」页，不再在本组件里填密钥。
+ */
+
+export type ModelOption = {
+  id: string;
+  name: string;
+  provider: string;
+  providerId: string;
+  /** UserModelProvider 行 id：切换时要一起带上，避免同模型名跨服务歧义 */
+  providerRowId: string;
+  /** 该服务上次的校验结论 */
+  status: string;
+  /** 该模型当前被哪项能力占用（未占用为 null） */
+  capability: string | null;
+  available: boolean;
+};
+
+export type CurrentModel = {
+  provider: string;
+  providerId: string;
+  providerRowId: string;
+  model: string;
+  available?: boolean;
+} | null;
 
 type Props = {
   models: ModelOption[];
@@ -14,9 +39,10 @@ type Props = {
   switching: boolean;
   /** 正在生成内容时也锁住，避免中途换模型 */
   busy?: boolean;
-  onSwitch: (modelId: string, label: string) => void;
-  onModelsChanged: (models: ModelOption[]) => void;
-  /** 列表为空（或网关比页面晚起来）时，打开面板会触发重新拉取 */
+  onSwitch: (modelId: string, label: string, providerRowId: string) => void;
+  /** 前往「系统配置 → 模型配置」新增服务 */
+  onGoToSettings?: () => void;
+  /** 列表为空时，打开面板会触发重新拉取 */
   onRefresh?: () => void;
   refreshing?: boolean;
   /** 上次拉取失败的原因，展示给用户 */
@@ -119,106 +145,32 @@ export default function ModelPicker({
   switching,
   busy,
   onSwitch,
-  onModelsChanged,
+  onGoToSettings,
   onRefresh,
   refreshing,
   errorText
 }: Props) {
   const [open, setOpen] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
-  const [configProvider, setConfigProvider] = useState<string>(MODEL_PRESETS[0].providerId);
-  const [apiKey, setApiKey] = useState("");
-  const [pickedModel, setPickedModel] = useState(MODEL_PRESETS[0].models[0].id);
-  const [customModel, setCustomModel] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
   const rootRef = useRef<HTMLDivElement | null>(null);
 
-  // 点击面板外部关闭（弹窗打开时不关面板，避免闪一下）
+  // 点击面板外部关闭
   useEffect(() => {
-    if (!open || configOpen) return;
+    if (!open) return;
     const onDocClick = (event: MouseEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
-  }, [open, configOpen]);
+  }, [open]);
 
-  const currentOption = models.find((item) => item.id === current?.model) ?? null;
+  const currentOption =
+    models.find((item) => item.id === current?.model && item.providerRowId === current?.providerRowId) ??
+    models.find((item) => item.id === current?.model) ??
+    null;
   const currentLabel = currentOption?.name ?? current?.model ?? "选择模型";
-
-  function openConfig() {
-    setConfigOpen(true);
-    setError("");
-    setApiKey("");
-    setCustomModel("");
-    const first = findPreset(configProvider) ?? MODEL_PRESETS[0];
-    setPickedModel(first.models[0]?.id ?? "");
-  }
-
-  function pickProvider(providerId: string) {
-    setConfigProvider(providerId);
-    setError("");
-    const preset = findPreset(providerId);
-    setPickedModel(preset?.models[0]?.id ?? "");
-  }
-
-  async function submitProvider(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const preset = findPreset(configProvider);
-    if (!preset) return;
-
-    const modelId = customModel.trim() || pickedModel;
-    if (!apiKey.trim()) {
-      setError("请填写 API Key。");
-      return;
-    }
-    if (!modelId) {
-      setError("请选择或填写模型 id。");
-      return;
-    }
-
-    setSaving(true);
-    setError("");
-    try {
-      const response = await fetch("/api/models/provider", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          providerId: preset.providerId,
-          baseUrl: preset.baseUrl,
-          modelId,
-          modelName: preset.models.find((item) => item.id === modelId)?.name,
-          apiKey: apiKey.trim()
-        })
-      });
-      const payload = (await response.json()) as
-        | { ok: true; data: { models: ModelOption[]; registered: boolean } }
-        | { ok: false; error: string };
-      if (!payload.ok) throw new Error(payload.error);
-
-      onModelsChanged(payload.data.models);
-      if (!payload.data.registered) {
-        // 保存成功但网关还没认出来：留在弹窗里让用户看到原因
-        setError("已保存，但网关暂未识别该模型，可能需要重启 OpenClaw 网关后生效。");
-        return;
-      }
-      setConfigOpen(false);
-      setOpen(true); // 回到列表，让用户看到新模型已经出现
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "保存失败。");
-    } finally {
-      setSaving(false);
-    }
-  }
-
   const locked = switching || Boolean(busy);
-  const activePreset = findPreset(configProvider) ?? MODEL_PRESETS[0];
 
-  /**
-   * 展开面板。模型列表是登录时拉一次的，如果那一刻网关还没起来就会是空的，
-   * 所以每次展开且列表为空时顺手重拉一次，避免用户只能刷新页面。
-   */
+  /** 展开面板：列表为空（尚未在系统配置添加服务）时顺手重拉一次。 */
   function toggleOpen() {
     const next = !open;
     setOpen(next);
@@ -234,7 +186,7 @@ export default function ModelPicker({
         disabled={locked}
         title={switching ? "正在切换模型…" : `当前模型：${currentLabel}`}
       >
-        <BrandIcon provider={currentOption?.provider ?? current?.provider} size={22} />
+        <BrandIcon provider={currentOption?.providerId ?? current?.providerId} size={22} />
         <span className="model-chip-name">{switching ? "切换中…" : currentLabel}</span>
         <span className="model-chip-caret" aria-hidden="true">
           ⌃
@@ -248,10 +200,10 @@ export default function ModelPicker({
             {models.length === 0 && (
               <p className="model-panel-empty">
                 {refreshing
-                  ? "正在读取网关模型列表…"
+                  ? "正在读取你配置的模型服务…"
                   : errorText
                     ? `读取失败：${errorText}`
-                    : "网关尚未返回模型列表。"}
+                    : "还没有配置模型服务。前往「系统配置」添加模型服务并填写 API Key 后即可使用 AI 对话。"}
                 {!refreshing && onRefresh && (
                   <button type="button" className="model-panel-retry" onClick={() => onRefresh()}>
                     重试
@@ -260,22 +212,25 @@ export default function ModelPicker({
               </p>
             )}
             {models.map((item) => {
-              const active = item.id === current?.model;
+              const active = item.id === current?.model && item.providerRowId === current?.providerRowId;
               return (
                 <button
-                  key={`${item.provider}-${item.id}`}
+                  key={`${item.providerRowId}-${item.id}`}
                   type="button"
                   className={`model-option ${active ? "active" : ""}`}
                   disabled={switching || active || !item.available}
                   onClick={() => {
-                    onSwitch(item.id, item.name);
+                    onSwitch(item.id, item.name, item.providerRowId);
                     setOpen(false);
                   }}
                 >
-                  <BrandIcon provider={item.provider} />
+                  <BrandIcon provider={item.providerId || item.provider} />
                   <span className="model-option-text">
                     <span className="model-option-name">{item.name}</span>
-                    <span className="model-option-meta">{item.provider}</span>
+                    <span className="model-option-meta">
+                      {item.provider}
+                      {item.capability ? ` · 已用于${item.capability}` : ""}
+                    </span>
                   </span>
                   {active && <span className="model-option-check">✓</span>}
                 </button>
@@ -283,106 +238,23 @@ export default function ModelPicker({
             })}
           </div>
 
-          <button type="button" className="model-config-entry" onClick={openConfig}>
+          <button
+            type="button"
+            className="model-config-entry"
+            onClick={() => {
+              setOpen(false);
+              onGoToSettings?.();
+            }}
+          >
             <span className="model-config-entry-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
                 <circle cx="12" cy="12" r="3.2" />
                 <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-2.87 1.2V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 2.6 15H2.5a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 7a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 2.6V2.5a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 17 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 21.4 9h.1a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.2 2z" />
               </svg>
             </span>
-            <span className="model-config-entry-text">配置自定义模型</span>
+            <span className="model-config-entry-text">前往系统配置添加模型服务</span>
           </button>
         </div>
-      )}
-
-      {/* 弹窗用 Portal 渲染到 body：ModelPicker 会被放在聊天输入框表单内部，
-          而 HTML 不允许表单嵌套 —— Portal 让弹窗彻底脱离外层 <form>。 */}
-      {configOpen && typeof document !== "undefined" && createPortal(
-        <div
-          className="kb-modal-overlay"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) setConfigOpen(false);
-          }}
-        >
-          <form className="kb-modal small model-config-modal" onSubmit={submitProvider}>
-            <div className="kb-modal-head">
-              <h4>配置自定义模型</h4>
-              <button type="button" className="model-modal-close" onClick={() => setConfigOpen(false)}>
-                ×
-              </button>
-            </div>
-
-            <div className="kb-modal-body">
-              <div className="model-config-field">
-                <span>模型供应商</span>
-                <div className="model-provider-grid">
-                  {MODEL_PRESETS.map((preset) => (
-                    <button
-                      key={preset.providerId}
-                      type="button"
-                      className={`model-provider-tab ${configProvider === preset.providerId ? "active" : ""}`}
-                      onClick={() => pickProvider(preset.providerId)}
-                    >
-                      <BrandIcon provider={preset.providerId} size={24} />
-                      <span>{preset.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <label className="model-config-field">
-                <span>API Key</span>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(event) => setApiKey(event.target.value)}
-                  placeholder="粘贴 API Key"
-                  autoComplete="off"
-                />
-              </label>
-
-              <label className="model-config-field">
-                <span>模型</span>
-                <select value={pickedModel} onChange={(event) => setPickedModel(event.target.value)}>
-                  {activePreset.models.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.name}（{item.id}）
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="model-config-field">
-                <span>自定义模型 id（可选）</span>
-                <input
-                  value={customModel}
-                  onChange={(event) => setCustomModel(event.target.value)}
-                  placeholder={`留空则用上面的选择，例如 ${activePreset.models[0]?.id ?? ""}`}
-                  autoComplete="off"
-                />
-              </label>
-
-              <p className="model-config-hint">
-                {activePreset.hint}
-                <a href={activePreset.consoleUrl} target="_blank" rel="noreferrer">
-                  去获取 API Key →
-                </a>
-              </p>
-
-              {error && <p className="error-text">{error}</p>}
-            </div>
-
-            <div className="kb-modal-foot">
-              <button type="button" onClick={() => setConfigOpen(false)}>
-                取消
-              </button>
-              <button type="submit" className="primary" disabled={saving}>
-                {saving ? "保存中…" : "保存并接入"}
-              </button>
-            </div>
-          </form>
-        </div>,
-        document.body
       )}
     </div>
   );

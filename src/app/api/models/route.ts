@@ -1,8 +1,18 @@
 import { jsonError, jsonOk } from "@/lib/http";
-import { classifyGatewayError, friendlyGatewayError, openClawClient } from "@/lib/openclaw";
 import { requireUser } from "@/lib/session";
+import { prisma } from "@/lib/prisma";
+import {
+  CAPABILITY_LABELS,
+  describeModelConfigError,
+  type Capability
+} from "@/lib/model-credentials";
 
-/** GET /api/models — 当前会话模型 + 网关已配置的模型列表。 */
+/**
+ * GET /api/models — 当前用户自己的模型清单 + 「对话与写作」当前默认模型。
+ *
+ * 数据源改为用户级配置表（原先读 OpenClaw 网关的全局模型列表）：
+ * 用户在「系统配置」里配置的服务与密钥只有本人可见、可用。
+ */
 export async function GET() {
   const user = await requireUser();
   if (!user) {
@@ -10,39 +20,59 @@ export async function GET() {
   }
 
   try {
-    let [current, models] = await Promise.all([
-      openClawClient.getCurrentModel(user.id),
-      openClawClient.listModels(user.id)
+    const [providers, assignments] = await Promise.all([
+      prisma.userModelProvider.findMany({
+        where: { userId: user.id },
+        orderBy: { createdAt: "asc" }
+      }),
+      prisma.userModelAssignment.findMany({ where: { userId: user.id } })
     ]);
 
-    // 自愈：若该会话当前模型在网关侧不可用（如 provider 余额耗尽 / 被配额挂起），
-    // 自动切到第一个可用模型，避免用户发消息后一直「思考中」直到超时。
-    if (current && models.length > 0) {
-      const cur = models.find(
-        (m) => m.id === current!.model || m.id === `${current!.provider}/${current!.model}`
-      );
-      if (cur && cur.available === false) {
-        const fallback = models.find((m) => m.available !== false);
-        if (fallback) {
-          try {
-            await openClawClient.switchModel(fallback.id, user.id);
-            current = await openClawClient.getCurrentModel(user.id);
-          } catch {
-            // 自愈失败不阻断返回，用户仍可在选择器里手动切换。
-          }
-        }
+    const capabilityByRow = new Map(assignments.map((row) => [row.providerRowId, row.capability]));
+
+    const models = providers.flatMap((provider) => {
+      let modelList: Array<{ id: string; name: string }> = [];
+      try {
+        const parsed = JSON.parse(provider.modelsJson) as Array<{ id: string; name: string }>;
+        if (Array.isArray(parsed)) modelList = parsed;
+      } catch {
+        modelList = [];
       }
-    }
+      return modelList
+        .filter((model) => model && model.id)
+        .map((model) => {
+          const capability = capabilityByRow.get(provider.id) as Capability | undefined;
+          return {
+            id: model.id,
+            name: model.name || model.id,
+            provider: provider.label,
+            providerId: provider.providerId,
+            providerRowId: provider.id,
+            status: provider.status,
+            capability: capability ? CAPABILITY_LABELS[capability] : null
+          };
+        });
+    });
+
+    const chat = assignments.find((row) => row.capability === "chat");
+    const chatProvider = chat ? providers.find((p) => p.id === chat.providerRowId) : undefined;
+    const current =
+      chat && chatProvider
+        ? {
+            model: chat.model,
+            provider: chatProvider.label,
+            providerId: chatProvider.providerId,
+            providerRowId: chatProvider.id,
+            available: chatProvider.status !== "invalid"
+          }
+        : null;
 
     return jsonOk({ current, models });
   } catch (error) {
-    // 此前这里把原始 message 直接抛给界面，于是出现过
-    // 「OpenClaw Gateway 连接失败：」这种冒号后为空的文案。
-    // 现在走诊断层：转成可读中文，并附上 kind 便于前端后续按类型展示。
-    const diagnosis = classifyGatewayError(error);
+    const described = describeModelConfigError(error);
     if (process.env.NODE_ENV !== "production") {
-      console.error(`[api/models] 网关不可用 kind=${diagnosis.kind} ${diagnosis.detail}`);
+      console.error(`[api/models] 读取用户模型配置失败 kind=${described.kind} ${described.message}`);
     }
-    return jsonError(friendlyGatewayError(error), 502, { kind: diagnosis.kind });
+    return jsonError(described.message, 500, { kind: described.kind });
   }
 }

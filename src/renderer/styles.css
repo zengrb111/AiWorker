@@ -4512,3 +4512,326 @@ a.pub-row-title:hover {
   padding: 14px 22px;
   border-top: 1px solid var(--line-soft);
 }
+
+/* ===== Settings panel（系统配置 · 模型配置） ===== */
+
+.cfg-overview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: #fff;
+  font-size: 12.5px;
+  color: var(--text-sub);
+  margin-bottom: 16px;
+  transition: all 160ms ease-out;
+}
+
+.cfg-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--text-sub);
+  opacity: 0.5;
+}
+
+.cfg-warn { color: #b45309; font-weight: 700; }
+.cfg-ok { color: var(--success); font-weight: 700; }
+
+.cfg-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.cfg-card {
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  background: #fff;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 1px 2px rgba(22, 34, 58, 0.04);
+  transition: transform 160ms ease-out, box-shadow 160ms ease-out, border-color 160ms ease-out;
+}
+
+.cfg-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 26px rgba(22, 34, 58, 0.09);
+  border-color: rgba(43, 124, 255, 0.28);
+}
+
+.cfg-card-head { display: flex; align-items: center; gap: 11px; }
+
+.cfg-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  flex-shrink: 0;
+  letter-spacing: 0.3px;
+}
+
+.cfg-badge.sm { width: 22px; height: 22px; border-radius: 7px; font-size: 10px; }
+
+.cfg-card-main { flex: 1; min-width: 0; }
+.cfg-name { font-size: 15px; font-weight: 800; color: var(--text-main); }
+.cfg-sub { font-size: 12px; color: var(--text-sub); margin-top: 2px; }
+
+.cfg-status {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.cfg-status.muted { color: var(--text-sub); background: #f1f5f9; }
+.cfg-status.ok { color: var(--success); background: rgba(22, 163, 74, 0.1); }
+.cfg-status.bad { color: var(--danger); background: rgba(220, 38, 38, 0.08); }
+
+.cfg-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+  color: var(--text-sub);
+  align-items: center;
+}
+
+.cfg-url {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cfg-key {
+  font-family: ui-monospace, Consolas, monospace;
+  background: #f6f9ff;
+  border-radius: 6px;
+  padding: 2px 8px;
+  color: var(--text-main);
+}
+
+.cfg-time { margin-left: auto; }
+
+.cfg-error {
+  font-size: 12px;
+  color: var(--danger);
+  background: rgba(220, 38, 38, 0.06);
+  border-radius: 8px;
+  padding: 8px 10px;
+  line-height: 1.6;
+}
+
+.cfg-hint-ok {
+  font-size: 12px;
+  color: var(--success);
+  background: rgba(22, 163, 74, 0.07);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.cfg-models { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.cfg-chip {
+  font-size: 11.5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #f6f9ff;
+  color: var(--text-sub);
+  border: 1px solid var(--line-soft);
+}
+
+.cfg-chip.muted { background: #f8fafc; }
+
+.cfg-ops { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+
+.cfg-empty {
+  border: 2px dashed var(--line-soft);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #fbfdff, #f5f8fd);
+  padding: 44px 24px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.cfg-empty-icon {
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #4d94ff, #155bd4);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: 1px;
+  box-shadow: 0 10px 24px rgba(21, 91, 212, 0.25);
+}
+
+.cfg-empty h3 { margin: 4px 0 0; font-size: 17px; color: var(--text-main); }
+.cfg-empty p { margin: 0; max-width: 520px; font-size: 13px; line-height: 1.8; color: var(--text-sub); }
+
+.cfg-assign {
+  margin-top: 22px;
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+  background: #fff;
+  padding: 18px;
+}
+
+.cfg-assign-head h3 { margin: 0; font-size: 16px; color: var(--text-main); }
+.cfg-assign-head p { margin: 4px 0 0; font-size: 12.5px; color: var(--text-sub); line-height: 1.7; }
+
+.cfg-assign-list { display: flex; flex-direction: column; margin-top: 14px; }
+
+.cfg-assign-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 4px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.cfg-assign-icon {
+  width: 34px;
+  height: 26px;
+  border-radius: 8px;
+  background: #eef3fb;
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  letter-spacing: 0.4px;
+}
+
+.cfg-assign-main { flex: 1; min-width: 0; }
+.cfg-assign-name { font-size: 13.5px; font-weight: 700; color: var(--text-main); }
+.cfg-assign-hint { font-size: 12px; color: var(--text-sub); margin-top: 2px; line-height: 1.6; }
+.cfg-assign-controls { display: flex; gap: 8px; flex-shrink: 0; }
+
+.cfg-select {
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  background: #fff;
+  color: var(--text-main);
+  min-width: 150px;
+  cursor: pointer;
+  transition: border-color 160ms ease-out, box-shadow 160ms ease-out;
+}
+
+.cfg-select.wide { width: 100%; min-width: 0; }
+
+.cfg-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(43, 124, 255, 0.15);
+}
+
+.cfg-select:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.cfg-assign-bar {
+  position: sticky;
+  bottom: 0;
+  margin-top: 8px;
+  padding: 12px 4px 2px;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #fff;
+  font-size: 12.5px;
+}
+
+.cfg-dialog { width: min(680px, calc(100vw - 40px)); max-height: 88vh; overflow-y: auto; }
+
+.cfg-field { display: flex; flex-direction: column; gap: 8px; }
+
+.cfg-label { font-size: 12.5px; font-weight: 700; color: var(--text-main); }
+
+.cfg-field-hint { margin: 0; font-size: 12px; color: var(--text-sub); line-height: 1.6; }
+.cfg-field-error { margin: 0; font-size: 12px; color: var(--danger); }
+.cfg-security { margin: 0; font-size: 11.5px; color: var(--success); }
+
+.cfg-link { font-size: 12px; color: var(--accent); text-decoration: none; }
+.cfg-link:hover { text-decoration: underline; }
+
+.cfg-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.cfg-preset {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: #fff;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: all 160ms ease-out;
+}
+
+.cfg-preset:hover:not(:disabled) { border-color: rgba(43, 124, 255, 0.4); transform: translateY(-1px); }
+.cfg-preset.active { border-color: var(--accent); background: #f2f7ff; box-shadow: 0 0 0 3px rgba(43, 124, 255, 0.12); }
+.cfg-preset:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.cfg-model-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.cfg-chip.toggle,
+.cfg-chip.add {
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 160ms ease-out;
+}
+
+.cfg-chip.toggle:hover { border-color: var(--danger); color: var(--danger); }
+.cfg-chip.add { border-style: dashed; color: var(--accent); }
+.cfg-chip.add:hover { border-color: var(--accent); background: #f2f7ff; }
+
+.cfg-advanced summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-sub);
+  padding: 6px 0;
+}
+
+.cfg-advanced[open] summary { color: var(--accent); }
+.cfg-advanced > .cfg-field { margin-top: 8px; }
+
+@media (max-width: 960px) {
+  .cfg-cards { grid-template-columns: 1fr; }
+  .cfg-assign-row { flex-direction: column; align-items: stretch; }
+  .cfg-assign-controls { flex-direction: column; }
+  .cfg-select { width: 100%; }
+  .cfg-assign-bar { position: fixed; bottom: 0; left: 0; right: 0; padding: 12px 16px; box-shadow: 0 -6px 18px rgba(22, 34, 58, 0.08); }
+}
