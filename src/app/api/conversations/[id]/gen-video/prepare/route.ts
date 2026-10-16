@@ -45,15 +45,19 @@ const MIME_TO_EXT: Record<string, string> = {
 };
 
 /**
- * 从模型输出里提取 { requirement, imageKeywords }，多级容错。
+ * 从模型输出里提取 { requirement, imageKeywords, primaryNewsIndex }，多级容错。
  *
  * 配图不再由模型给 URL —— 它能看到的素材链接全是榜单页（不是图片），
  * 让它"挑 URL"只会挑出一堆下载失败的页面地址。改为让它出检索词，
  * 图片直链由 image-search 去图库取。
+ *
+ * primaryNewsIndex（1 基）指明「这条视频到底讲哪一条新闻」。检索回来的
+ * 素材往往有十几条且彼此无关，不收敛主新闻的话，写稿模型会把它们全揉进
+ * 同一条视频 —— 用户看到的现象是「一条视频讲了好几条不相干的新闻」。
  */
-function parsePrepared(text: string): { requirement: string; imageKeywords: string[] } {
+function parsePrepared(text: string): { requirement: string; imageKeywords: string[]; primaryNewsIndex: number } {
   const raw = (text ?? "").trim();
-  if (!raw) return { requirement: "", imageKeywords: [] };
+  if (!raw) return { requirement: "", imageKeywords: [], primaryNewsIndex: 1 };
   const unfenced = raw.replace(/```json\s*([\s\S]*?)```/i, "$1").replace(/```/g, "").trim();
   const candidates: string[] = [unfenced];
   const brace = unfenced.match(/\{[\s\S]*\}/);
@@ -67,6 +71,8 @@ function parsePrepared(text: string): { requirement: string; imageKeywords: stri
         keywords?: unknown;
         // 兼容老格式：模型仍可能输出 imageUrls，届时当作关键词来源之一
         imageUrls?: unknown;
+        primaryNewsIndex?: unknown;
+        primaryNews?: unknown;
       };
       const requirement = typeof obj.requirement === "string" ? obj.requirement.trim() : "";
       const rawList = Array.isArray(obj.imageKeywords)
@@ -78,12 +84,15 @@ function parsePrepared(text: string): { requirement: string; imageKeywords: stri
         .map((item) => (typeof item === "string" ? item.trim() : ""))
         .filter((item) => item.length >= 2 && item.length <= 40)
         .slice(0, 6);
-      if (requirement) return { requirement, imageKeywords };
+      const rawIndex = obj.primaryNewsIndex ?? obj.primaryNews;
+      const parsedIndex = typeof rawIndex === "number" ? rawIndex : Number(rawIndex);
+      const primaryNewsIndex = Number.isFinite(parsedIndex) && parsedIndex >= 1 ? Math.floor(parsedIndex) : 1;
+      if (requirement) return { requirement, imageKeywords, primaryNewsIndex };
     } catch {
       // 尝试下一个候选片段
     }
   }
-  return { requirement: "", imageKeywords: [] };
+  return { requirement: "", imageKeywords: [], primaryNewsIndex: 1 };
 }
 
 /**
@@ -205,16 +214,19 @@ export async function POST(request: Request, context: { params: { id: string } }
     `【热点主题】${topic}`,
     kbText ? `\n【可参考的产品知识】\n${kbText}` : "",
     "",
-    "请完成两件事：",
-    "1) 整理创作要求：写明主题切入角度、旁白文案方向、分镜与节奏、画面与风格、时长建议、结尾引导，具体可执行。",
-    "2) 给出 3~6 个配图检索词（imageKeywords），用于系统去图库检索真实新闻配图。",
-    "   - 每个检索词是可独立检索到新闻现场照片的**具体名词短语**，例如「深圳 禁鸣喇叭 新规」「火箭队 雷霆 季后赛」。",
+    "请完成三件事：",
+    "1) 选出主新闻（primaryNewsIndex）：在【资讯素材】里挑出**与热点主题最相关的那一条**，填它的序号（从 1 开始）。",
+    "   —— 一条视频只讲一件事。素材里其它新闻是干扰项，绝对不要混讲。",
+    "2) 整理创作要求（requirement）：只围绕主新闻写，写明主题切入角度、旁白文案方向、分镜与节奏、画面与风格、时长建议、结尾引导，具体可执行。",
+    "   —— 要求里不得出现其它新闻的事件、人物或数字。",
+    "3) 给出 3~6 个配图检索词（imageKeywords），用于系统去图库检索该新闻的现场照片。",
+    "   - 每个检索词是可独立检索到现场照片的**具体名词短语**，例如「深圳 禁鸣喇叭 新规」。",
     "   - 不要输出网址、不要输出图片链接：素材里的链接都是榜单页面，不能直接当图片用。",
     "   - 从不同角度拆分（事件主体、现场画面、相关行业、数据图表等），避免全部围绕同一个词。",
     "",
     "只输出一个 JSON 代码块，不要任何其它说明文字：",
     "```json",
-    '{"requirement":"（创作要求全文）","imageKeywords":["检索词1","检索词2","检索词3"]}',
+    '{"primaryNewsIndex":1,"requirement":"（创作要求全文）","imageKeywords":["检索词1","检索词2","检索词3"]}',
     "```",
   ]
     .filter(Boolean)
@@ -224,12 +236,24 @@ export async function POST(request: Request, context: { params: { id: string } }
   let taskError: string | null = null;
   let failureKind: string | null = null;
   let usedBuiltinBoards = false;
+  /**
+   * 新闻事实（标题 + 摘要）原样透传给前端，再由它带进 gen-video 的旁白生成。
+   *
+   * 为什么必须透传：创作要求是「怎么做」的指令（角度/节奏/风格），**不含事实**。
+   * 模型拿不到标题摘要就只能编，写出来的口播和文章对不上。
+   * 这里只留标题和摘要，不带链接 —— 链接对写稿没用，还会诱使模型往文案里塞网址。
+   */
+  let newsItems: Array<{ title: string; snippet: string }> = [];
+  /** 检索命中的全部结果；模型按序号选主新闻，收敛在这里之后做。 */
+  let allHits: Awaited<ReturnType<typeof searchWeb>> = [];
   // 快照一次配置：搜索与对话用同一份用户配置。
   const snapshot = await snapshotUserConfig(user.id);
   try {
     // 第一步：真实联网搜索（失败不编造，直接走下面的 DSH 降级整理创作要求）。
     const hits = await searchWeb({ userId: user.id, query: topic, topK: 12, config: snapshot.search });
     usedBuiltinBoards = isBuiltinHotBoard(hits);
+    // 先原样保留全部命中（模型要靠序号选主新闻），收敛发生在 parsePrepared 之后。
+    allHits = hits;
     const material = hits
       .map((hit, index) => `${index + 1}. ${hit.title}\n   链接：${hit.url}\n   摘要：${hit.snippet}`)
       .join("\n");
@@ -261,6 +285,26 @@ export async function POST(request: Request, context: { params: { id: string } }
 
   const prepared = parsePrepared(agentText);
 
+  // ---- 收敛到「这条视频讲哪条新闻」 ----
+  //
+  // 检索常常返回十几条彼此无关的新闻（热榜前 N 名尤其如此）。全都塞给写稿模型，
+  // 结果就是一条视频里讲了好几件不相干的事。收敛规则：
+  //   主新闻（模型选的序号，非法则取第 1 条）+ 最多 2 条背景补充。
+  // 补充项标 isPrimary=false，写稿时只能用于理解背景，不许写进文案。
+  // 没有命中时兜底用主题本身（searchWeb 在热榜无匹配时已经这么兜过一轮）。
+  if (allHits.length > 0) {
+    const safeIndex = Math.min(Math.max(prepared.primaryNewsIndex, 1), allHits.length) - 1;
+    const primary = allHits[safeIndex];
+    const extras = allHits
+      .filter((_, i) => i !== safeIndex)
+      .slice(0, 2)
+      .map((hit) => ({ title: hit.title, snippet: hit.snippet ?? "", isPrimary: false }));
+    newsItems = [
+      { title: primary.title, snippet: primary.snippet ?? "", isPrimary: true },
+      ...extras,
+    ];
+  }
+
   // ---- 降级：联网检索或模型调用不可用时，改用 DSH 纯文本整理创作要求 ----
   //
   // 这一步的本质是「把热点主题 + 产品知识整理成一份可执行的创作要求」，
@@ -282,6 +326,10 @@ export async function POST(request: Request, context: { params: { id: string } }
           return jsonOk({
             requirement: local,
             images: [],
+            // 降级路径没有模型选主新闻，直接取第一条；命中为空时用主题本身兜底。
+            newsItems: newsItems.length
+              ? newsItems
+              : [{ title: topic, snippet: "", isPrimary: true }],
             degraded: true,
             degradedReason: taskError ? `${taskError}（已降级为本地整理，无联网配图）` : "联网检索不可用",
           });
@@ -352,6 +400,7 @@ export async function POST(request: Request, context: { params: { id: string } }
   return jsonOk({
     requirement: prepared.requirement,
     images,
+    newsItems,
     sourceKind: usedBuiltinBoards ? "builtin-hot-boards" : "user-search-service",
     ...(imageSearchNote ? { imageSearchNote } : {})
   });

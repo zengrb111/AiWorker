@@ -63,6 +63,44 @@ export function parseLookFromForm(form: FormData): LookConfig | undefined {
   return Object.keys(look).length ? look : undefined;
 }
 
+/**
+ * 解析请求里的新闻事实（标题 + 摘要）。
+ *
+ * 这段 JSON 是从「热点一键生成视频」的 prepare 阶段原样带过来的，
+ * 目的是让旁白基于**真实新闻内容**写稿，而不是只按创作要求凭空编。
+ *
+ * 服务端刻意不严格校验：它只是提示素材，脏一点顶多文案差一点，
+ * 不该让用户因为一个附加字段而无法出片。解析失败一律当空处理。
+ */
+export function parseNewsItems(
+  form: FormData,
+): Array<{ title: string; snippet: string; isPrimary: boolean }> {
+  const raw = String(form.get("newsItems") ?? "").trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const items = parsed
+      .map((item) => {
+        const o = item as { title?: unknown; snippet?: unknown; isPrimary?: unknown };
+        return {
+          title: typeof o.title === "string" ? o.title.slice(0, 200) : "",
+          snippet: typeof o.snippet === "string" ? o.snippet.slice(0, 400) : "",
+          isPrimary: o.isPrimary === true,
+        };
+      })
+      .filter((item) => item.title.trim())
+      .slice(0, 12);
+    if (!items.length) return [];
+    // 没有显式标记主新闻时，第一条视为主新闻 ——
+    // 「一条视频只讲一条新闻」是硬约束，不能因为标记缺失就退化成全都写进去。
+    if (!items.some((item) => item.isPrimary)) items[0].isPrimary = true;
+    return items;
+  } catch {
+    return [];
+  }
+}
+
 /** 供前端渲染选择器用的可选项清单（避免前端再手抄一份映射表）。 */
 export const LOOK_OPTIONS = {
   effects: [

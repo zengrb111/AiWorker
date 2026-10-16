@@ -89,7 +89,7 @@ export async function POST(request: Request, context: { params: { id: string } }
       try {
         // ---- 1. 语音识别：口播文本既用于烧字幕，也用于让 DeepSeek 决定剪辑点 ----
         sendProgress("视频上传完成，正在识别语音并生成字幕...");
-        const asr = await transcribeVideoToSrt(inputPath, speechDir, sendProgress);
+        const asr = await transcribeVideoToSrt(inputPath, speechDir, sendProgress, user.id);
         const captions = asr.ok ? parseSrtCues(asr.srtPath) : [];
         if (asr.ok) {
           sendProgress(`已生成 ${asr.cueCount} 条语音字幕，正在规划剪辑节奏...`);

@@ -22,6 +22,11 @@ import { readStringEnv } from "../env";
 import { probeDuration } from "../ffmpeg";
 import { getDshStatus, runDshText } from "../dsh";
 import { generateNarrationScript } from "../narration";
+import {
+  ModelConfigError,
+  type Capability,
+  type ModelConfigErrorKind,
+} from "../model-credentials";
 import { countInsights, insightImages, visionStatus } from "../vision";
 import { inferStyle } from "./style";
 import {
@@ -92,6 +97,14 @@ export type PipelineInput = {
   materials: string[];
   /** 用户创作要求。 */
   requirement: string;
+  /**
+   * 新闻事实（标题 + 摘要），来自「热点一键生成视频」的联网检索结果。
+   *
+   * **必须透传到旁白生成**：创作要求只说「怎么做」，不含「讲什么」。
+   * 不传的话模型只能凭空编，写出来的口播和文章内容对不上。
+   * 剪辑 / 复刻链路不涉及新闻，给空即可。
+   */
+  newsItems?: Array<{ title?: string; snippet?: string }>;
   /** 已有旁白文本；不给则在 generate 模式下按 requirement 自动生成。 */
   narrationText?: string;
   /** 目标时长（秒）。有配音时以配音实际时长为准。 */
@@ -166,6 +179,11 @@ export type VideoPlanDraft = {
   beatCount: number;
   /** 识图结果：给方案面板展示「AI 理解到的素材」。 */
   insights: MaterialInsight[];
+  /**
+   * 本次用到的新闻事实。存进 draft 是为了让「重新生成方案」后
+   * 界面仍能告诉用户「这份文案基于哪几条新闻」，而不是只有一段孤立的旁白。
+   */
+  newsItems: Array<{ title: string; snippet: string }>;
   narration: string;
   title: string;
   /** 配音文件绝对路径；为空表示无配音版本。 */
@@ -242,6 +260,14 @@ export type PipelineDiagnostics = {
 export type PipelineResult = {
   ok: boolean;
   error?: string;
+  /**
+   * 缺模型配置时的结构化分类（kind + capability）。
+   *
+   * 渲染阶段的旁白生成同样可能因「未配置对话模型」失败
+   * （不带 planToken 的直接出片路径会重新生成文案）。这类错误必须原样上报，
+   * API 层才能转成「去系统配置」入口，而不是只给一句无法行动的文案。
+   */
+  modelConfig?: { kind: ModelConfigErrorKind; capability: Capability | null };
   videoUrl?: string;
   coverUrl?: string;
   title: string;
@@ -297,7 +323,19 @@ export function parseTargetSeconds(requirement: string, fallback = 30): number {
  */
 export async function runVideoPlanStage(
   input: PlanStageInput,
-): Promise<{ ok: true; draft: VideoPlanDraft } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; draft: VideoPlanDraft }
+  | {
+      ok: false;
+      error: string;
+      /**
+       * 结构化错误分类，供 API 层转成错误码、前端决定要不要弹「去系统配置」入口。
+       * 缺模型配置（no_provider / no_assignment / invalid_key）必须原样传出去 ——
+       * 这类错误不能降级，用户不配就出不了片，得让他知道去配。
+       */
+      modelConfig?: { kind: ModelConfigErrorKind; capability: Capability | null };
+    }
+> {
   const started = Date.now();
   const notify = input.onProgress ?? (() => undefined);
   const record: string[] = [];
@@ -382,13 +420,29 @@ export async function runVideoPlanStage(
   let videoTitle = input.title?.trim() ?? "";
   if (!narrationText && input.mode === "generate") {
     notify("正在根据创作要求生成标题与旁白文案…");
-    const script = await generateNarrationScript(
-      input.requirement,
-      materials.length,
-      input.targetSeconds,
-      insights,
-      input.userId,
-    );
+    // 「未配置对话模型」必须显式失败并给出指引，不能降级成无旁白纯画面 ——
+    // 用户会以为功能坏了，而真实原因只是少配一个模型服务。
+    let script: Awaited<ReturnType<typeof generateNarrationScript>>;
+    try {
+      script = await generateNarrationScript(
+        input.requirement,
+        materials.length,
+        input.targetSeconds,
+        insights,
+        input.newsItems ?? [],
+        input.userId,
+      );
+    } catch (error) {
+      if (error instanceof ModelConfigError) {
+        notify(error.message);
+        return {
+          ok: false,
+          error: error.message,
+          modelConfig: { kind: error.kind, capability: error.capability },
+        };
+      }
+      throw error;
+    }
     narrationText = script?.fullText ?? "";
     videoTitle = videoTitle || (script?.title ?? "");
     if (narrationText) notify(`已生成标题「${videoTitle}」与旁白（${script!.segments.length} 句）`);
@@ -458,6 +512,10 @@ export async function runVideoPlanStage(
     storyboard: board,
     beatCount: beats.length,
     insights,
+    newsItems: (input.newsItems ?? []).map((n) => ({
+      title: (n.title ?? "").slice(0, 200),
+      snippet: (n.snippet ?? "").slice(0, 400),
+    })).filter((n) => n.title.trim()),
     narration: narrationText,
     title: videoTitle,
     audioPath: audio?.audioPath ?? null,
@@ -507,6 +565,14 @@ export type PlanStageInput = {
   captions?: WordCaption[];
   theme?: string;
   look?: LookConfig;
+  /**
+   * 新闻事实（标题 + 摘要），来自联网检索。透传给旁白生成 ——
+   * 创作要求只说「怎么做」，不含「讲什么」，不传模型只能编。
+   *
+   * `isPrimary` 标记「这条视频到底讲哪一条」。只有主新闻是要写进文案的内容，
+   * 其余仅作背景参考；不带标记时第一条视为主新闻。
+   */
+  newsItems?: Array<{ title?: string; snippet?: string; isPrimary?: boolean }>;
   /** 配音工作目录；不给则用「<prefix>-work/<token>」。渲染阶段必须沿用同一个。 */
   workDir?: string;
   onProgress?: (text: string) => void;

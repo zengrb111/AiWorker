@@ -21,7 +21,7 @@ import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { DEFAULT_TTS_PROVIDER, resolveTtsProvider } from "@/lib/tts";
 import { parseTargetSeconds, runVideoPlanStage, type VideoPlanDraft } from "@/lib/video/pipeline";
-import { LOOK_OPTIONS, parseLookFromForm } from "@/lib/video/plan-params";
+import { LOOK_OPTIONS, parseLookFromForm, parseNewsItems } from "@/lib/video/plan-params";
 import { mkdir, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 
@@ -65,9 +65,11 @@ export async function POST(request: Request, context: { params: { id: string } }
   }
   if (!savedImagePaths.length) return jsonError("参考图格式不支持，请上传 JPG / PNG / WebP。");
 
+  const newsItems = parseNewsItems(form);
   const stage = await runVideoPlanStage({
     mode: "generate",
     token,
+    newsItems,
     materials: savedImagePaths,
     requirement,
     targetSeconds: parseTargetSeconds(requirement),
@@ -78,7 +80,18 @@ export async function POST(request: Request, context: { params: { id: string } }
     onProgress: (text) => console.log(`[gen-video-plan ${token}] ${text}`),
   });
 
-  if (!stage.ok) return jsonError(stage.error);
+  if (!stage.ok) {
+    // 缺模型配置必须把结构化分类传出去：前端据此弹「去系统配置」入口，
+    // 而不是只显示一句用户无法行动的错误文案。
+    // 约定 HTTP 400 + body 带 { kind, capability }，与前端 isModelConfigError 对齐。
+    if (stage.modelConfig) {
+      return jsonError(stage.error, 400, {
+        kind: stage.modelConfig.kind,
+        capability: stage.modelConfig.capability,
+      });
+    }
+    return jsonError(stage.error, 500);
+  }
 
   const draft = stage.draft;
   await prisma.videoPlan.create({
@@ -114,6 +127,8 @@ export async function POST(request: Request, context: { params: { id: string } }
       })),
     audioSeconds: draft.audioSeconds,
     diagnostics: draft.diagnostics,
+    /** 文案依据的新闻事实：让用户能核对「这份旁白到底基于什么」。 */
+    newsItems: draft.newsItems,
     /** 可选项清单随接口下发，前端不再手抄一份映射表。 */
     options: LOOK_OPTIONS,
   });
@@ -149,6 +164,8 @@ export async function GET(_request: Request, context: { params: { id: string } }
     audioSeconds: draft.audioSeconds,
     status: plan.status,
     diagnostics: draft.diagnostics,
+    /** 文案依据的新闻事实：让用户能核对「这份旁白到底基于什么」。 */
+    newsItems: draft.newsItems,
     options: LOOK_OPTIONS,
   });
 }

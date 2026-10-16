@@ -1,8 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FFMPEG, probeDuration, runTool } from "./ffmpeg";
+import { ModelConfigError } from "./model-credentials";
 
-/** 语音识别模型，默认智谱 glm-asr-2512；可用 ASR_MODEL 覆盖。 */
+/**
+ * 语音识别模型，默认智谱 glm-asr-2512；可用 ASR_MODEL 覆盖。
+ * 只是模型名，凭据来自用户自己的配置（见 resolveAsrCredential）。
+ */
 const MODEL = (process.env.ASR_MODEL || "glm-asr-2512").trim();
 /** 单段时长（秒）：长视频先切片再逐段转写，避免单次请求过长。 */
 const SEGMENT_SECONDS = 26;
@@ -16,16 +20,37 @@ export type SrtResult = { ok: true; srtPath: string; cueCount: number } | { ok: 
 interface Cue { start: number; end: number; text: string; }
 
 /**
+ * 取语音识别用的凭据。
+ *
+ * 改造前这里直接读 `process.env.ZHIPU_API_KEY` —— 平台公共 key，所有人共用，
+ * 且「一键剪辑」不传 userId 也没法按用户隔离。2026-10-16 改为只认用户自己的 key。
+ *
+ * 能力 key 用 "chat" 是因为 ASR 复用对话服务的 OpenAI 兼容端点；
+ * 若将来要独立分配，可给 Capability 枚举加一项 "asr"。
+ *
+ * 抛 `ModelConfigError` 而不是返回 ok:false —— 缺配置是「用户必须去补」，
+ * 不能降级成静默无字幕。
+ */
+async function resolveAsrCredential(userId: string): Promise<{ apiKey: string; baseUrl: string }> {
+  const { resolveCapabilityConfig } = await import("./model-credentials");
+  const config = await resolveCapabilityConfig(userId, "chat");
+  return { apiKey: config.apiKey, baseUrl: config.baseUrl };
+}
+
+/**
  * 把视频转写成 SRT 字幕：
  * 1. ffmpeg 按 SEGMENT_SECONDS 切片并抽取 16k 单声道 wav；
- * 2. 逐段调用智谱 GLM-ASR（glm-asr-2512）识别；
+ * 2. 逐段调用 GLM-ASR（glm-asr-2512）识别；
  * 3. 按时间轴合并为 SRT 写到 speechDir/captions.srt。
  * 任意一段失败都会跳过，整段无结果时返回 ok:false（调用方据此降级为无字幕版本）。
+ *
+ * 缺模型配置时抛 `ModelConfigError`（调用方转成「去系统配置」提示）。
  */
 export async function transcribeVideoToSrt(
   inputPath: string,
   speechDir: string,
   sendProgress?: (text: string) => void,
+  userId?: string,
 ): Promise<SrtResult> {
   if (!existsSync(inputPath)) return { ok: false, reason: "输入视频不存在" };
   mkdirSync(speechDir, { recursive: true });
@@ -50,18 +75,21 @@ export async function transcribeVideoToSrt(
   }
   if (segs.length === 0) return { ok: false, reason: "无法从视频提取音频" };
 
-  const key = process.env.ZHIPU_API_KEY;
-  if (!key) {
-    return { ok: false, reason: "未配置 ZHIPU_API_KEY，无法调用语音识别" };
+  if (!userId) {
+    return { ok: false, reason: "未提供用户身份，无法确定使用哪个语音识别服务" };
+  }
+  const credential = await resolveAsrCredential(userId);
+  if (!credential.apiKey) {
+    return { ok: false, reason: "「系统配置」中的模型服务没有可用密钥，无法调用语音识别" };
   }
 
   const cues: Cue[] = [];
   for (let i = 0; i < segs.length; i++) {
     sendProgress?.(`正在识别第 ${i + 1}/${segs.length} 段语音...`);
-    const text = await recognizeWithZhipu(segs[i].path, key);
+    const text = await recognizeWithZhipu(segs[i].path, credential.apiKey, credential.baseUrl);
     if (text && text.trim()) cues.push({ start: segs[i].start, end: segs[i].end, text: text.trim() });
   }
-  if (cues.length === 0) return { ok: false, reason: "智谱 ASR 未返回识别结果（请检查 ZHIPU_API_KEY 与接口可用性）" };
+  if (cues.length === 0) return { ok: false, reason: "语音识别未返回结果（请检查 API Key 与接口可用性）" };
 
   const srtPath = join(speechDir, "captions.srt");
   writeSrt(srtPath, cues);
@@ -115,9 +143,14 @@ export function parseSrtCues(srtPath: string): SrtCue[] {
  * 调用智谱 GLM-ASR：上传音频文件 → 轮询查询结果。
  * 接口路径以智谱官方文档为准；此处为通用实现，失败返回 null 由上层降级。
  */
-async function recognizeWithZhipu(audioPath: string, apiKey: string): Promise<string | null> {
+async function recognizeWithZhipu(
+  audioPath: string,
+  apiKey: string,
+  baseUrl?: string,
+): Promise<string | null> {
   try {
-    const base = "https://open.bigmodel.cn/api/paas/v4/files";
+    // 用户配的服务若不是智谱，baseUrl 会不同；默认仍用官方地址。
+    const base = (baseUrl?.trim() || "https://open.bigmodel.cn/api/paas/v4").replace(/\/+$/, "") + "/files";
     const body = readFileSync(audioPath);
     const form = new FormData();
     form.append("file", new Blob([body], { type: "audio/wav" }), "seg.wav");

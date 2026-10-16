@@ -55,19 +55,38 @@ export function localEmbed(text: string): number[] {
   return vector.map((value) => value / norm);
 }
 
-function embedConfig(model: string) {
-  const baseUrl = (
-    process.env.KB_EMBED_BASE_URL ||
-    process.env.DASHSCOPE_BASE_URL ||
-    "https://open.bigmodel.cn/api/paas/v4"
-  ).replace(/\/+$/, "");
-  const apiKey = process.env.KB_EMBED_API_KEY || process.env.DASHSCOPE_API_KEY || "";
-  return { baseUrl, apiKey, model };
+/**
+ * 取 embedding 用的凭据（只用当前用户自己的）。
+ *
+ * 改造前这里读 `process.env.KB_EMBED_API_KEY || process.env.DASHSCOPE_API_KEY` ——
+ * 平台公共 key，训练与检索都用它，不归属任何用户。2026-10-16 改为
+ * `resolveCapabilityConfig(userId, "embedding")`，与这轮隔离改造保持一致。
+ *
+ * 未配置时返回 null：调用方退回本地哈希向量（本地算法，不需要 key，
+ * 也不联网），这是**合理降级**而非静默烧平台额度。
+ */
+async function resolveEmbedCredential(
+  userId: string | undefined,
+  model: string,
+): Promise<{ baseUrl: string; apiKey: string } | null> {
+  if (!userId) return null;
+  try {
+    const { resolveCapabilityConfig } = await import("./model-credentials");
+    const config = await resolveCapabilityConfig(userId, "embedding");
+    if (!config.apiKey) return null;
+    return { baseUrl: config.baseUrl.replace(/\/+$/, ""), apiKey: config.apiKey };
+  } catch {
+    // 未配置 / 解密失败 → 交给上层用本地向量，不报错打断训练
+    return null;
+  }
 }
 
-async function remoteEmbedBatch(texts: string[], model: string): Promise<number[][]> {
-  const { baseUrl, apiKey } = embedConfig(model);
-  if (!apiKey) throw new Error("未配置 embedding API Key");
+async function remoteEmbedBatch(
+  texts: string[],
+  model: string,
+  credential: { baseUrl: string; apiKey: string },
+): Promise<number[][]> {
+  const { baseUrl, apiKey } = credential;
 
   const response = await fetch(`${baseUrl}/embeddings`, {
     method: "POST",
@@ -91,29 +110,39 @@ async function remoteEmbedBatch(texts: string[], model: string): Promise<number[
   return rows.map((row) => row.embedding);
 }
 
-/** 将一批文本转成向量；远端不可用时回退到本地向量。 */
-export async function embedTexts(texts: string[], model: string): Promise<EmbedResult> {
+/** 将一批文本转成向量；未配置 embedding 服务时使用本地向量。 */
+export async function embedTexts(
+  texts: string[],
+  model: string,
+  userId?: string,
+): Promise<EmbedResult> {
   if (texts.length === 0) return { vectors: [], model, remote: false };
 
-  const useRemote = isRemoteModel(model) && Boolean(process.env.KB_EMBED_API_KEY || process.env.DASHSCOPE_API_KEY);
-  if (useRemote) {
-    try {
-      const vectors: number[][] = [];
-      for (let i = 0; i < texts.length; i += REMOTE_BATCH) {
-        const batch = texts.slice(i, i + REMOTE_BATCH);
-        vectors.push(...(await remoteEmbedBatch(batch, model)));
+  if (isRemoteModel(model)) {
+    const credential = await resolveEmbedCredential(userId, model);
+    if (credential) {
+      try {
+        const vectors: number[][] = [];
+        for (let i = 0; i < texts.length; i += REMOTE_BATCH) {
+          const batch = texts.slice(i, i + REMOTE_BATCH);
+          vectors.push(...(await remoteEmbedBatch(batch, model, credential)));
+        }
+        return { vectors, model, remote: true };
+      } catch {
+        // 上游抖动 → 退回本地向量，不阻断知识库训练
       }
-      return { vectors, model, remote: true };
-    } catch {
-      // 静默回退到本地向量
     }
   }
 
   return { vectors: texts.map((text) => localEmbed(text)), model: LOCAL_MODEL, remote: false };
 }
 
-export async function embedOne(text: string, model: string): Promise<{ vector: number[]; model: string }> {
-  const result = await embedTexts([text], model);
+export async function embedOne(
+  text: string,
+  model: string,
+  userId?: string,
+): Promise<{ vector: number[]; model: string }> {
+  const result = await embedTexts([text], model, userId);
   return { vector: result.vectors[0] ?? localEmbed(text), model: result.model };
 }
 

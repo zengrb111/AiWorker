@@ -31,6 +31,8 @@ export type KbContext = {
   filenameMap: Map<string, string>;
   preferredModel: string;
   keywords: string[];
+  /** 归属用户：向量检索要按他的 embedding 配置算，否则会用平台公共 key。 */
+  userId: string;
 };
 
 export type HotTopicMatch = {
@@ -71,7 +73,8 @@ export async function loadUserKbContext(userId: string): Promise<KbContext | nul
     kbNameMap: new Map(knowledgeBases.map((kb) => [kb.id, kb.name])),
     filenameMap: new Map(docRows.map((doc) => [doc.id, doc.filename])),
     preferredModel: models.size === 1 ? [...models][0] : "local-hash-256",
-    keywords: extractKeywords(rows.map((row) => row.content))
+    keywords: extractKeywords(rows.map((row) => row.content)),
+    userId
   };
 }
 
@@ -163,7 +166,7 @@ export async function matchTopicsToKnowledge(topics: string[], ctx: KbContext): 
 
 async function bestMatchForTopic(topic: string, ctx: KbContext): Promise<Omit<HotTopicMatch, "topic" | "keywords"> | null> {
   // 与检索测试一致：向量得分 70% + 本地哈希得分 30% 混合
-  const { hits: vectorHits } = await scoreChunks(topic, ctx.candidates, ctx.preferredModel);
+  const { hits: vectorHits } = await scoreChunks(topic, ctx.candidates, ctx.preferredModel, ctx.userId);
   const localQuery = localEmbed(topic);
   const localMap = new Map(
     ctx.candidates.map((chunk) => [chunk.id, cosineSimilarity(localQuery, localEmbed(chunk.content))])
@@ -211,7 +214,7 @@ export async function retrieveReferenceChunks(queries: string[], ctx: KbContext,
   if (!ctx || ctx.candidates.length === 0) return "";
   const picked = new Map<string, RetrievalChunkInput>();
   for (const query of queries) {
-    const { hits } = await scoreChunks(query, ctx.candidates, ctx.preferredModel);
+    const { hits } = await scoreChunks(query, ctx.candidates, ctx.preferredModel, ctx.userId);
     for (const hit of hits.slice(0, topK)) {
       picked.set(hit.chunk.id, hit.chunk);
     }
@@ -256,7 +259,7 @@ export async function retrieveReferenceGroups(
   if (!ctx || ctx.candidates.length === 0) return [];
   const out: ReferenceGroup[] = [];
   for (const g of groups) {
-    const { hits } = await scoreChunks(g.query, ctx.candidates, ctx.preferredModel);
+    const { hits } = await scoreChunks(g.query, ctx.candidates, ctx.preferredModel, ctx.userId);
     const mapped: ReferenceHit[] = hits.slice(0, topK).map((h) => ({
       id: h.chunk.id,
       kbName: ctx.kbNameMap.get(h.chunk.knowledgeBaseId) ?? "未知知识库",

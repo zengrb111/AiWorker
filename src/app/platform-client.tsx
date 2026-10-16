@@ -17,14 +17,91 @@ type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: string };
  * soft=true 表示「只是本端等待超时」——网关侧的任务仍在后台继续执行，
  * 不该按失败渲染，否则用户会误以为任务挂了而重复发送。
  */
-function streamError(message: string, soft: boolean): Error & { soft?: boolean } {
-  const err = new Error(message) as Error & { soft?: boolean };
+/**
+ * 把 SSE 的 error 事件包成 Error。
+ *
+ * `modelConfig` 是「缺模型配置」的结构化分类（kind + capability）：
+ * 服务端在用户没配对话模型时会带上它，前端据此显示「去系统配置」入口，
+ * 而不是只给一句用户无法行动的文案。
+ */
+function streamError(
+  message: string,
+  soft: boolean,
+  modelConfig?: ModelConfigErrorPayload,
+): Error & { soft?: boolean; modelConfig?: ModelConfigErrorPayload } {
+  const err = new Error(message) as Error & {
+    soft?: boolean;
+    modelConfig?: ModelConfigErrorPayload;
+  };
   err.soft = soft;
+  if (modelConfig) err.modelConfig = modelConfig;
   return err;
 }
 
 function isSoftError(error: unknown): boolean {
   return (error as { soft?: boolean } | null)?.soft === true;
+}
+
+/**
+ * 后端返回的「模型未配置」结构化错误。
+ *
+ * 与 `ModelConfigErrorKind`（src/lib/model-credentials.ts）一一对应。
+ * 有它才能在前端区分「用户少配了一个模型」和「服务出故障」——
+ * 前者要给可点击的跳转入口，后者只该报错误。
+ */
+type ModelConfigErrorPayload = {
+  kind?: "no_provider" | "no_assignment" | "invalid_key" | "unknown";
+  capability?: string | null;
+};
+
+/**
+ * 带结构化配置信息的 API 错误。
+ * 只有服务端确认是「缺模型配置」时才会抛这个，别的错误仍走普通 Error。
+ */
+class ModelConfigApiError extends Error {
+  readonly payload: ModelConfigErrorPayload;
+  constructor(message: string, payload: ModelConfigErrorPayload) {
+    super(message);
+    this.name = "ModelConfigApiError";
+    this.payload = payload;
+  }
+}
+
+/** 能力 key → 界面上用的中文名（与后端 CAPABILITY_LABELS 保持一致）。 */
+const CAPABILITY_LABELS_FRONTEND: Record<string, string> = {
+  chat: "对话创作",
+  vision: "图片识别",
+  ocr: "文字识别",
+  tts: "语音合成",
+  video: "视频生成",
+  storyboard: "分镜规划",
+  embedding: "向量嵌入",
+  search: "联网搜索",
+};
+
+/**
+ * 从 API 响应体里判断是不是「缺模型配置」错误。
+ * 服务端约定：这类错误 HTTP 400 + body 带 { kind, capability }。
+ */
+function isModelConfigError(payload: unknown): payload is ModelConfigErrorPayload {
+  if (!payload || typeof payload !== "object") return false;
+  const kind = (payload as ModelConfigErrorPayload).kind;
+  return kind === "no_provider" || kind === "no_assignment" || kind === "invalid_key";
+}
+
+/** 把结构化配置错误翻译成「做什么能解决」的指引。 */
+function modelConfigGuidance(payload: ModelConfigErrorPayload): string {
+  const label = payload.capability ? CAPABILITY_LABELS_FRONTEND[payload.capability] ?? payload.capability : "";
+  switch (payload.kind) {
+    case "no_provider":
+      return `${label ? `「${label}」` : "该功能"}还没有可用的模型服务。请前往「系统配置」添加模型服务并填写 API Key。`;
+    case "no_assignment":
+      return `${label ? `「${label}」` : "该功能"}还没有指定使用哪个模型。请前往「系统配置 → 默认模型分配」里选择。`;
+    case "invalid_key":
+      return `${label ? `「${label}」` : "该模型"}的 API Key 无效或已失效。请前往「系统配置」重新填写并测试连接。`;
+    default:
+      return "模型配置有误，请前往「系统配置」检查。";
+  }
 }
 
 type AuthMode = "login" | "register";
@@ -363,6 +440,18 @@ const VIDEO_THEME_HINTS: Record<string, string> = {
 };
 
 /**
+ * 一条新闻素材。
+ *
+ * `isPrimary` = 这条视频唯一要讲的新闻。其余条目只是背景参考，
+ * 会被带进 prompt 但明确禁止写进文案（见 narration.ts 的 newsBlock）。
+ */
+type GenVideoNewsItem = {
+  title: string;
+  snippet: string;
+  isPrimary?: boolean;
+};
+
+/**
  * 一个镜头的方案摘要（对应后端 storyboard.ts 的 PlanSceneSummary）。
  *
  * 为什么用秒而不是毫秒：用户看的是「这个镜头 3.5 秒」，毫秒在这个场景里没有价值。
@@ -405,6 +494,8 @@ type GenVideoPlan = {
     subject: string;
     dominantColor: string;
   }>;
+  /** 本次文案依据的新闻事实（标题 + 摘要）。让用户能核对「文案到底依据什么」。 */
+  newsItems: Array<{ title: string; snippet: string }>;
   audioSeconds: number;
   diagnostics: {
     visionRecognized: number;
@@ -524,6 +615,21 @@ export default function PlatformClient() {
   const [genVideoMotion, setGenVideoMotion] = useState("auto");
   /** 效果调整：字幕样式（走 ffmpeg 烧录通道）。 */
   const [genVideoCaptionStyle, setGenVideoCaptionStyle] = useState("classic");
+  /**
+   * 本次热点检索到的新闻事实（标题 + 摘要）。
+   *
+   * 这是「让 AI 真正看懂新闻内容」的关键：它会一路带到旁白生成，
+   * 让口播围绕真实报道写，而不是只按创作要求凭空编。
+   */
+  const [genVideoNewsItems, setGenVideoNewsItems] = useState<GenVideoNewsItem[]>([]);
+  /**
+   * 主新闻在 genVideoNewsItems 里的下标。
+   *
+   * 默认 0（prepare 阶段已把模型选出的主新闻排在第一位）。
+   * 用户改选后，提交时按这里重排 isPrimary —— 这才是「视频内容与所选新闻一致」的落点：
+   * 不是由代码替他决定，而是他能看到、能改。
+   */
+  const [genVideoPrimaryIndex, setGenVideoPrimaryIndex] = useState(0);
 
   function removeGenVideoImage(index: number) {
     setGenVideoImages((previous) => {
@@ -1245,6 +1351,23 @@ export default function PlatformClient() {
    * 产出的是**结构化**方案摘要，不是进度文本 —— 用户据此判断方向对不对，
    * 不对就调效果或改创作要求后重来，而不是等 5 分钟看完一条不喜欢的片子。
    */
+  /**
+   * 把新闻素材序列化成提交给后端的 JSON。
+   *
+   * 按当前选中的下标重排 isPrimary，并把选中的那条挪到第一位 ——
+   * 后端 narration.ts 只认 isPrimary 的那条为「要写进文案的内容」，
+   * 所以这里必须保证标记和用户选择一致，而不是沿用 prepare 时的旧标记。
+   */
+  function buildNewsItemsPayload(): string | null {
+    if (!genVideoNewsItems.length) return null;
+    const index = Math.min(Math.max(genVideoPrimaryIndex, 0), genVideoNewsItems.length - 1);
+    const ordered = [
+      genVideoNewsItems[index],
+      ...genVideoNewsItems.filter((_, i) => i !== index),
+    ].map((item, i) => ({ ...item, isPrimary: i === 0 }));
+    return JSON.stringify(ordered);
+  }
+
   async function planGenVideo() {
     const files = genVideoImages.map((item) => item.file);
     const conversationId = activeConversation?.id;
@@ -1263,6 +1386,8 @@ export default function PlatformClient() {
       form.append("lookEffects", genVideoEffects.join(","));
       form.append("lookMotion", genVideoMotion);
       form.append("captionStyle", genVideoCaptionStyle);
+      const newsPayload = buildNewsItemsPayload();
+      if (newsPayload) form.append("newsItems", newsPayload);
 
       const response = await fetch(`/api/conversations/${conversationId}/gen-video/plan`, {
         method: "POST",
@@ -1285,12 +1410,19 @@ export default function PlatformClient() {
             (firstLine ? ` 响应开头：${firstLine}` : ""),
         );
       }
-      if (!payload.ok) throw new Error(payload.error);
+      if (!payload.ok) {
+        // 缺配置 → 抛带结构的错误，让外层给「去系统配置」入口；
+        // 其余错误仍按普通错误展示。
+        if (isModelConfigError(payload)) throw new ModelConfigApiError(payload.error, payload);
+        throw new Error(payload.error);
+      }
       setGenVideoPlan(payload.data);
-      // 方案已出，出片时走 planToken 由服务端复用已落盘的素材，这里无需再留文件句柄
+      // 方案已出，出片时走 planToken 由服务端复用已落盘的素材，这里无需再留 file 句柄
       clearGenVideoImages();
     } catch (error) {
-      setChatError(error instanceof Error ? error.message : "生成方案失败，请稍后重试。");
+      if (!reportApiFailure("生成方案失败", error)) {
+        setChatError(error instanceof Error ? error.message : "生成方案失败，请稍后重试。");
+      }
     } finally {
       setGenVideoPlanning(false);
     }
@@ -1322,6 +1454,8 @@ export default function PlatformClient() {
       form.append("lookEffects", genVideoEffects.join(","));
       form.append("lookMotion", genVideoMotion);
       form.append("captionStyle", genVideoCaptionStyle);
+      const newsPayload = buildNewsItemsPayload();
+      if (newsPayload) form.append("newsItems", newsPayload);
       // 已确认的方案：带上 planToken，服务端跳过识图/旁白/配音/分镜直接渲染
       if (genVideoPlan) form.append("planToken", genVideoPlan.planToken);
       const response = await fetch(`/api/conversations/${conversationId}/gen-video`, { method: "POST", body: form, signal: controller.signal });
@@ -1365,20 +1499,21 @@ export default function PlatformClient() {
             setGenVideoEffects([]);
             setGenVideoMotion("auto");
             setGenVideoCaptionStyle("classic");
+            setGenVideoNewsItems([]);
+            setGenVideoPrimaryIndex(0);
             // 内容仍正常入库并刷新内容库列表，但不弹「已保存到内容库」提示条。
             if (data.contentSaved) {
               await refreshContent();
             }
             await refreshConversations();
           } else if (data.type === "error") {
-            throw streamError(data.error, data.soft === true);
+            throw streamError(data.error, data.soft === true, data.modelConfig);
           }
         }
       }
     } catch (error) {
       if (!controller.signal.aborted) {
-        setChatErrorSoft(isSoftError(error));
-        setChatError(error instanceof Error ? error.message : "视频生成失败。");
+        reportApiFailure("视频生成失败", error);
       }
     } finally {
       setStreamingContent("");
@@ -1412,6 +1547,12 @@ export default function PlatformClient() {
       const payload = (await response.json()) as ApiResponse<{
         requirement: string;
         images: Array<{ url: string; name: string }>;
+        /**
+         * 本次检索到的新闻素材，第一条是主新闻（这条视频唯一要讲的内容）。
+         * 必须带到 gen-video：创作要求只说「怎么做」不含「讲什么」，
+         * 旁白要靠这些标题摘要才知道该讲什么，否则只能编。
+         */
+        newsItems?: GenVideoNewsItem[];
         /** 联网检索不可用，已退化为本地整理创作要求（无配图）。 */
         degraded?: boolean;
         degradedReason?: string;
@@ -1442,6 +1583,8 @@ export default function PlatformClient() {
       clearGenVideoImages();
       setGenVideoImages(files);
       setGenVideoRequirement(prepared.requirement ?? "");
+      setGenVideoNewsItems(prepared.newsItems ?? []);
+      setGenVideoPrimaryIndex(0);
       setGenVideoPanelOpen(true);
       if (prepared.degraded) {
         // 降级模式：没有联网资讯与新闻配图，只有本地整理出的创作要求。
@@ -1837,9 +1980,47 @@ export default function PlatformClient() {
     if (key === "accounts") setAccountsResetToken((token) => token + 1);
     if (key === "settings") {
       setSettingsResetToken((token) => token + 1);
-      // 模型配置改完，回到对话页时模型选择器要反映最新的 chat 分配
+      // 模型配置改完，回到对话页时 model 选择器要 reflect 最新的 chat 分配
       void loadModels();
     }
+  }
+
+  /**
+   * 统一处理「缺模型配置」类错误。
+   *
+   * 为什么要单独抽出来：这类错误用户**能自己解决**，但错误文案本身
+   * 只是一句「未配置 X」，他不知道该点哪里。所以除了文案，还必须给一个
+   * 可点击的「去系统配置」入口 —— 否则用户只能去翻菜单找。
+   *
+   * 同时走两处提示（不重复）：
+   *  - setChatError：常驻输入框上方，处理完不走；
+   *  - setToast：带跳转按钮，4 秒后自动消失，视线离开输入框也能看到。
+   */
+  function reportModelConfigError(payload: ModelConfigErrorPayload) {
+    const guidance = modelConfigGuidance(payload);
+    setChatError(guidance);
+    setToast({ message: guidance, linkLabel: "去系统配置", linkSection: "settings" });
+  }
+
+  /**
+   * 把 fetch 失败 / 业务错误统一转成用户可读提示。
+   * 返回 true 表示「这是缺配置错误，已给出指引」。
+   *
+   * 同时认两种来源：
+   *  - `ModelConfigApiError`：JSON 接口（/gen-video/plan）直接抛出的
+   *  - `error.modelConfig`：SSE 流（/gen-video）在 error 事件里挂上来的
+   */
+  function reportApiFailure(context: string, error: unknown): boolean {
+    const payload =
+      (error as { modelConfig?: ModelConfigErrorPayload } | null)?.modelConfig ??
+      (error instanceof ModelConfigApiError ? error.payload : undefined);
+    if (payload && isModelConfigError(payload)) {
+      reportModelConfigError(payload);
+      return true;
+    }
+    setChatErrorSoft(isSoftError(error));
+    setChatError(`${context}：${error instanceof Error ? error.message : "未知错误"}`);
+    return false;
   }
 
   async function saveContentEdit() {
@@ -2512,6 +2693,43 @@ export default function PlatformClient() {
                           </span>
                         </div>
 
+                        {/* ---- 主新闻选择 ----
+                            一条视频只讲一条新闻。联网检索（尤其内置热榜）会带回十几条彼此
+                            不相干的新闻，早期版本把它们全喂给写稿模型，结果一条视频里讲了好几件事。
+                            现在由 prepare 阶段选出主新闻，并在这里让用户核对/改选。 */}
+                        {genVideoNewsItems.length > 0 && (
+                          <div className="gen-video-news-picker">
+                            <div className="gen-video-news-picker-title">
+                              这条视频讲哪条新闻
+                              <span className="gen-video-news-picker-hint">
+                                旁白只会讲选中的这一条，其余仅作背景参考，不会写进文案
+                              </span>
+                            </div>
+                            <div className="gen-video-news-options">
+                              {genVideoNewsItems.map((item, i) => {
+                                const active = i === genVideoPrimaryIndex;
+                                return (
+                                  <label key={`${item.title}-${i}`} className={`gen-video-news-option${active ? " active" : ""}`}>
+                                    <input
+                                      type="radio"
+                                      name="genVideoPrimaryNews"
+                                      checked={active}
+                                      onChange={() => setGenVideoPrimaryIndex(i)}
+                                    />
+                                    <span className="gen-video-news-option-body">
+                                      <span className="gen-video-news-option-title">{item.title}</span>
+                                      {item.snippet && !/^来自\s*\S+\s*热榜/.test(item.snippet) && (
+                                        <span className="gen-video-news-option-snippet">{item.snippet}</span>
+                                      )}
+                                    </span>
+                                    {active && <span className="gen-video-news-option-badge">主新闻</span>}
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
                         {/* ---- 方案确认区 ----
                             需求原文：「先理解素材 → 出方案 → 用户选 → 再生成」。
                             改造前这些全藏在 runVideoPipeline 里，点开始就跑，用户全程看不到方案。 */}
@@ -2548,6 +2766,28 @@ export default function PlatformClient() {
                                 <span className="gen-video-plan-note">{genVideoPlan.themeReason}</span>
                               </span>
                             </div>
+
+                            {genVideoPlan.newsItems.length > 0 && (
+                              <div className="gen-video-plan-block">
+                                <div className="gen-video-plan-key">文案依据的新闻</div>
+                                <div className="gen-video-news-list">
+                                  {genVideoPlan.newsItems.map((item, i) => (
+                                    <div key={i} className="gen-video-news-item">
+                                      <span className="gen-video-news-no">{i + 1}</span>
+                                      <span className="gen-video-news-body">
+                                        <span className="gen-video-news-title">{item.title}</span>
+                                        {item.snippet && !/^来自\s*\S+\s*热榜/.test(item.snippet) && (
+                                          <span className="gen-video-news-snippet">{item.snippet}</span>
+                                        )}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                                <span className="gen-video-engine-hint">
+                                  旁白围绕上面这些新闻事实撰写，并要求不编造未出现的人物、数字与结论。
+                                </span>
+                              </div>
+                            )}
 
                             {genVideoPlan.insights.length > 0 && (
                               <div className="gen-video-plan-block">

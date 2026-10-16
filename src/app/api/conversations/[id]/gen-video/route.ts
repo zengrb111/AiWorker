@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { DEFAULT_TTS_PROVIDER, resolveTtsProvider } from "@/lib/tts";
 import { parseTargetSeconds, pickBgm, resolveRenderEngine, runVideoPipeline, type VideoPlanDraft } from "@/lib/video/pipeline";
-import { parseLookFromForm } from "@/lib/video/plan-params";
+import { parseLookFromForm, parseNewsItems } from "@/lib/video/plan-params";
 import { renderViaOpenClaw } from "@/lib/video/legacy-openclaw";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
@@ -175,6 +175,8 @@ export async function POST(request: Request, context: { params: { id: string } }
           requirement,
           // 视频时长由旁白 TTS 时长决定；这里给的是「配文阶段」的目标时长
           targetSeconds: parseTargetSeconds(requirement),
+          // 新闻事实：从 prepare 阶段原样带过来，让旁白基于真实新闻内容写稿
+          newsItems: savedPlan ? undefined : parseNewsItems(form),
           ttsProvider,
           theme,
           look,
@@ -187,7 +189,19 @@ export async function POST(request: Request, context: { params: { id: string } }
           onProgress: sendProgress,
         });
 
-        if (!result.ok) throw new Error(result.error || "视频生成失败。");
+        if (!result.ok) {
+          // 缺模型配置：把结构化分类挂到错误对象上，随 SSE 的 error 事件下发，
+          // 前端据此弹「去系统配置」入口。不带 planToken 的直接出片路径
+          // 会重新生成文案，所以这条路径同样可能因未配置 chat 而失败。
+          if (result.modelConfig) {
+            const configError = new Error(result.error || "视频生成失败。") as Error & {
+              modelConfig?: { kind: string; capability: string | null };
+            };
+            configError.modelConfig = result.modelConfig;
+            throw configError;
+          }
+          throw new Error(result.error || "视频生成失败。");
+        }
 
         // 方案已出片，标记为 RENDERED（刷新后前端据此不再重复出片）
         if (savedPlan) {
@@ -273,7 +287,16 @@ export async function POST(request: Request, context: { params: { id: string } }
           })
           .catch(() => undefined);
         await prisma.openClawTask.update({ where: { id: task.id }, data: { status: "FAILED", error: message } });
-        controller.enqueue(sseEncode({ type: "error", error: message }));
+        controller.enqueue(
+          sseEncode({
+            type: "error",
+            error: message,
+            // 缺模型配置时带上 kind/capability，前端才能弹「去系统配置」入口
+            modelConfig: (error as { modelConfig?: { kind: string; capability: string | null } })
+              ?.modelConfig,
+          }),
+        );
+
       } finally {
         // 必须清掉心跳：流 close 之后继续 enqueue 会抛错
         clearInterval(heartbeat);

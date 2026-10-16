@@ -24,11 +24,12 @@ export type ScoredChunk = {
 export async function scoreChunks(
   query: string,
   chunks: RetrievalChunkInput[],
-  model: string
+  model: string,
+  userId?: string,
 ): Promise<{ hits: ScoredChunk[]; space: "stored" | "local"; model: string }> {
   if (chunks.length === 0) return { hits: [], space: "local", model };
 
-  const { vector: queryVector, model: usedModel } = await embedOne(query, model);
+  const { vector: queryVector, model: usedModel } = await embedOne(query, model, userId);
   const stored = chunks.map((chunk) => parseEmbedding(chunk.embedding));
 
   const allStoredMatch = stored.every((vec) => vec !== null && vec.length === queryVector.length);

@@ -70,7 +70,8 @@ export async function POST(request: Request) {
   const { hits: vectorHits } = await scoreChunks(
     query,
     candidates,
-    mode === "bm25" ? LOCAL_MODEL : preferredModel
+    mode === "bm25" ? LOCAL_MODEL : preferredModel,
+    user.id,
   );
 
   const localQuery = localEmbed(query);

@@ -16,16 +16,21 @@
  * 识图结果（caption/mood/subject）在 pipeline 里本来就已经拿到了，
  * 却没有一路传到这里，是「先理解素材再出方案」链路上最明显的一处断点。
  *
- * ## 模型来源
+ * ## 模型来源（只用当前用户自己的）
  *
- * 走**当前用户**在「系统配置 → 模型配置」里为 chat 指定的服务；
- * 没有配置时回落全局 env 的智谱 GLM（保留旧行为，便于后台出片等无人场景）。
+ * 走**当前用户**在「系统配置 → 模型配置」里为 chat 指定的服务。
+ *
+ * 这里曾经有一个「全局 env 智谱 GLM」兜底（`process.env.ZHIPU_API_KEY` 直连），
+ * 2026-10-16 已移除。原因有两条：
+ *  1. 违反按用户隔离 —— 用户没配也照样出片，平台替所有人付钱，调用记录还不归属任何人；
+ *  2. 静默失败 —— 用户看到的只是「文案写得不好」，完全不知道是自己没配置。
+ * 现在未配置会抛 `ModelConfigError`，由 API 层转成结构化错误码，前端给出跳转指引。
+ *
+ * 但**调用失败（限流 / 超时 / 上游 5xx）仍然降级为无旁白**，不阻断出片：
+ * 那属于外部抖动，与「没配置」是两回事，不该让用户为一次抖动等重试。
  */
 import { chatComplete } from "./llm-client";
-
-const ZHIPU_API_KEY = process.env.ZHIPU_API_KEY ?? "";
-const ZHIPU_CHAT_API = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-const NARRATION_MODEL = process.env.NARRATION_MODEL ?? "glm-4-flash";
+import { ModelConfigError } from "./model-credentials";
 
 export type NarrationScript = {
   /** 视频标题（8~14 字） */
@@ -42,6 +47,30 @@ export type NarrationInsight = {
   mood?: string;
   subject?: string;
 };
+
+/**
+ * 新闻事实的最小形状（与 web-search.SearchHit 对齐，同样不直接依赖以避免循环引用）。
+ *
+ * 为什么要单独传新闻，而不能只靠创作要求：
+ * 创作要求是「怎么做」的指令（角度、节奏、风格），它**不含事实**。
+ * 模型拿不到标题和摘要就只能编 —— 写出来的旁白听着通顺，但和文章对不上。
+ */
+export type NarrationNewsItem = {
+  title?: string;
+  snippet?: string;
+  /**
+   * 是否为「这条视频唯一要讲的新闻」。
+   * 缺省时第一条视为主新闻（见 generateNarrationScript）。
+   */
+  isPrimary?: boolean;
+};
+
+/**
+ * 内置公开热榜的「摘要」多数是占位串而不是真摘要（hot-boards.ts 里
+ * `snippet: clean(row[snippetField]) || \`来自 ${origin} 热榜\``）。
+ * 这类文本没有任何信息量，塞进 prompt 只会占位置并误导模型，识别到就丢掉。
+ */
+const PLACEHOLDER_SNIPPET = /^(来自\s*\S+\s*热榜|热榜|暂无摘要|-{2,})[\s。.]*$/;
 
 /** 从模型返回文本里尽量解析出 { title, segments }。 */
 function parseScript(content: string): { title: string; segments: string[] } {
@@ -99,36 +128,28 @@ function trimToMaxChars(text: string, maxChars: number): string {
  * 有 userId 时优先走用户自己的 chat 服务；没有配置或调用失败时回落全局 env 的智谱 GLM。
  * 两条路都失败才返回 null，由上层降级成「无旁白，仅画面」。
  */
-async function chatOnce(prompt: string, userId?: string): Promise<string | null> {
-  if (userId) {
-    try {
-      const r = await chatComplete({
-        userId,
-        capability: "chat",
-        prompt,
-        temperature: 0.6,
-        timeoutMs: 90_000,
-      });
-      return r.content.trim() || null;
-    } catch {
-      // 未配置 chat 服务或调用失败 → 尝试全局 env 兜底
-    }
-  }
+/**
+ * 调一次对话模型。
+ *
+ * 两类失败刻意区别对待：
+ * - `ModelConfigError`（用户没配 chat 服务）→ **向上抛**，让上层给配置指引。
+ *   不能吞：吞掉就退化成「无旁白纯画面」，用户看完片子也不知道是缺配置。
+ * - 其它（限流 / 超时 / 上游 5xx / 余额不足）→ 返回 null 降级为无旁白。
+ *   这类是外部抖动，阻断出片反而更糟。
+ */
+async function chatOnce(prompt: string, userId: string): Promise<string | null> {
+  if (!userId) return null;
   try {
-    const res = await fetch(ZHIPU_CHAT_API, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${ZHIPU_API_KEY}` },
-      body: JSON.stringify({
-        model: NARRATION_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.6,
-      }),
-      signal: AbortSignal.timeout(60_000),
+    const r = await chatComplete({
+      userId,
+      capability: "chat",
+      prompt,
+      temperature: 0.6,
+      timeoutMs: 90_000,
     });
-    if (!res.ok) return null;
-    const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    return (json.choices?.[0]?.message?.content ?? "").trim() || null;
-  } catch {
+    return r.content.trim() || null;
+  } catch (error) {
+    if (error instanceof ModelConfigError) throw error;
     return null;
   }
 }
@@ -154,7 +175,7 @@ async function expandNarrationScript(
   ]
     .filter(Boolean)
     .join("\n");
-  const text = await chatOnce(prompt, userId);
+  const text = await chatOnce(prompt, userId ?? "");
   if (!text) return null;
   // 去掉模型可能带的引号/围栏
   return text.replace(/```/g, "").replace(/^["“”]+|["“”]+$/g, "").trim();
@@ -174,9 +195,12 @@ export async function generateNarrationScript(
   imageCount: number,
   targetSeconds = 30,
   insights: NarrationInsight[] = [],
+  newsItems: NarrationNewsItem[] = [],
   userId?: string
 ): Promise<NarrationScript | null> {
-  if (!userId && !ZHIPU_API_KEY) return null;
+  // 没传 userId 就没有「用户自己的 key」可用，放弃生成（上层降级为无旁白）。
+  // 不再退回全局 env —— 见文件头「模型来源」。
+  if (!userId) return null;
 
   // 目标时长（秒）→ 目标字数（中文口播约 4.5 字/秒）。封顶 60s、下限 8s。
   const safeTarget = Math.min(60, Math.max(8, Math.round(targetSeconds || 30)));
@@ -199,12 +223,53 @@ export async function generateNarrationScript(
         ? `参考图共 ${imageCount} 张，画面围绕这些视觉素材展开。`
         : "";
 
+  // 新闻事实：与图片一起构成「素材」。缺了它模型只能按创作要求凭空写，
+  // 写出来的旁白和文章内容对不上 —— 这正是「针对性」要解决的问题。
+  // snippet 可能是热榜的占位串（"来自 toutiao 热榜"），这类必须滤掉，
+  // 否则等于把噪声当新闻塞给模型。
+  //
+  // 关键：**主新闻只有一条**。联网检索（尤其内置热榜）常常返回十几条彼此无关的
+  // 新闻，早期版本把它们全写进 prompt，结果一条视频里讲了好几件不相干的事。
+  // 现在只有 isPrimary 的那条是要写进文案的内容，其余仅作背景理解，
+  // 并且 prompt 里明确禁止把它们的事件、人物、数字写进来。
+  const usableNews = newsItems.filter((n) => (n.title ?? "").trim()).slice(0, 12);
+  const formatNews = (n: NarrationNewsItem) => {
+    const summary = (n.snippet ?? "").trim();
+    const body = summary && !PLACEHOLDER_SNIPPET.test(summary) ? summary : "";
+    return `${(n.title ?? "").trim()}${body ? ` —— ${body}` : ""}`;
+  };
+  const primaryNews = usableNews.find((n) => n.isPrimary) ?? usableNews[0];
+  const backgroundNews = usableNews.filter((n) => n !== primaryNews).slice(0, 3);
+
+  const newsBlock = primaryNews
+    ? [
+        "以下是这条视频**唯一要讲的新闻事实**（来自联网检索的真实报道）。",
+        "硬性要求：",
+        "- 标题和旁白都必须扣住这条新闻，不要出现任何其它新闻的事件、人物、数字或结论",
+        "- **严禁编造**上面没有出现的人物、数字、时间、地点、结论",
+        "- 信息不足时用「据报道」这类模糊表达，不要自己补细节",
+        "",
+        `【主新闻】${formatNews(primaryNews)}`,
+        backgroundNews.length > 0
+          ? `\n【仅供理解背景，禁止写入文案】\n${backgroundNews.map(formatNews).map((line) => `- ${line}`).join("\n")}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "";
+  // 总长度兜底，避免把写作要求挤出 prompt。
+  const trimmedNews = newsBlock.length > 2600 ? newsBlock.slice(0, 2600) + "…" : newsBlock;
+
   const prompt = [
     "你是短视频文案专家。请为一条竖版短视频输出「标题 + 口播旁白」。",
     `创作主题 / 要求：${requirement?.trim() || "温暖治愈风格，主题由你根据常识合理设定"}`,
+    trimmedNews,
     described.length > 0
       ? `以下是系统识别出的素材内容，旁白必须围绕这些画面展开，不要描述画面里没有的东西：\n${materialLines}`
       : materialLines,
+    trimmedNews && described.length > 0
+      ? "画面与新闻要互相印证：优先挑选那些**能对得上新闻内容**的画面来承担对应句子。"
+      : "",
     "写作要求：",
     "- 标题：8~14 个字，有吸引力、能勾起共鸣，概括主题，不要引号和标点堆砌",
     // 旁白长度服从目标时长：这是视频时长的唯一决定因素，必须严格遵守。
@@ -219,7 +284,7 @@ export async function generateNarrationScript(
     .filter(Boolean)
     .join("\n");
 
-  const raw = await chatOnce(prompt, userId);
+  const raw = await chatOnce(prompt, userId ?? "");
   if (!raw) return null;
   const { title, segments } = parseScript(raw);
   if (!segments.length) return null;

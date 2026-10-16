@@ -30,7 +30,8 @@ export async function POST(_request: Request, context: { params: { id: string } 
   try {
     const { vectors, model, remote } = await embedTexts(
       chunks.map((chunk) => chunk.content),
-      knowledgeBase.vectorModel
+      knowledgeBase.vectorModel,
+      user.id,
     );
 
     const now = new Date();
