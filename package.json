@@ -13,17 +13,24 @@
     "check": "tsc --noEmit",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "remotion:compositions": "remotion compositions remotion/src/index.tsx",
+    "remotion:studio": "remotion studio remotion/src/index.tsx",
+    "remotion:browser": "remotion browser ensure"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.11",
     "@prisma/client": "^5.22.0",
+    "@remotion/cli": "^4.0.535",
+    "@remotion/media": "^4.0.535",
+    "@remotion/transitions": "^4.0.535",
     "@types/qrcode": "^1.5.6",
     "next": "^14.2.24",
     "pdf-parse": "^2.4.5",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.535"
   },
   "devDependencies": {
     "@types/node": "^20.17.17",

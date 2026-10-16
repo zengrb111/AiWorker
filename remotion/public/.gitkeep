@@ -1,0 +1,8 @@
+本目录是 Remotion 的 public 目录（staticFile() 的根）。
+
+每次渲染时 src/lib/video/render.ts 会在这里创建 generated/<token>/ 存放素材与
+storyboard.json，渲染结束后清理（失败时保留以便排查）。generated/ 已被 .gitignore 忽略，
+因此本文件用于让空目录能进版本库。
+
+不要把 Next.js 的 public/ 指到这里或反过来：Remotion 每次渲染都会把整个 public 目录
+拷进渲染 bundle，Next 的 public/ 里有 videos/ 等成片，会导致每次渲染搬运十几 MB。

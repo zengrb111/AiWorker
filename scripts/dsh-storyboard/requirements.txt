@@ -1,0 +1,11 @@
+# DSH（DeepSeek Harness）Python 依赖
+#
+# 安装（在仓库根目录执行，venv 建在 .dsh-venv/，已被 .gitignore 忽略）：
+#   python -m venv .dsh-venv
+#   .\.dsh-venv\Scripts\python.exe -m pip install -r scripts/dsh-storyboard/requirements.txt
+#
+# 要求 Python 3.10+（src/lib/python.ts 的 resolveDshPython 会校验版本）。
+#
+# DSH 目前处于技术预览阶段，版本号可能变动；这里不锁死小版本，
+# 便于用 `pip install --upgrade deepseek-harness-sdk` 跟进上游。
+deepseek-harness-sdk>=0.1.0

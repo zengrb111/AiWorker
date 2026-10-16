@@ -26,7 +26,30 @@ export async function normalizeToVertical(
   return { ok: true, outputPath };
 }
 
-/** 把 SRT 字幕烧录进视频（中文字体回退到微软雅黑）。 */
+/**
+ * 免费可商用的中文字体（SIL OFL 1.1）。
+ *
+ * 历史坑：早先用 `C:/Windows/Fonts/msyh.ttc`（微软雅黑），它是**方正授权**字体，
+ * 不是免费可商用；回退项 `arial.ttf` 又根本不含中文字形（中文会变成豆腐块）。
+ * 现统一改为 Noto Sans SC，且**优先用仓库内的那一份**，
+ * 不依赖目标机器装了什么字体 —— 换机器或上服务器都不会静默 fallback。
+ */
+const FONT_CANDIDATES = [
+  join(process.cwd(), "assets", "fonts", "NotoSansSC-VF.ttf"),
+  "C:\\Windows\\Fonts\\NotoSansSC-VF.ttf",
+  "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+  "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+];
+
+/** 找到第一个存在的免费字体；全都缺失时返回 null。 */
+function resolveFreeFont(): string | null {
+  for (const candidate of FONT_CANDIDATES) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/** 把 SRT 字幕烧录进视频（Noto Sans SC，SIL OFL 1.1 免费可商用）。 */
 export async function burnSubtitles(
   inputPath: string,
   srtPath: string,
@@ -35,11 +58,19 @@ export async function burnSubtitles(
 ): Promise<StitchResult> {
   if (!existsSync(inputPath)) return { ok: false, reason: `输入不存在：${inputPath}` };
   if (!existsSync(srtPath)) return { ok: false, reason: `字幕文件不存在：${srtPath}` };
+  // 字体缺失时不静默 fallback 到版权字体：宁可明确失败，也不要产出有侵权风险的成片
+  const resolvedFont = resolveFreeFont();
+  if (!resolvedFont) {
+    return {
+      ok: false,
+      reason:
+        "未找到免费可商用的中文字体（Noto Sans SC）。请确认 assets/fonts/NotoSansSC-VF.ttf 存在，或安装 Noto Sans SC。",
+    };
+  }
   // Windows 路径转义：反斜杠→正斜杠，冒号→\:
   const escaped = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-  const fontfile = existsSync("C:/Windows/Fonts/msyh.ttc")
-    ? "fontfile=C\\:/Windows/Fonts/msyh.ttc"
-    : "fontfile=C\\:/Windows/Fonts/arial.ttf";
+  const escapedFont = resolvedFont.replace(/\\/g, "/").replace(/:/g, "\\:");
+  const fontfile = `fontfile=${escapedFont}`;
   // SRT 样式：56 号常规白字 + 3px 黑描边 + 轻微阴影，底部居中（竖版安全区）。
   const filter = `subtitles='${escaped}':charenc=UTF-8:force_style='${fontfile},PlayResX=1080,PlayResY=1920,FontSize=56,Bold=0,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginL=60,MarginR=60,MarginV=340'`;
   onProgress?.("正在烧录字幕...");
@@ -220,9 +251,16 @@ export async function addTitleOverlay(
   const titleFile = join(dirname(outputPath), `title-${Date.now()}.txt`);
   writeFileSync(titleFile, clean, "utf-8");
   const escTxt = titleFile.replace(/\\/g, "/").replace(/:/g, "\\:");
-  const fontfile = existsSync("C:/Windows/Fonts/msyh.ttc")
-    ? "C\\:/Windows/Fonts/msyh.ttc"
-    : "C\\:/Windows/Fonts/arial.ttf";
+  // 与 burnSubtitles 同一套免费字体（Noto Sans SC，SIL OFL 1.1）
+  const resolvedFont = resolveFreeFont();
+  if (!resolvedFont) {
+    return {
+      ok: false,
+      reason:
+        "未找到免费可商用的中文字体（Noto Sans SC）。请确认 assets/fonts/NotoSansSC-VF.ttf 存在，或安装 Noto Sans SC。",
+    };
+  }
+  const fontfile = resolvedFont.replace(/\\/g, "/").replace(/:/g, "\\:");
 
   const filter =
     `drawtext=fontfile='${fontfile}':textfile='${escTxt}':` +

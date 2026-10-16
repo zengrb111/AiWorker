@@ -72,6 +72,45 @@ async function probeDurationSafe(path: string): Promise<number> {
   return probeDuration(path);
 }
 
+/** 与 tts.WordCaption 同形，便于直接喂给字幕烧录与分镜规划。 */
+export type SrtCue = { word: string; startMs: number; endMs: number };
+
+/**
+ * 读回 SRT 为结构化字幕。
+ *
+ * transcribeVideoToSrt 只返回 srtPath，但下游有两处需要结构化数据：
+ * ① 把口播文本喂给 DeepSeek 做剪辑节奏决策；
+ * ② buildSrtFromCaptions 的入参格式。
+ * 与其让调用方各自写正则，不如在这里给一个统一的解析器。
+ */
+export function parseSrtCues(srtPath: string): SrtCue[] {
+  if (!existsSync(srtPath)) return [];
+  const raw = readFileSync(srtPath, "utf-8");
+  const timeLine = /(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})/;
+  const toMs = (h: string, m: string, s: string, ms: string) =>
+    Number(h) * 3_600_000 + Number(m) * 60_000 + Number(s) * 1_000 + Number(ms.padEnd(3, "0"));
+
+  const cues: SrtCue[] = [];
+  for (const block of raw.split(/\r?\n\r?\n/)) {
+    const lines = block.split(/\r?\n/).filter((l) => l.trim());
+    const timeIndex = lines.findIndex((l) => timeLine.test(l));
+    if (timeIndex < 0) continue;
+    const match = timeLine.exec(lines[timeIndex])!;
+    const text = lines
+      .slice(timeIndex + 1)
+      .join(" ")
+      .replace(/<[^>]+>/g, "")
+      .trim();
+    if (!text) continue;
+    cues.push({
+      word: text,
+      startMs: toMs(match[1], match[2], match[3], match[4]),
+      endMs: toMs(match[5], match[6], match[7], match[8]),
+    });
+  }
+  return cues;
+}
+
 /**
  * 调用智谱 GLM-ASR：上传音频文件 → 轮询查询结果。
  * 接口路径以智谱官方文档为准；此处为通用实现，失败返回 null 由上层降级。

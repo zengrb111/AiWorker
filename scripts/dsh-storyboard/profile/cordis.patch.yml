@@ -1,0 +1,113 @@
+# DSH 受限 profile 覆盖层（patch list）
+#
+# 官方 sdk profile 自带 tool-bash / tool-pwsh / tool-fs / web / subagent 等一整套工具，
+# 而分镜规划是纯文本任务：只需要模型输出一段 JSON。
+# 这里把能碰文件系统、起子进程、联网、派生子代理的插件全部 disabled，
+# 原则是「宁可多关几个」——任何拿不准的工具都显式关掉。
+#
+# 生效方式：src/lib/dsh.ts 通过 HarnessConfig(patches=[本文件]) 传给 DSH 运行时，
+# 等价于命令行 dsh --profile sdk --patch <本文件>。
+#
+# 格式：YAML 序列，每项是插件覆盖 {id, disabled?, config?}；
+# id 必须与 --dump-config 输出里的 "- id:" 完全一致，否则不生效（且不报错，静默失效）。
+
+# ---- 会起子进程 / 执行命令的 ----
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+
+# ---- 会读写文件系统的 ----
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: fs-observation-policy
+  disabled: true
+- id: attachment-local
+  disabled: true
+- id: spill-local
+  disabled: true
+- id: skill
+  disabled: true
+- id: skill-filesystem
+  disabled: true
+- id: tool-skill
+  disabled: true
+
+# ---- 会派生执行主体的 ----
+- id: subagent
+  disabled: true
+- id: subagent-spawn-in-process
+  disabled: true
+- id: subagent-fork-in-process
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: workflow-worker-thread
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: goal
+  disabled: true
+- id: goal-round-driver
+  disabled: true
+- id: command-goal
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: plan-mode
+  disabled: true
+- id: command-feedback
+  disabled: true
+
+# ---- 外联与遥测：分镜内容不含隐私，且不需要联网 ----
+# 注意：真正提供工具的是 tool-web，而 web / web-search-deepseek / web-fetch-http
+# 只是它的 provider 与配置层。只关 web 不关 tool-web 是无效的（已实测）。
+- id: web
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: web-search-deepseek
+  disabled: true
+- id: web-fetch-http
+  disabled: true
+- id: session-log-deepseek
+  disabled: true
+- id: session-telemetry-otel
+  disabled: true
+- id: plugin-package-inventory-deepseek
+  disabled: true
+- id: session-title
+  disabled: true
+- id: session-title-llm
+  disabled: true
+
+# ---- 收尾 ----
+# 只关没有插件依赖的部分。**不能**关下面这些，它们提供的是 service 而非能力。
+# 这条依赖链是实测踩出来的（每关一个，profile 就少激活一层并直接启动失败）：
+#     subprocess → bash-sandbox / pwsh-sandbox → shell → permission-presets
+#     commands  → command-compact
+#     approval  → permission-presets
+# 关掉任何一个，profile 启动即报
+# "N entries did not activate ... pending (waiting for service: subprocess|shell)"。
+#     session-persistence-jsonl → 提供 sessionPersistence service（session-checkpoint-policy 依赖它）
+# 留着它们是安全的：真正把命令执行暴露给模型的入口
+# tool-bash / tool-pwsh / tool-jobs 与读写入口 tool-fs / tool-fs-search / tool-subagent
+# 均已禁用；沙箱只负责在被调用时约束参数，没有工具去调用它就是 inert 的。
+# 会话落盘在 $DSH_HOME/sessions（已 gitignore）。因此每次调用的 session id 必须唯一，
+# 否则会报 "session already exists" —— src/lib/dsh.ts 会给 id 追加随机后缀来保证这点。
+- id: user-questions
+  disabled: true

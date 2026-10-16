@@ -100,17 +100,22 @@ function isVideoCategory(category: string): boolean {
 }
 
 /**
- * 短视频渲染走**独立会话**，不占用用户实时对话会话（agent:main:user-<id>）。
+ * 关于「视频渲染与实时对话抢同一 agent 会话」的历史问题（背景保留，勿删）：
  *
- * 成因（2026-10-13 排查）：视频渲染任务被派发到用户自己的聊天会话里，与用户在平台的
- * 实时对话抢同一 agent 会话 —— 会话忙时渲染任务排到队尾，最终撞上 15 分钟超时
+ * 原始成因（2026-10-13 排查）：视频渲染任务被派发到用户自己的聊天会话里，与实时对话
+ * 抢同一 agent 会话 —— 会话忙时渲染任务排到队尾，最终撞上 15 分钟超时
  * （OpenClawTask FAILED「等待 AI 回复超时」），成片虽渲染成功却没能回填 videoUrl，
  * 于是内容库里的「视频」条目看起来只有图文、没有成片。
- * 独立会话与聊天会话互不阻塞，后台渲染稳定产出并回填。
+ *
+ * 该问题在当前架构下已从根上消失：默认的 DSH + 内置 Remotion 确定性渲染完全不经过
+ * agent 会话（见 src/lib/video/pipeline.ts），因此不再需要为视频单独分配会话，
+ * 原先的 videoSessionKey() 与 sessionKey 入参已随之移除。
+ *
+ * 仅当回退到 VIDEO_RENDER_ENGINE=openclaw 时才会重新用到 agent 会话——那时
+ * src/lib/video/legacy-openclaw.ts 按 userId 隔离多用户，但与该用户的实时对话共享会话。
+ * 若届时再次出现渲染排队超时，应在 legacy-openclaw.ts 内为视频派生独立会话，
+ * 而不是把 videoSessionKey() 恢复到这里（当前 GenerateContentVideoInput 不接受该字段）。
  */
-function videoSessionKey(userId: string): string {
-  return `agent:main:user-${userId}-video`;
-}
 
 /**
  * 确保条目有本地封面图（视频生成的参考图必须是本地文件）。
@@ -167,7 +172,6 @@ function generateVideoInBackground(
       }
       const result = await generateContentVideo({
         userId,
-        sessionKey: videoSessionKey(userId),
         title,
         body,
         imagePaths: [coverAbs],

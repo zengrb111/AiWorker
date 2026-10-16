@@ -20,6 +20,18 @@ const W = 1080;
 const H = 1440;
 const MARGIN = 96;
 
+/**
+ * 封面文字字体栈 —— **只允许免费可商用字体**。
+ *
+ * 历史坑：早先写死 `-apple-system,'PingFang SC','Microsoft YaHei'`。
+ * 苹方是苹果专有、微软雅黑是方正授权，两者都不是免费可商用，
+ * 而这里产出的图会直接对外发布。现统一改为 Noto Sans SC（SIL OFL 1.1）。
+ *
+ * SVG 的 font-family 是 CSS 字体链，渲染方（浏览器 / sharp / resvg）按本机已装字体解析，
+ * 所以链里同样不放入任何非免费字体做兜底。
+ */
+const COVER_FONT_STACK = "'Noto Sans SC','Source Han Sans SC','Noto Sans CJK SC',sans-serif";
+
 /** 同色系、差异化的渐变（与品牌蓝/青/暖调一致）。 */
 const PALETTES: Array<{ from: string; to: string; accent: string }> = [
   { from: "#2b6cff", to: "#17bfff", accent: "#ffd166" },
@@ -160,7 +172,7 @@ function buildSvg(card: Card, index: number, total: number): string {
   if (headingLines.length) {
     for (const ln of headingLines) {
       parts.push(
-        `<text x="${MARGIN}" y="${cursor}" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="${headingSizes}" font-weight="800" fill="#ffffff">${escXml(ln)}</text>`
+        `<text x="${MARGIN}" y="${cursor}" font-family="${COVER_FONT_STACK}" font-size="${headingSizes}" font-weight="800" fill="#ffffff">${escXml(ln)}</text>`
       );
       cursor += headingLead;
     }
@@ -173,14 +185,14 @@ function buildSvg(card: Card, index: number, total: number): string {
 
   for (const ln of bodyLines) {
     parts.push(
-      `<text x="${MARGIN}" y="${cursor}" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="${bodySize}" font-weight="500" fill="#f4f8ff" fill-opacity="0.96">${escXml(ln)}</text>`
+      `<text x="${MARGIN}" y="${cursor}" font-family="${COVER_FONT_STACK}" font-size="${bodySize}" font-weight="500" fill="#f4f8ff" fill-opacity="0.96">${escXml(ln)}</text>`
     );
     cursor += bodyLead;
   }
 
   // 底部页码（仅数字，不带任何品牌/账号信息）
   parts.push(
-    `<text x="${MARGIN}" y="${H - 90}" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif" font-size="30" font-weight="600" fill="#ffffff" fill-opacity="0.6">${String(index + 1).padStart(2, "0")} / ${String(total).padStart(2, "0")}</text>`
+    `<text x="${MARGIN}" y="${H - 90}" font-family="${COVER_FONT_STACK}" font-size="30" font-weight="600" fill="#ffffff" fill-opacity="0.6">${String(index + 1).padStart(2, "0")} / ${String(total).padStart(2, "0")}</text>`
   );
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">

@@ -621,21 +621,44 @@ function loadDeviceCredentials(): DeviceCredentials {
   }
 
   // Legacy fallback: identity/device.json + identity/device-auth.json.
-  const dev = JSON.parse(
-    readFileSync(`${home}/.openclaw/identity/device.json`, "utf8")
-  ) as {
-    deviceId: string;
-    publicKeyPem: string;
-    privateKeyPem: string;
-  };
-  const devAuth = JSON.parse(
-    readFileSync(`${home}/.openclaw/identity/device-auth.json`, "utf8")
-  ) as {
-    tokens: { operator: { token: string } };
-  };
+  // 两条来源都缺失时，readFileSync 抛的是裸 ENOENT（路径还可能因字符串拼接
+  // 而在 Windows 上出现分隔符问题），界面完全无法判断是哪一步缺了东西。
+  // 这里统一转成带诊断标记的错误，让上层能分类成「凭据缺失」并给出修复指引。
+  const devicePath = path.join(home, ".openclaw", "identity", "device.json");
+  const authPath = path.join(home, ".openclaw", "identity", "device-auth.json");
+  const missing = [devicePath, authPath].filter((p) => !existsSync(p));
+  if (missing.length > 0) {
+    throw gatewayError(
+      classifyGatewayError(
+        new Error(`设备凭据文件不存在：${missing.join("、")}`)
+      )
+    );
+  }
+
+  let dev: { deviceId: string; publicKeyPem: string; privateKeyPem: string };
+  let devAuth: { tokens: { operator: { token: string } } };
+  try {
+    dev = JSON.parse(readFileSync(devicePath, "utf8")) as typeof dev;
+    devAuth = JSON.parse(readFileSync(authPath, "utf8")) as typeof devAuth;
+  } catch (error) {
+    throw gatewayError(
+      classifyGatewayError(
+        new Error(
+          `设备凭据文件无法解析（${devicePath} / ${authPath}）：${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      )
+    );
+  }
+
   const opToken = devAuth.tokens?.operator?.token;
   if (!opToken) {
-    throw new Error("OpenClaw 设备认证文件中未找到 operator token。");
+    throw gatewayError(
+      classifyGatewayError(
+        new Error(`设备认证文件中未找到 operator token：${authPath}`)
+      )
+    );
   }
 
   cachedDeviceCreds = {
@@ -802,15 +825,33 @@ async function connectGateway(connectTimeoutMs = 15000): Promise<GatewayConnecti
         nonceResolve("");
         nonceResolve = null;
       }
-      for (const [, request] of pending) {
-        request.reject(
-          new Error(`OpenClaw Gateway 连接失败：${error.message}`)
+      // 把 error.code 一并写进 message。Node 的 ws 在部分错误形态下不填 message
+      // （只保留 code），此前直接取 error.message 会得到空串，界面显示成
+      // 「连接失败：」且 isGatewayTransientError 匹配不到任何关键词 →
+      // 跳过了 150 秒重试等待。补上 code 后两个问题同时消失，
+      // 且无需改动重试控制流。
+      const raw = error instanceof Error ? error.message : String(error);
+      const code = errorCodeOf(error);
+      const reason = code ? `[${code}] ${raw || "(无错误描述)"}` : raw || "(无错误描述)";
+      const diagnosis = classifyGatewayError(error);
+
+      const failure = gatewayError({
+        ...diagnosis,
+        detail: `${reason}（目标 ${gatewayEndpointLabel()}）`,
+      });
+      if (process.env.NODE_ENV !== "production") {
+        console.error(
+          `[openclaw] 网关连接失败 kind=${diagnosis.kind} transient=${diagnosis.transient} ${reason}`,
         );
+      }
+
+      for (const [, request] of pending) {
+        request.reject(failure);
       }
       pending.clear();
       if (!settled) {
         cleanup();
-        reject(new Error(`OpenClaw Gateway 连接失败：${error.message}`));
+        reject(failure);
       }
     });
 
@@ -942,30 +983,342 @@ function deriveUserSessionKey(userId?: string | null): string {
   return process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
 }
 
-/** 网关「启动中 / 未运行」类瞬时错误：可自动等待重试。 */
-function isGatewayTransientError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  // 注意：「调用超时」必须算瞬时错误——端口已监听但 agent/sidecar 尚未就绪时，
-  // chat.startup 会挂起 15s 后超时，此时网关实际还在启动，应重试而不是直接抛给用户。
-  return /gateway starting|startup-sidecars|调用超时|ECONNREFUSED|socket hang up|ECONNRESET/i.test(msg);
+// ---------------------------------------------------------------------------
+// Gateway 故障诊断层
+//
+// 存在的理由：此前 `ws.on("error")` 只取 error.message，而 Node 的 ws 在部分
+// 错误形态下不填 message（只保留 error.code），于是界面得到的是
+// 「OpenClaw Gateway 连接失败：」这样的空串。更严重的是 isGatewayTransientError
+// 只对 message 文本做正则匹配，空 message 被判为「非瞬时错误」，
+// 直接跳过了 150 秒的重试等待 —— 网关只是启动慢，也会被立刻判死。
+//
+// 这里把故障归类成结构化结论，供三处复用：错误文案、重试判定、健康检查。
+// 分类优先级刻意定为 code → message 关键词 → 自定义标记，因为空 message 场景下
+// error.code 是唯一可靠的信息源。
+// ---------------------------------------------------------------------------
+
+export type GatewayFailureKind =
+  /** 端口没人监听：网关没启动，或已退出。 */
+  | "not_running"
+  /** 端口被别的进程占用。 */
+  | "port_conflict"
+  /** 设备凭据文件缺失或读不出来。 */
+  | "credentials_missing"
+  /** 连上了但网关没下发 connect.challenge 质询。 */
+  | "challenge_timeout"
+  /** 网关明确拒绝：签名不匹配、token 失效、权限不足。 */
+  | "auth_failed"
+  /** 调用超时。 */
+  | "timeout"
+  | "unknown";
+
+export type GatewayDiagnosis = {
+  kind: GatewayFailureKind;
+  /** 面向用户的中文提示，可直接展示。 */
+  userMessage: string;
+  /** 技术细节，进日志不面向用户。 */
+  detail: string;
+  /** 是否值得自动等待重试。 */
+  transient: boolean;
+  /** 修复指引；仅 transient=false 时给出。 */
+  hint?: string;
+};
+
+/** 网关地址，用于错误提示里告诉用户该检查哪个端口。 */
+function gatewayEndpointLabel(): string {
+  try {
+    return requireBaseUrl();
+  } catch {
+    return "(未配置 OPENCLAW_BASE_URL)";
+  }
 }
 
-/** 把网关的技术性英文错误转成用户能看懂的中文提示（避免把原始 JSON 抛到界面上）。 */
-export function friendlyGatewayError(err: unknown): string {
+/** 取出 error.code —— ws 的错误码只挂在 code 上，message 可能是空的。 */
+function errorCodeOf(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code.toUpperCase() : "";
+}
+
+/** 我们自己抛出的错误用这个前缀标记，便于分类时与网关返回的原文区分开。 */
+const DIAG_MARKER = "[gateway-diagnosis]";
+
+/** 抛出一个带诊断标记的错误，后续 classify 能无歧义地还原它的分类。 */
+export function gatewayError(diagnosis: GatewayDiagnosis): Error {
+  const error = new Error(`${DIAG_MARKER} ${diagnosis.userMessage}（${diagnosis.detail}）`);
+  (error as Error & { gatewayDiagnosis?: GatewayDiagnosis }).gatewayDiagnosis = diagnosis;
+  return error;
+}
+
+/** 判断错误是否由本模块的诊断层抛出，并取回其结论。 */
+function readMarkedDiagnosis(err: unknown): GatewayDiagnosis | null {
+  const carried = (err as { gatewayDiagnosis?: unknown } | null)?.gatewayDiagnosis;
+  if (carried && typeof carried === "object" && "kind" in carried) {
+    return carried as GatewayDiagnosis;
+  }
+
+  // 退化路径：marker 属性丢失（跨进程、序列化、被第三方包装）时，从 message 反解分类。
+  // 这里不能只靠正则 —— message 结尾是全角括号「）」，且 detail 里可能含有半角括号，
+  // 早期写成 /\(([a-z_]+)\)$/ 永远匹配不上，导致 kind 恒退化成 unknown、
+  // transient 恒为 false，等于把诊断层整个作废。改为从诊断字段表反查。
   const msg = err instanceof Error ? err.message : String(err);
+  if (!msg.includes(DIAG_MARKER)) return null;
+
+  for (const kind of GATEWAY_FAILURE_KINDS) {
+    if (msg.includes(`（${kind}）`) || msg.includes(`(${kind})`)) {
+      return { kind, userMessage: msg, detail: msg, transient: TRANSIENT_KINDS.has(kind) };
+    }
+  }
+  return null;
+}
+
+/** 全部分类，供 readMarkedDiagnosis 反查。 */
+const GATEWAY_FAILURE_KINDS: GatewayFailureKind[] = [
+  "not_running",
+  "port_conflict",
+  "credentials_missing",
+  "challenge_timeout",
+  "auth_failed",
+  "timeout",
+  "unknown",
+];
+
+/** 判定为「值得自动重试」的分类，与 classifyGatewayError 各分支保持一致。 */
+const TRANSIENT_KINDS = new Set<GatewayFailureKind>([
+  "not_running",
+  "challenge_timeout",
+  "timeout",
+]);
+
+/**
+ * 把任意网关异常归类成结构化诊断。
+ *
+ * 空 message 场景下以 error.code 为唯一信息源，因此判定顺序是：
+ * 已标记诊断 → error.code → message 关键词。
+ */
+export function classifyGatewayError(err: unknown): GatewayDiagnosis {
+  const marked = readMarkedDiagnosis(err);
+  if (marked) return marked;
+
+  const code = errorCodeOf(err);
+  const msg = err instanceof Error ? err.message : String(err);
+  const endpoint = gatewayEndpointLabel();
+  const detail = code ? `[${code}] ${msg || "(无错误描述)"}` : msg || "(无错误描述)";
+
+  // 1) 端口层面
+  if (code === "ECONNREFUSED" || /ECONNREFUSED|socket hang up|ECONNRESET|ECONNABORTED/i.test(msg)) {
+    return {
+      kind: "not_running",
+      userMessage: "AI 网关未在运行或已退出，连接被拒绝。",
+      detail: `${detail}（目标 ${endpoint}）`,
+      transient: true,
+    };
+  }
+  if (code === "EADDRINUSE" || /EADDRINUSE|address already in use/i.test(msg)) {
+    return {
+      kind: "port_conflict",
+      userMessage: `网关端口被其他进程占用（${endpoint}）。`,
+      detail,
+      transient: false,
+      hint: "用 netstat -ano | findstr 18789 查出占用 PID，结束该进程后再启动网关。",
+    };
+  }
+  if (code === "ENOTFOUND" || code === "EHOSTUNREACH" || /ENOTFOUND|EHOSTUNREACH|getaddrinfo/i.test(msg)) {
+    return {
+      kind: "not_running",
+      userMessage: `无法解析网关地址（${endpoint}）。`,
+      detail,
+      transient: false,
+      hint: "检查 .env.local 里的 OPENCLAW_BASE_URL 是否指向正确的主机与端口。",
+    };
+  }
+
+  // 2) 凭据层面
+  if (/设备凭据|device\.json|device-auth\.json|openclaw\.sqlite|ENOENT|未找到 operator token/i.test(msg)) {
+    return {
+      kind: "credentials_missing",
+      userMessage: "未找到 OpenClaw 的设备凭据，无法完成网关鉴权。",
+      detail,
+      transient: false,
+      hint:
+        "确认 ~/.openclaw/state/openclaw.sqlite（或旧版 identity/device.json + device-auth.json）存在；" +
+        "若换了机器，需在本机重新执行一次 openclaw 的设备注册。",
+    };
+  }
+
+  // 3) 握手 / 鉴权层面
+  if (/未发送 connect\.challenge|connect\.challenge/i.test(msg)) {
+    return {
+      kind: "challenge_timeout",
+      userMessage: "已连上端口，但网关没有下发握手质询，可能不是 OpenClaw 网关或版本不兼容。",
+      detail,
+      transient: true,
+    };
+  }
+  // 鉴权失败。关键词刻意收紧：早期用了 /auth|token|device|scope|reject/ 这种宽集合，
+  // 会把 "request rejected: timeout"、"ENODEV: no such device"、"out of scope"
+  // 误判成鉴权失败并让用户去「重新注册设备」，同时因为排在 timeout 之前，
+  // 带 timeout 语义的错误永远走不到 timeout 分支。这里只保留明确指向
+  // 设备签名与 operator token 的词。
+  if (
+    /unauthorized|forbidden|invalid signature|signature mismatch|invalid token|operator token|device auth|device signature|not paired|pairing rejected/i.test(
+      msg
+    )
+  ) {
+    return {
+      kind: "auth_failed",
+      userMessage: "网关拒绝了设备鉴权。",
+      detail,
+      transient: false,
+      hint: "设备私钥与 operator token 可能已失效或与网关不匹配，建议在本机重新注册设备。",
+    };
+  }
+
+  // 4) 超时（放在鉴权之后、通用匹配之前，避免被更宽的分支吞掉）
+  if (/timeout|timed out|超时|ETIMEDOUT/i.test(msg)) {
+    return {
+      kind: "timeout",
+      userMessage: "调用网关超时。",
+      detail,
+      transient: true,
+    };
+  }
+
+  // 5) 网关启动中
   if (/gateway starting|startup-sidecars/i.test(msg)) {
-    return "AI 网关正在启动中（通常需要 3-5 分钟），系统已自动等待，请稍后重试。";
+    return {
+      kind: "not_running",
+      userMessage: "AI 网关正在启动中（通常需要 1-3 分钟）。",
+      detail,
+      transient: true,
+    };
   }
-  if (/调用超时/i.test(msg)) {
-    // 端口已监听但 sidecar/agent 未就绪，chat.startup 挂起超时。
-    return "AI 网关正在启动中（通常需要 3-5 分钟），系统已自动等待，请稍后重试。";
+
+  return {
+    kind: "unknown",
+    userMessage: msg || "连接网关时发生未知错误。",
+    detail,
+    transient: false,
+  };
+}
+
+/**
+ * 只读检查设备凭据是否就绪。
+ *
+ * 刻意不写入 cachedDeviceCreds：健康检查会高频调用，若顺手填充缓存，
+ * 网关侧凭据更新后进程内仍会拿旧值，排查时极具误导性。
+ */
+export function describeGatewayCredentials(): {
+  sqliteFound: boolean;
+  identityFound: boolean;
+  operatorTokenPresent: boolean;
+  paths: string[];
+} {
+  const home = homedir();
+  const sqlitePath = path.join(home, ".openclaw", "state", "openclaw.sqlite");
+  const devicePath = path.join(home, ".openclaw", "identity", "device.json");
+  const authPath = path.join(home, ".openclaw", "identity", "device-auth.json");
+
+  const sqliteFound = existsSync(sqlitePath);
+  const deviceFound = existsSync(devicePath);
+  const authFound = existsSync(authPath);
+
+  let operatorTokenPresent = false;
+  if (authFound) {
+    try {
+      const parsed = JSON.parse(readFileSync(authPath, "utf8")) as {
+        tokens?: { operator?: { token?: string } };
+      };
+      operatorTokenPresent = Boolean(parsed.tokens?.operator?.token);
+    } catch {
+      // 读不出内容视为没有 token，由调用方给出「凭据缺失」结论
+    }
   }
-  if (/ECONNREFUSED|socket hang up|ECONNRESET/i.test(msg)) {
-    // 注意：走到这里说明已按预算自动重试过（默认约 300 秒），网关确实还没就绪，
-    // 而不是「用户没启动网关」，所以不要写成让用户去检查网关。
-    return "AI 网关正在重启或暂时不可用（重启通常需要 3-5 分钟）。系统已自动等待重试仍未就绪，请 1 分钟后再发送一次。";
+
+  return {
+    sqliteFound,
+    identityFound: deviceFound && authFound,
+    operatorTokenPresent,
+    paths: [sqlitePath, devicePath, authPath],
+  };
+}
+
+/**
+ * 试一次真实的网关握手，成功即返回 null，失败返回结构化诊断。
+ *
+ * 与业务调用分开：这里不做任何 method 请求，握手成功后立刻关闭，
+ * 因此可以安全地被健康检查高频调用。超时时间远小于业务调用（默认 2s），
+ * 避免体检接口拖慢页面。
+ */
+export async function probeGatewayHandshake(timeoutMs = 2000): Promise<GatewayDiagnosis | null> {
+  let conn: GatewayConnection | null = null;
+  try {
+    conn = await connectGateway(timeoutMs);
+    return null;
+  } catch (err) {
+    return classifyGatewayError(err);
+  } finally {
+    try {
+      conn?.close();
+    } catch {
+      // 已关闭的连接忽略
+    }
   }
-  return msg;
+}
+
+/** 网关「启动中 / 未运行」类瞬时错误：可自动等待重试。 */
+function isGatewayTransientError(err: unknown): boolean {
+  return classifyGatewayError(err).transient;
+}
+
+/**
+ * 把网关的技术性英文错误转成用户能看懂的中文提示。
+ *
+ * 现在统一走 classifyGatewayError：判定依据是 error.code 而非 message 文本，
+ * 因此「空 message」场景下也能给出正确结论（此前会原样返回空串或技术细节）。
+ *
+ * @param opts.wasRetried 已按预算自动重试过 —— 此时话术应改成「等过了仍不行」，
+ *                        而非「去启动网关」，否则会误导用户重复操作。
+ */
+export function friendlyGatewayError(
+  err: unknown,
+  opts: { wasRetried?: boolean } = {}
+): string {
+  const diagnosis = classifyGatewayError(err);
+  const wasRetried = opts.wasRetried ?? false;
+
+  switch (diagnosis.kind) {
+    case "not_running":
+      return wasRetried
+        ? "AI 网关正在重启或暂时不可用（重启通常需要 1-3 分钟）。系统已自动等待重试仍未就绪，请 1 分钟后再发送一次。"
+        : "AI 网关未在运行，请确认 OpenClaw 网关已启动。";
+
+    case "port_conflict":
+      return `AI 网关端口被其他进程占用。${diagnosis.hint ?? ""}`.trim();
+
+    case "credentials_missing":
+      return `缺少 OpenClaw 设备凭据，无法连接网关。${diagnosis.hint ?? ""}`.trim();
+
+    case "challenge_timeout":
+      return wasRetried
+        ? "AI 网关已就绪但未完成握手，可能是版本不兼容，请检查网关版本。"
+        : "AI 网关尚未完成握手，请稍后重试。";
+
+    case "auth_failed":
+      return `AI 网关拒绝了设备鉴权。${diagnosis.hint ?? ""}`.trim();
+
+    case "timeout":
+      return "调用 AI 网关超时，请稍后重试。";
+
+    default: {
+      // 未知分类兜底：仍要挡掉裸 JSON / 空串
+      const raw = err instanceof Error ? err.message : String(err);
+      if (!raw.trim()) return "连接 AI 网关失败（网关未返回有效错误信息）。";
+      if (/^[[{]/.test(raw.trim())) {
+        return "AI 网关返回了无法解析的错误，请查看服务端日志。";
+      }
+      return raw;
+    }
+  }
 }
 
 /** 网关启动中会自动等待重试的 request（间隔递增，累计约 210 秒等待 + 各次 attempt 超时）。 */
@@ -988,7 +1341,7 @@ async function gatewayRequestWithRetry<T>(
       if (!isGatewayTransientError(e)) throw e;
     }
   }
-  throw new Error(friendlyGatewayError(lastErr));
+  throw new Error(friendlyGatewayError(lastErr, { wasRetried: true }));
 }
 
 async function requestGatewayChat(
@@ -1020,7 +1373,7 @@ async function requestGatewayChat(
       await new Promise((r) => setTimeout(r, retryIntervalMs));
     }
   }
-  if (!conn) throw new Error(friendlyGatewayError(connectErr));
+  if (!conn) throw new Error(friendlyGatewayError(connectErr, { wasRetried: true }));
   try {
     const sessionKey = sessionKeyOverride ?? (process.env.OPENCLAW_SESSION_KEY || "agent:main:main");
 

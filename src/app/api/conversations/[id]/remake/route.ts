@@ -1,13 +1,18 @@
 import { jsonError } from "@/lib/http";
 import { createViralRemake } from "@/lib/openmontage";
 import { prisma } from "@/lib/prisma";
+import { probeDuration } from "@/lib/ffmpeg";
 import { requireUser } from "@/lib/session";
+import { pickBgm, resolveRenderEngine, runVideoPipeline } from "@/lib/video/pipeline";
 import { mkdir, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 
 const maxUploadBytes = 500 * 1024 * 1024;
 const videoExtensions = new Set([".mp4", ".mov", ".m4v", ".webm"]);
 const imageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+
+/** SSE 心跳间隔（毫秒）：出片期间长时间无事件，靠 ping 保活。 */
+const HEARTBEAT_MS = 15_000;
 
 function sseEncode(data: unknown): Uint8Array {
   return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
@@ -60,27 +65,95 @@ export async function POST(request: Request, context: { params: { id: string } }
   const materialPaths = await Promise.all(materialFiles.map((file) => saveFile(file, uploadsDir, "material")));
   const outputName = `viral-remake-${token}.mp4`;
   const outputPath = join(videosDir, outputName);
-  const task = await prisma.openClawTask.create({ data: { userId: user.id, type: "openmontage-viral-remake", prompt: referenceUrl || "uploaded-reference", status: "RUNNING" } });
+  const task = await prisma.openClawTask.create({
+    data: { userId: user.id, type: "video-remake", prompt: referenceUrl || "uploaded-reference", status: "RUNNING" },
+  });
 
   const stream = new ReadableStream({
     async start(controller) {
-      const sendProgress = (text: string) => controller.enqueue(sseEncode({ type: "delta", text: `${text}\n` }));
+      const heartbeat = setInterval(() => {
+        controller.enqueue(sseEncode({ type: "ping", at: Date.now() }));
+      }, HEARTBEAT_MS);
+
+      const sendProgress = (text: string) => {
+        if (text.trim()) controller.enqueue(sseEncode({ type: "delta", text: `${text}\n` }));
+      };
       try {
-        sendProgress("素材上传完成，正在启动 OpenMontage 制作流程...");
-        await createViralRemake({ referenceUrl: referenceUrl || undefined, referencePath, materialPaths, workspace: projectDir, outputPath }, sendProgress);
-        const videoUrl = `/videos/${outputName}`;
-        const assistantMessage = await prisma.message.create({ data: { conversationId: conversation.id, role: "ASSISTANT", content: `OpenMontage 已根据参考节奏和你上传的素材完成视频制作：${videoUrl}` } });
-        const saved = await prisma.contentItem.create({ data: { userId: user.id, title: "爆款视频复刻", body: "", category: "视频", videoUrl, sourceConversationId: conversation.id } });
-        await prisma.openClawTask.update({ where: { id: task.id }, data: { status: "SUCCEEDED", resultJson: JSON.stringify({ videoUrl, messageId: assistantMessage.id, contentId: saved.id }) } });
-        controller.enqueue(sseEncode({ type: "final", videoUrl, contentSaved: { id: saved.id, title: saved.title, category: saved.category, videoUrl } }));
+        const engine = resolveRenderEngine();
+        let videoUrl: string;
+        let engineUsed: string;
+
+        if (engine === "openclaw") {
+          // 回滚路径：仍走 OpenMontage 的 Python 制作流程
+          sendProgress("素材上传完成，正在启动 OpenMontage 制作流程...");
+          await createViralRemake(
+            { referenceUrl: referenceUrl || undefined, referencePath, materialPaths, workspace: projectDir, outputPath },
+            sendProgress,
+          );
+          videoUrl = `/videos/${outputName}`;
+          engineUsed = "openmontage";
+        } else {
+          // 新路径：DeepSeek 排素材节奏 → 项目内 Remotion 竖版渲染 → 本地后期。
+          // 参考视频只用来对齐节奏与时长，不作为素材 —— 那是原作的版权内容。
+          const referenceDuration = referencePath ? await probeDuration(referencePath) : 0;
+          const firstVideo = materialPaths.find((p) => videoExtensions.has(extname(p).toLowerCase()));
+          const materialDuration = firstVideo ? await probeDuration(firstVideo) : 0;
+          // 复刻以素材自身长度为准：素材只有 8 秒就没必要硬撑到 40 秒
+          const targetSeconds = Math.max(8, Math.round(materialDuration || Math.min(referenceDuration, 30) || 20));
+
+          sendProgress("素材上传完成，正在按参考节奏排布画面...");
+          const result = await runVideoPipeline({
+            mode: "remake",
+            token,
+            materials: materialPaths,
+            requirement: [
+              `复刻参考视频（${referenceUrl || "已上传参考视频"}）的节奏与情绪`,
+              referenceDuration ? `参考视频时长约 ${Math.round(referenceDuration)} 秒` : "",
+              "用我上传的素材重新编排一条同类型短视频",
+            ]
+              .filter(Boolean)
+              .join("；"),
+            theme: String(form.get("theme") ?? "").trim() || undefined,
+            targetSeconds,
+            bgmPath: pickBgm(),
+            onProgress: sendProgress,
+          });
+          if (!result.ok) throw new Error(result.error ?? "视频复刻失败。");
+          if (!result.videoUrl) throw new Error("视频复刻未产出成片。");
+          videoUrl = result.videoUrl;
+          engineUsed = result.engineUsed;
+        }
+
+        const assistantMessage = await prisma.message.create({
+          data: {
+            conversationId: conversation.id,
+            role: "ASSISTANT",
+            content: `已根据参考节奏和你上传的素材完成视频制作：${videoUrl}`,
+          },
+        });
+        const saved = await prisma.contentItem.create({
+          data: { userId: user.id, title: "爆款视频复刻", body: "", category: "视频", videoUrl, sourceConversationId: conversation.id },
+        });
+        await prisma.openClawTask.update({
+          where: { id: task.id },
+          data: {
+            status: "SUCCEEDED",
+            resultJson: JSON.stringify({ videoUrl, engine: engineUsed, messageId: assistantMessage.id, contentId: saved.id }),
+          },
+        });
+        controller.enqueue(
+          sseEncode({ type: "final", videoUrl, contentSaved: { id: saved.id, title: saved.title, category: saved.category, videoUrl } }),
+        );
       } catch (error) {
-        const message = error instanceof Error ? error.message : "OpenMontage 视频制作失败。";
+        const message = error instanceof Error ? error.message : "视频复刻失败。";
         await prisma.openClawTask.update({ where: { id: task.id }, data: { status: "FAILED", error: message } });
         controller.enqueue(sseEncode({ type: "error", error: message }));
       } finally {
+        // 必须清掉心跳：流 close 之后继续 enqueue 会抛错
+        clearInterval(heartbeat);
         controller.close();
       }
-    }
+    },
   });
   return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" } });
 }
