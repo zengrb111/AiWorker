@@ -60,6 +60,115 @@ export type TransitionKind = "none" | "fade" | "slide" | "wipe";
 
 export const TRANSITION_KINDS: TransitionKind[] = ["none", "fade", "slide", "wipe"];
 
+/**
+ * 视觉特效层（可叠加在任意主题之上）。
+ *
+ * ## 为什么定义在 schema 而不是 theme
+ *
+ * 早先 `VisualEffect` 定义在 theme.ts，于是「特效」只能是主题的私有属性：
+ * `ThemeEffects` 只读 `theme.effects`，`VISUAL_EFFECTS` 导出后零消费方，
+ * 想加一个故障层就得新建一套主题。现在把它提到渲染契约里，`LookConfig.effects`
+ * 才能与主题解耦 —— 用户可以要「故障感」但仍用暖色配色。
+ *
+ * theme.ts 会从这里 re-export，旧 import 路径不断。
+ */
+export type VisualEffect =
+  /** RGB 色彩错位 + 像素偏移 + 扫描线（故障艺术） */
+  | "glitch"
+  /** 高饱和流体渐变 + 金属光泽（酸性设计） */
+  | "acid-flow"
+  /** 撕纸边框 + 胶带贴纸 + 复印噪点（拼贴胶带风） */
+  | "collage"
+  /** 严格网格线 + 十字标记（瑞士网格） */
+  | "swiss-grid";
+
+export const VISUAL_EFFECTS: VisualEffect[] = ["glitch", "acid-flow", "collage", "swiss-grid"];
+
+/** 特效层的中文名，给前端选择器与方案摘要用。 */
+export const VISUAL_EFFECT_LABELS: Record<VisualEffect, string> = {
+  glitch: "故障艺术",
+  "acid-flow": "酸性流体",
+  collage: "撕纸拼贴",
+  "swiss-grid": "瑞士网格",
+};
+
+/**
+ * 字幕样式（**ffmpeg 烧录阶段生效**，不是 Remotion 组件）。
+ *
+ * 出片链路的字幕由 `burnSubtitles` 用 libass 烧录，Remotion 的 `CaptionLayer`
+ * 实际空转（见其文件头注释）。所以字幕样式必须走这条通道，
+ * 否则用户选了样式却看不到任何变化。
+ */
+export type CaptionStyleKey = "classic" | "bold-yellow" | "boxed-dark" | "minimal-line";
+
+export const CAPTION_STYLES: CaptionStyleKey[] = [
+  "classic",
+  "bold-yellow",
+  "boxed-dark",
+  "minimal-line",
+];
+
+export const CAPTION_STYLE_LABELS: Record<CaptionStyleKey, string> = {
+  classic: "经典白字",
+  "bold-yellow": "醒目黄字",
+  "boxed-dark": "半透明底框",
+  "minimal-line": "极简细描边",
+};
+
+/**
+ * 外观覆盖（Look）。
+ *
+ * 设计取向：**主题定基调，Look 做加法与微调**。
+ * 早先只有 `theme: string` 一个视觉字段，等于把 20 个视觉参数打包成不可拆的组合，
+ * 用户改一个维度就得整套换主题。LookConfig 只开放「改动收益最大且互不冲突」的三个维度：
+ * ① 叠加特效层（加法，不破坏主题配色）
+ * ② 统一运镜（覆盖逐场景选择，用来压制 AI 选出难看的运镜）
+ * ③ 字幕样式（走 ffmpeg 通道）
+ *
+ * 不开放颜色/字体/spring —— 那三个是主题的定义本身，拆开会让 9 套主题失去意义。
+ */
+export type LookConfig = {
+  /**
+   * 要额外叠加的特效层，与主题自带的 `theme.effects` **取并集**（去重、保持顺序）。
+   * 空数组 = 只用主题自带的。
+   */
+  effects?: VisualEffect[];
+  /**
+   * 强制所有场景用同一运镜；缺省 = 保留 DSH 逐场景指定的 `scenes[].animation`。
+   * 传 "auto" 等价于不覆盖（用户界面上的「跟随分镜」选项）。
+   */
+  motion?: CameraMotion;
+  /** 字幕样式；缺省 "classic"（与改造前观感一致）。 */
+  captionStyle?: CaptionStyleKey;
+};
+
+/** 校验 LookConfig，把错误回喂给调用方而不是静默忽略。 */
+export function validateLook(input: unknown, errors: string[]): void {
+  if (input === undefined || input === null) return;
+  const look = input as Partial<LookConfig>;
+  if (typeof look !== "object") {
+    errors.push("look 必须是对象");
+    return;
+  }
+  if (look.effects !== undefined) {
+    if (!Array.isArray(look.effects)) {
+      errors.push("look.effects 必须是数组");
+    } else {
+      look.effects.forEach((e, i) => {
+        if (!VISUAL_EFFECTS.includes(e as VisualEffect)) {
+          errors.push(`look.effects[${i}] 必须是：${VISUAL_EFFECTS.join(" / ")}`);
+        }
+      });
+    }
+  }
+  if (look.motion !== undefined && !CAMERA_MOTIONS.includes(look.motion as CameraMotion)) {
+    errors.push(`look.motion 必须是：${CAMERA_MOTIONS.join(" / ")}`);
+  }
+  if (look.captionStyle !== undefined && !CAPTION_STYLES.includes(look.captionStyle as CaptionStyleKey)) {
+    errors.push(`look.captionStyle 必须是：${CAPTION_STYLES.join(" / ")}`);
+  }
+}
+
 /** 字幕条目（毫秒时间戳，来自 TTS）。 */
 export type CaptionCue = {
   text: string;
@@ -199,6 +308,13 @@ export type Storyboard = {
   overlays?: OverlaySpec[];
   captions?: CaptionCue[];
   outro?: OutroSpec;
+  /**
+   * 外观覆盖（可选）：在主题之上叠加特效 / 统一运镜 / 指定字幕样式。
+   *
+   * 由**用户或产品**决定，不交给 DSH —— 观感偏好不是模型该猜的东西，
+   * 交给模型只会得到「每次不一样的风格」，反而不可复现。
+   */
+  look?: LookConfig;
 };
 
 /** 视频片段（剪视频 / 复刻用）。 */
@@ -228,6 +344,8 @@ export type ClipStoryboard = {
   overlays?: OverlaySpec[];
   captions?: CaptionCue[];
   outro?: OutroSpec;
+  /** 与 Storyboard 同构的外观覆盖，供两条链路共用同一套校验。 */
+  look?: LookConfig;
 };
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; errors: string[] };
@@ -440,6 +558,7 @@ export function validateStoryboard(input: unknown): ValidationResult<Storyboard>
 
   checkCaptions(sb.captions, errors);
   checkOutro(sb.outro, errors);
+  validateLook(sb.look, errors);
 
   return errors.length ? { ok: false, errors } : { ok: true, value: sb as Storyboard };
 }
@@ -491,6 +610,7 @@ export function validateClipStoryboard(input: unknown): ValidationResult<ClipSto
 
   checkCaptions(sb.captions, errors);
   checkOutro(sb.outro, errors);
+  validateLook(sb.look, errors);
 
   return errors.length ? { ok: false, errors } : { ok: true, value: sb as ClipStoryboard };
 }

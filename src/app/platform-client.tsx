@@ -362,6 +362,95 @@ const VIDEO_THEME_HINTS: Record<string, string> = {
   "mono-ink": "黑白灰加一笔朱红，适合人文、书法、东方美学类内容",
 };
 
+/**
+ * 一个镜头的方案摘要（对应后端 storyboard.ts 的 PlanSceneSummary）。
+ *
+ * 为什么用秒而不是毫秒：用户看的是「这个镜头 3.5 秒」，毫秒在这个场景里没有价值。
+ */
+type GenVideoPlanScene = {
+  id: string;
+  startSeconds: number;
+  outSeconds: number;
+  durationSeconds: number;
+  /** 用到的素材序号（从 1 开始，对应上传顺序）。 */
+  imageIndexes: number[];
+  motion: string;
+  particles: string;
+  overlays: { kind: string; text: string; position: string }[];
+  imageNotes: string[];
+};
+
+/** /gen-video/plan 返回的方案。 */
+type GenVideoPlan = {
+  planToken: string;
+  requirement: string;
+  title: string;
+  narration: string;
+  theme: string;
+  themeReason: string;
+  captionStyle: string;
+  summary: {
+    themeLabel: string;
+    durationSeconds: number;
+    beatCount: number;
+    scenes: GenVideoPlanScene[];
+    effects: string[];
+    outroText: string;
+    fallback: boolean;
+  };
+  insights: Array<{
+    index: number;
+    caption: string;
+    mood: string;
+    subject: string;
+    dominantColor: string;
+  }>;
+  audioSeconds: number;
+  diagnostics: {
+    visionRecognized: number;
+    visionTotal: number;
+    dshAvailable: boolean;
+    storyboardFallback: boolean;
+    sceneCount: number;
+    elapsedMs: number;
+    ttsEngine?: string;
+  };
+  options: {
+    effects: ReadonlyArray<{ value: string; label: string }>;
+    motions: ReadonlyArray<{ value: string; label: string }>;
+    captions: ReadonlyArray<{ value: string; label: string }>;
+  };
+};
+
+/**
+ * 效果微调的兜底选项。
+ *
+ * 正常情况下选项由 /gen-video/plan 随方案一起下发（后端是唯一事实来源），
+ * 但用户可能先调效果再生成方案 —— 这时前端也得有可选项，所以这里保留一份本地默认。
+ * 两处不一致时以后端为准（方案生成后会自动切换）。
+ */
+const DEFAULT_LOOK_EFFECTS = [
+  { value: "glitch", label: "故障艺术" },
+  { value: "acid-flow", label: "酸性流体" },
+  { value: "collage", label: "撕纸拼贴" },
+  { value: "swiss-grid", label: "瑞士网格" },
+];
+const DEFAULT_LOOK_MOTIONS = [
+  { value: "auto", label: "跟随分镜（AI 逐镜头挑选）" },
+  { value: "ken-burns", label: "缓慢推进" },
+  { value: "parallax", label: "视差景深" },
+  { value: "zoom-in", label: "推近" },
+  { value: "drift-up", label: "上移" },
+  { value: "drift-down", label: "下移" },
+  { value: "static", label: "静止" },
+];
+const DEFAULT_LOOK_CAPTIONS = [
+  { value: "classic", label: "经典白字" },
+  { value: "bold-yellow", label: "醒目黄字" },
+  { value: "boxed-dark", label: "半透明底框" },
+  { value: "minimal-line", label: "极简细描边" },
+];
+
 export default function PlatformClient() {
   const [checkingSession, setCheckingSession] = useState(true);
   const [user, setUser] = useState<User | null>(null);
@@ -417,6 +506,24 @@ export default function PlatformClient() {
   const [genVideoTheme, setGenVideoTheme] = useState("");
   /** 热点「一键生成视频」：后端正在联网收集信息 / 整理创作要求 / 下载关联配图。 */
   const [videoPreparingTopic, setVideoPreparingTopic] = useState<string | null>(null);
+
+  /* ---------------------------------------------------------------------
+   * 视频方案确认（gen-video）
+   *
+   * 改造前点「开始生成」就一路跑到渲染，用户在 2~5 分钟里看不到任何方案。
+   * 现在拆成两步：先「生成方案」（识图 + 风格推断 + 旁白 + 配音 + DeepSeek 分镜，
+   * 约 1~2 分钟），把结构化方案摆给用户看并允许调整效果，确认后再出片。
+   * ------------------------------------------------------------------- */
+  /** 正在生成方案。 */
+  const [genVideoPlanning, setGenVideoPlanning] = useState(false);
+  /** 已确认的方案（来自 /gen-video/plan）。null = 还没出方案。 */
+  const [genVideoPlan, setGenVideoPlan] = useState<GenVideoPlan | null>(null);
+  /** 效果调整：外挂特效层（最多 2 层，与主题自带取并集）。 */
+  const [genVideoEffects, setGenVideoEffects] = useState<string[]>([]);
+  /** 效果调整：统一运镜；"auto" = 跟随分镜逐镜头挑选。 */
+  const [genVideoMotion, setGenVideoMotion] = useState("auto");
+  /** 效果调整：字幕样式（走 ffmpeg 烧录通道）。 */
+  const [genVideoCaptionStyle, setGenVideoCaptionStyle] = useState("classic");
 
   function removeGenVideoImage(index: number) {
     setGenVideoImages((previous) => {
@@ -1130,11 +1237,71 @@ export default function PlatformClient() {
     }
   }
 
+  /**
+   * 只生成方案，不渲染。
+   *
+   * 这一步要跑识图 + 风格推断 + 旁白 + 配音 + DeepSeek 分镜，约 1~2 分钟
+   * （必须含配音：分镜的时间轴骨架来自 TTS 的句级时间戳）。
+   * 产出的是**结构化**方案摘要，不是进度文本 —— 用户据此判断方向对不对，
+   * 不对就调效果或改创作要求后重来，而不是等 5 分钟看完一条不喜欢的片子。
+   */
+  async function planGenVideo() {
+    const files = genVideoImages.map((item) => item.file);
+    const conversationId = activeConversation?.id;
+    if (!files.length || !conversationId || genVideoPlanning) return;
+
+    setGenVideoPlanning(true);
+    setChatError("");
+    try {
+      const form = new FormData();
+      for (const file of files) form.append("image", file);
+      const requirement = genVideoRequirement.trim();
+      if (requirement) form.append("requirement", requirement);
+      form.append("ttsProvider", genVideoTtsProvider);
+      // 空串不传，后端收到即视为「自动选风格」
+      if (genVideoTheme) form.append("theme", genVideoTheme);
+      form.append("lookEffects", genVideoEffects.join(","));
+      form.append("lookMotion", genVideoMotion);
+      form.append("captionStyle", genVideoCaptionStyle);
+
+      const response = await fetch(`/api/conversations/${conversationId}/gen-video/plan`, {
+        method: "POST",
+        body: form,
+      });
+      // 这里刻意用 text() + 手动 JSON.parse，而不是 response.json()：
+      // 后端 500 时 Next.js 返回的是 HTML 错误页，response.json() 会抛异常，
+      // 曾经的表现是统一显示「生成方案请求失败。」——用户完全看不到真因。
+      // 2026-10-16 实际踩过：dev server 未重启，Prisma Client 还是旧版，
+      // prisma.videoPlan 为 undefined → 500 → 页面只报「请求失败」。
+      const raw = await response.text();
+      let payload: ApiResponse<GenVideoPlan>;
+      try {
+        payload = JSON.parse(raw) as ApiResponse<GenVideoPlan>;
+      } catch {
+        const firstLine = raw.replace(/\s+/g, " ").trim().slice(0, 160);
+        throw new Error(
+          `生成方案接口返回了非 JSON 响应（HTTP ${response.status}），` +
+            `通常是服务端编译或运行报错，请查看 dev server 日志。` +
+            (firstLine ? ` 响应开头：${firstLine}` : ""),
+        );
+      }
+      if (!payload.ok) throw new Error(payload.error);
+      setGenVideoPlan(payload.data);
+      // 方案已出，出片时走 planToken 由服务端复用已落盘的素材，这里无需再留文件句柄
+      clearGenVideoImages();
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "生成方案失败，请稍后重试。");
+    } finally {
+      setGenVideoPlanning(false);
+    }
+  }
+
   async function createGenVideo() {
     const files = genVideoImages.map((item) => item.file);
     const conversationId = activeConversation?.id;
     const requirement = genVideoRequirement.trim();
-    if (!files.length || !conversationId || sending) return;
+    // 有方案时不再需要重传图片：服务端按 planToken 复用规划阶段落盘的素材
+    if ((!files.length && !genVideoPlan) || !conversationId || sending) return;
 
     setSending(true);
     setIsThinking(true);
@@ -1152,10 +1319,25 @@ export default function PlatformClient() {
       form.append("ttsProvider", genVideoTtsProvider);
       // 空串不传，后端收到即视为「自动选风格」
       if (genVideoTheme) form.append("theme", genVideoTheme);
+      form.append("lookEffects", genVideoEffects.join(","));
+      form.append("lookMotion", genVideoMotion);
+      form.append("captionStyle", genVideoCaptionStyle);
+      // 已确认的方案：带上 planToken，服务端跳过识图/旁白/配音/分镜直接渲染
+      if (genVideoPlan) form.append("planToken", genVideoPlan.planToken);
       const response = await fetch(`/api/conversations/${conversationId}/gen-video`, { method: "POST", body: form, signal: controller.signal });
       if (!response.ok) {
-        const payload = (await response.json().catch(() => ({ error: "视频生成请求失败。" }))) as ApiResponse<unknown>;
-        throw new Error(payload.ok ? "视频生成请求失败。" : payload.error);
+        // 同 planGenVideo：非 JSON 响应（500 HTML 错误页）要把状态码带出来，
+        // 否则只显示一句「视频生成请求失败」，排查时完全没有线索。
+        const raw = await response.text();
+        let message = `视频生成请求失败（HTTP ${response.status}）。`;
+        try {
+          const payload = JSON.parse(raw) as ApiResponse<unknown>;
+          if (!payload.ok) message = payload.error;
+        } catch {
+          const firstLine = raw.replace(/\s+/g, " ").trim().slice(0, 160);
+          if (firstLine) message += ` 响应开头：${firstLine}`;
+        }
+        throw new Error(message);
       }
       const reader = response.body?.getReader();
       if (!reader) throw new Error("视频生成未返回进度流。");
@@ -1178,6 +1360,11 @@ export default function PlatformClient() {
             setLastVideoUrl(data.videoUrl || null);
             clearGenVideoImages();
             setGenVideoRequirement("");
+            // 方案已被消耗，下次出片必须重新出方案（配音文件也只对应这一条）
+            setGenVideoPlan(null);
+            setGenVideoEffects([]);
+            setGenVideoMotion("auto");
+            setGenVideoCaptionStyle("classic");
             // 内容仍正常入库并刷新内容库列表，但不弹「已保存到内容库」提示条。
             if (data.contentSaved) {
               await refreshContent();
@@ -2269,7 +2456,191 @@ export default function PlatformClient() {
                               : "自动模式会先识别参考图的色调与情绪，再挑一套最协调的风格；识别不可用时退回温暖治愈。"}
                           </span>
                         </label>
-                        <div className="viral-remake-actions"><button type="button" onClick={() => { setGenVideoPanelOpen(false); setGenVideoPreviewUrl(null); }}>取消</button><button type="button" disabled={!genVideoImages.length || sending} onClick={() => void createGenVideo()}>开始生成</button></div>
+
+                        {/* ---- 效果微调：主题之外的加法与覆盖 ----
+                            设计取舍：主题定基调，这里只开放三个互不冲突的维度 ——
+                            外挂特效层（加法）、统一运镜（覆盖）、字幕样式（ffmpeg 通道）。
+                            不开放配色/字体/spring：那三个是主题的定义本身，拆开会让 9 套主题失去意义。 */}
+                        <div className="gen-video-look">
+                          <div className="gen-video-look-title">效果微调（可选）</div>
+                          <div className="gen-video-look-row">
+                            <span className="gen-video-look-label">叠加特效层</span>
+                            <div className="gen-video-look-chips">
+                              {(genVideoPlan?.options.effects ?? DEFAULT_LOOK_EFFECTS).map((opt) => {
+                                const active = genVideoEffects.includes(opt.value);
+                                const full = genVideoEffects.length >= 2 && !active;
+                                return (
+                                  <button
+                                    key={opt.value}
+                                    type="button"
+                                    className={`gen-video-look-chip${active ? " active" : ""}`}
+                                    disabled={full}
+                                    title={full ? "最多叠加 2 层，多了画面会糊" : opt.label}
+                                    aria-pressed={active}
+                                    onClick={() => setGenVideoEffects((prev) =>
+                                      prev.includes(opt.value)
+                                        ? prev.filter((v) => v !== opt.value)
+                                        : prev.length >= 2
+                                          ? [prev[1], opt.value]
+                                          : [...prev, opt.value],
+                                    )}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          <div className="gen-video-look-row">
+                            <span className="gen-video-look-label">画面运镜</span>
+                            <select value={genVideoMotion} onChange={(event) => setGenVideoMotion(event.target.value)}>
+                              {(genVideoPlan?.options.motions ?? DEFAULT_LOOK_MOTIONS).map((opt) => (
+                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="gen-video-look-row">
+                            <span className="gen-video-look-label">字幕样式</span>
+                            <select value={genVideoCaptionStyle} onChange={(event) => setGenVideoCaptionStyle(event.target.value)}>
+                              {(genVideoPlan?.options.captions ?? DEFAULT_LOOK_CAPTIONS).map((opt) => (
+                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <span className="gen-video-engine-hint">
+                            特效层与主题自带的取并集（如暖色主题也能叠故障感）；运镜选「跟随分镜」则由 AI 逐镜头挑选。
+                          </span>
+                        </div>
+
+                        {/* ---- 方案确认区 ----
+                            需求原文：「先理解素材 → 出方案 → 用户选 → 再生成」。
+                            改造前这些全藏在 runVideoPipeline 里，点开始就跑，用户全程看不到方案。 */}
+                        {genVideoPlanning && (
+                          <div className="gen-video-plan-loading">
+                            <span className="video-preparing-dot" />
+                            <span>
+                              正在理解素材并规划方案：识别图片内容 → 挑选风格 → 写旁白 → 合成配音 → DeepSeek 排分镜，约需 1~2 分钟…
+                            </span>
+                          </div>
+                        )}
+
+                        {genVideoPlan && (
+                          <div className="gen-video-plan">
+                            <div className="gen-video-plan-head">
+                              <strong>AI 视频方案</strong>
+                              <span className="gen-video-plan-meta">
+                                {genVideoPlan.summary.scenes.length} 个镜头 · 约 {genVideoPlan.summary.durationSeconds.toFixed(1)} 秒
+                                {genVideoPlan.audioSeconds > 0 ? ` · 配音 ${genVideoPlan.audioSeconds.toFixed(1)} 秒` : " · 无配音"}
+                              </span>
+                            </div>
+
+                            {genVideoPlan.title && (
+                              <div className="gen-video-plan-row">
+                                <span className="gen-video-plan-key">标题</span>
+                                <span className="gen-video-plan-val">{genVideoPlan.title}</span>
+                              </div>
+                            )}
+
+                            <div className="gen-video-plan-row">
+                              <span className="gen-video-plan-key">建议风格</span>
+                              <span className="gen-video-plan-val">
+                                {genVideoPlan.summary.themeLabel}
+                                <span className="gen-video-plan-note">{genVideoPlan.themeReason}</span>
+                              </span>
+                            </div>
+
+                            {genVideoPlan.insights.length > 0 && (
+                              <div className="gen-video-plan-block">
+                                <div className="gen-video-plan-key">AI 理解到的素材</div>
+                                <div className="gen-video-insight-list">
+                                  {genVideoPlan.insights.map((item) => (
+                                    <div key={item.index} className="gen-video-insight">
+                                      <span className="gen-video-insight-no">{item.index}</span>
+                                      {item.dominantColor && (
+                                        <span className="gen-video-insight-swatch" style={{ background: item.dominantColor }} aria-hidden="true" />
+                                      )}
+                                      <span className="gen-video-insight-text">
+                                        {item.caption}
+                                        {item.mood && <em>·{item.mood}</em>}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="gen-video-plan-block">
+                              <div className="gen-video-plan-key">镜头安排</div>
+                              <div className="gen-video-scene-list">
+                                {genVideoPlan.summary.scenes.map((scene, i) => (
+                                  <div key={scene.id} className="gen-video-scene">
+                                    <span className="gen-video-scene-no">{i + 1}</span>
+                                    <span className="gen-video-scene-time">{scene.startSeconds.toFixed(1)}–{scene.outSeconds.toFixed(1)}s</span>
+                                    <span className="gen-video-scene-body">
+                                      {scene.imageIndexes.length > 0 && (
+                                        <span className="gen-video-scene-imgs">图 {scene.imageIndexes.join("、")}</span>
+                                      )}
+                                      <span className="gen-video-scene-motion">{scene.motion}</span>
+                                      {scene.overlays.filter((o) => o.text).map((o, k) => (
+                                        <span key={k} className="gen-video-scene-overlay">{o.text}</span>
+                                      ))}
+                                      {scene.imageNotes.length > 0 && (
+                                        <span className="gen-video-scene-note">{scene.imageNotes.join("；")}</span>
+                                      )}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+
+                            {genVideoPlan.narration && (
+                              <details className="gen-video-plan-narration">
+                                <summary>旁白文案（{genVideoPlan.summary.beatCount} 句）</summary>
+                                <p>{genVideoPlan.narration}</p>
+                              </details>
+                            )}
+
+                            <div className="gen-video-plan-warnings">
+                              {genVideoPlan.summary.fallback && (
+                                <span className="gen-video-plan-warn">
+                                  DeepSeek 分镜不可用，这份方案用的是固定节奏兜底（不影响出片）。
+                                </span>
+                              )}
+                              {genVideoPlan.diagnostics.visionTotal > 0 && genVideoPlan.diagnostics.visionRecognized === 0 && (
+                                <span className="gen-video-plan-warn">
+                                  未配置识图模型，AI 没能理解素材内容，方案仅按图片顺序安排。
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="viral-remake-actions">
+                          <button type="button" onClick={() => { setGenVideoPanelOpen(false); setGenVideoPreviewUrl(null); setGenVideoPlan(null); }}>取消</button>
+                          {!genVideoPlan ? (
+                            <button
+                              type="button"
+                              disabled={!genVideoImages.length || genVideoPlanning || sending}
+                              onClick={() => void planGenVideo()}
+                            >
+                              {genVideoPlanning ? "正在生成方案…" : "生成方案"}
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                disabled={genVideoPlanning || sending}
+                                onClick={() => { setGenVideoPlan(null); setGenVideoEffects([]); }}
+                                title="丢弃当前方案，回到上传素材重新开始"
+                              >
+                                重新规划
+                              </button>
+                              <button type="button" disabled={sending} onClick={() => void createGenVideo()}>
+                                {sending ? "生成中…" : "确认并生成"}
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
                     )}
                     {genVideoPreviewUrl && (

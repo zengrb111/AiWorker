@@ -17,21 +17,42 @@
 
 import {
   CAMERA_MOTIONS,
+  CAPTION_STYLES,
   OVERLAY_KINDS,
   PARTICLE_TYPES,
   TRANSITION_KINDS,
+  VISUAL_EFFECTS,
+  VISUAL_EFFECT_LABELS,
+  CAPTION_STYLE_LABELS,
   validateClipStoryboard,
   validateStoryboard,
+  validateLook,
+  type CameraMotion,
+  type CaptionStyleKey,
   type ClipSpec,
   type ClipStoryboard,
+  type LookConfig,
   type OverlaySpec,
   type SceneSpec,
   type Storyboard,
   type TimelineBeat,
+  type VisualEffect,
 } from "../../../remotion/src/vertical/schema";
 import { resolveTheme, THEME_KEYS } from "../../../remotion/src/theme";
 
-export type { ClipSpec, ClipStoryboard, OverlaySpec, SceneSpec, Storyboard, TimelineBeat };
+export type {
+  CameraMotion,
+  CaptionStyleKey,
+  ClipSpec,
+  ClipStoryboard,
+  LookConfig,
+  OverlaySpec,
+  SceneSpec,
+  Storyboard,
+  TimelineBeat,
+  VisualEffect,
+};
+export { CAPTION_STYLES, CAPTION_STYLE_LABELS, VISUAL_EFFECTS, VISUAL_EFFECT_LABELS, validateLook };
 
 /** 兜底运镜序列：相邻镜头运动方向交替，避免连续同向造成的机械感。 */
 const FALLBACK_MOTIONS = ["ken-burns", "drift-up", "zoom-in", "drift-down", "parallax"] as const;
@@ -820,3 +841,188 @@ export async function planClipStoryboard(
 }
 
 export { THEME_KEYS };
+
+/* ============================================================================
+ * 方案摘要：把 Storyboard 压成「用户看得懂、可以据此判断要不要改」的形态
+ * ==========================================================================*/
+
+/** 单个镜头的用户可读摘要。 */
+export type PlanSceneSummary = {
+  /** 场景 id，用于与分镜 JSON 对齐。 */
+  id: string;
+  /** 起始秒（绝对，由上一个 outSeconds 推出）。 */
+  startSeconds: number;
+  /** 出点秒（绝对）。 */
+  outSeconds: number;
+  durationSeconds: number;
+  /** 用了哪几张素材（下标对应用户上传顺序，从 1 开始便于口述）。 */
+  imageIndexes: number[];
+  imageCount: number;
+  /** 实际生效的运镜（已含 Look 覆盖）。 */
+  motion: string;
+  particles: string;
+  /** 该镜头区间内会压的文字图层（供用户判断信息密度）。 */
+  overlays: { kind: string; text: string; position: string }[];
+  /** 素材语义描述（来自识图），让用户看懂 AI 为什么选这张图。 */
+  imageNotes: string[];
+};
+
+/** 一份视频方案的完整可读摘要 —— 前端「AI 方案」面板直接渲染它。 */
+export type PlanSummary = {
+  theme: string;
+  themeLabel: string;
+  /** 口播总长（秒），等于成片长度基准。 */
+  durationSeconds: number;
+  /** 时间轴锚点数 = 旁白句数。 */
+  beatCount: number;
+  scenes: PlanSceneSummary[];
+  /** 实际生效的特效层（主题自带 + 用户外挂，已去重）。 */
+  effects: string[];
+  /** 字幕样式键。 */
+  captionStyle: string;
+  /** 片尾文案。 */
+  outroText: string;
+  /** 是否走了确定性兜底分镜（true = 这份方案不是 AI 排的）。 */
+  fallback: boolean;
+};
+
+/** 运动/特效/粒子的中文名，供摘要直接展示，避免前端再维护一份映射表。 */
+const MOTION_LABELS: Record<string, string> = {
+  "zoom-in": "推近",
+  "zoom-out": "拉远",
+  "pan-left": "左移",
+  "pan-right": "右移",
+  "ken-burns": "缓慢推进",
+  "drift-up": "上移",
+  "drift-down": "下移",
+  parallax: "视差",
+  static: "静止",
+};
+
+const PARTICLE_LABELS: Record<string, string> = {
+  fireflies: "萤火",
+  petals: "花瓣",
+  sparkles: "星光",
+  mist: "薄雾",
+  "light-rays": "光柱",
+  none: "无",
+};
+
+/**
+ * 把 LookConfig 写进分镜。
+ *
+ * **就地返回同一个对象的浅拷贝**：不动 DSH 产出的 storyboard 本体，
+ * 这样「AI 原始方案」与「用户调整后的方案」在内存里始终可区分，
+ * 便于将来做「撤销用户修改」。
+ *
+ * effects 用**并集**而不是覆盖：主题自带的层是它的身份，
+ * 用户加挂不应该把主题特色抹掉。
+ */
+export function applyLook(board: Storyboard | ClipStoryboard, look: LookConfig | undefined): Storyboard | ClipStoryboard {
+  if (!look) return board;
+  const next = { ...board } as Storyboard & ClipStoryboard;
+  const theme = resolveTheme(board.theme);
+
+  const merged: VisualEffect[] = [];
+  for (const e of [...(theme.effects ?? []), ...(look.effects ?? [])]) {
+    if (!merged.includes(e)) merged.push(e);
+  }
+
+  const applied: LookConfig = { ...look, effects: merged };
+  // motion 覆盖要落到每个场景/片段上，否则渲染层还得再判断一遍，
+  // 而渲染层已经通过 props 拿到了 scene.motion，覆写最省事也最不易漏。
+  if (look.motion && "scenes" in next && Array.isArray(next.scenes)) {
+    next.scenes = next.scenes.map((s) => ({ ...s, animation: look.motion as SceneSpec["animation"] }));
+  }
+  next.look = applied;
+  return next;
+}
+
+/**
+ * 生成用户可读的方案摘要。
+ *
+ * 为什么不做「方案预览视频」：渲染一条 30 秒成片要 2~5 分钟（见 render.ts 注释），
+ * 让用户为了看一眼方案等 5 分钟不现实。所以摘要只给**结构化文本**：
+ * 镜头数、每镜用哪张图、多长、什么运镜、压了什么文字 —— 这些足以判断方案对不对，
+ * 不对就改，改完再花 2~5 分钟出片。
+ */
+export function toPlanSummary(
+  plan: StoryboardPlanResult,
+  opts: { imagePaths: string[]; insights?: MaterialInsight[]; captionStyle?: CaptionStyleKey } = { imagePaths: [] },
+): PlanSummary {
+  const board = plan.storyboard;
+  const theme = resolveTheme(board.theme);
+  const isImageBoard = "scenes" in board && Array.isArray((board as Storyboard).scenes);
+  const notesByPath = new Map<string, string>();
+  for (const it of opts.insights ?? []) {
+    if (it.caption) notesByPath.set(it.path, [it.caption, it.mood].filter(Boolean).join("·"));
+  }
+
+  let cursor = 0;
+  const scenes: PlanSceneSummary[] = isImageBoard
+    ? (board as Storyboard).scenes.map((s: SceneSpec, i: number) => {
+        const start = cursor;
+        cursor = Number.isFinite(s.outSeconds) ? s.outSeconds : cursor;
+        const overlays = (board as Storyboard).overlays ?? [];
+        // 文字图层按「落在本镜头区间内」归属；没写 inSeconds 的按 layout 的就近归属处理。
+        const mine = overlays.filter((o) => {
+          const at = o.inSeconds ?? o.outSeconds;
+          return at !== undefined && at >= start - 0.01 && at <= s.outSeconds + 0.01;
+        });
+        return {
+          id: s.id,
+          startSeconds: round2(start),
+          outSeconds: round2(s.outSeconds),
+          durationSeconds: round2(Math.max(0, s.outSeconds - start)),
+          imageIndexes: s.images
+            .map((p) => opts.imagePaths.findIndex((q) => q === p) + 1)
+            .filter((n) => n > 0),
+          imageCount: s.images.length,
+          motion: MOTION_LABELS[s.animation] ?? s.animation,
+          particles: PARTICLE_LABELS[s.particles ?? "none"] ?? s.particles ?? "无",
+          overlays: mine.map((o) => ({
+            kind: o.kind,
+            text: (o.text ?? o.value ?? o.label ?? o.subtitle ?? "").trim().slice(0, 40),
+            position: o.position ?? "bottom",
+          })),
+          imageNotes: s.images.map((p) => notesByPath.get(p) ?? "").filter(Boolean),
+        };
+      })
+    : (board as ClipStoryboard).clips.map((c: ClipSpec, i: number) => {
+        const start = cursor;
+        cursor = Number.isFinite(c.outSeconds) ? c.outSeconds : cursor;
+        return {
+          id: c.id,
+          startSeconds: round2(start),
+          outSeconds: round2(c.outSeconds),
+          durationSeconds: round2(Math.max(0, c.outSeconds - start)),
+          imageIndexes: [],
+          imageCount: 0,
+          motion: i === 0 ? "—（视频片段）" : "—（视频片段）",
+          particles: "无",
+          overlays: [],
+          imageNotes: [],
+        };
+      });
+
+  const mergedEffects: VisualEffect[] = [];
+  for (const e of [...(theme.effects ?? []), ...(board.look?.effects ?? [])]) {
+    if (!mergedEffects.includes(e)) mergedEffects.push(e);
+  }
+
+  return {
+    theme: board.theme,
+    themeLabel: theme.label,
+    durationSeconds: round2(board.durationSeconds),
+    beatCount: board.beats?.length ?? 0,
+    scenes,
+    effects: mergedEffects.map((e) => VISUAL_EFFECT_LABELS[e] ?? e),
+    captionStyle: board.look?.captionStyle ?? opts.captionStyle ?? "classic",
+    outroText: board.outro?.text ?? "",
+    fallback: plan.fallback,
+  };
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}

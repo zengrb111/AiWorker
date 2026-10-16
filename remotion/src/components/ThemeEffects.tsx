@@ -9,6 +9,13 @@ export type ThemeEffectsProps = {
   theme: ThemeConfig;
   /** 拼贴风的贴纸文字；仅 collage 生效。 */
   stickerText?: string;
+  /**
+   * 用户在主题之外额外勾选的特效层。
+   *
+   * 与 `theme.effects` **取并集**：主题是基线（暖色主题本来就自带 collage），
+   * 用户想加故障感不必被迫整套换成故障主题。
+   */
+  extraEffects?: VisualEffect[];
 };
 
 /**
@@ -22,8 +29,13 @@ export type ThemeEffectsProps = {
  * 顺序有讲究：质感层从轻到重叠。accent 层（如故障闪白）必须最后，
  * 否则会被后面的层盖住。
  */
-export const ThemeEffects: React.FC<ThemeEffectsProps> = ({ theme, stickerText }) => {
-  const effects = theme.effects ?? [];
+export const ThemeEffects: React.FC<ThemeEffectsProps> = ({ theme, stickerText, extraEffects }) => {
+  // 取并集并按「渲染顺序」归一，避免用户在勾选栏里换顺序能改变叠加次序。
+  // 顺序固定为 acid-flow → swiss-grid → collage → glitch（由下方 JSX 的挂载次序保证）。
+  const effects: VisualEffect[] = [];
+  for (const e of [...(theme.effects ?? []), ...(extraEffects ?? [])]) {
+    if (!effects.includes(e)) effects.push(e);
+  }
   if (effects.length === 0) return null;
 
   const has = (e: VisualEffect) => effects.includes(e);

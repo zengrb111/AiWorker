@@ -2,10 +2,11 @@ import { jsonError } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { DEFAULT_TTS_PROVIDER, resolveTtsProvider } from "@/lib/tts";
-import { parseTargetSeconds, pickBgm, resolveRenderEngine, runVideoPipeline } from "@/lib/video/pipeline";
+import { parseTargetSeconds, pickBgm, resolveRenderEngine, runVideoPipeline, type VideoPlanDraft } from "@/lib/video/pipeline";
+import { parseLookFromForm } from "@/lib/video/plan-params";
 import { renderViaOpenClaw } from "@/lib/video/legacy-openclaw";
 import { mkdir, writeFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 
 const maxUploadBytes = 30 * 1024 * 1024;
 const allowedImageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp"]);
@@ -74,35 +75,62 @@ export async function POST(request: Request, context: { params: { id: string } }
   const imageFiles = (form.getAll("image") || []).filter(
     (entry): entry is File => entry instanceof File && entry.size > 0
   );
-  if (!imageFiles.length) return jsonError("请至少上传一张参考图。");
   const requirement = String(form.get("requirement") ?? "").trim();
   // 用户在对话框里选择的语音引擎（qwen / zhipu）；非法值回落到全局默认（千问）。
   const ttsProvider = resolveTtsProvider(form.get("ttsProvider"), DEFAULT_TTS_PROVIDER);
   // 视频风格。空 = 自动（由识图结果推断）。不校验 key 是否存在：
   // 未知主题由 remotion 侧 resolveTheme() 回落到默认，报错反而阻断出片。
   const theme = String(form.get("theme") ?? "").trim() || undefined;
+  // 外观覆盖（外挂特效 / 统一运镜 / 字幕样式），与 plan 路由同一份解析规则。
+  const look = parseLookFromForm(form);
 
-  const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  // 参考图落在 public/uploads 下，两条引擎都直接读本机绝对路径；
-  // 不再需要往 ~/.openclaw/workspace/remotion-refs/ 复制一份（旧路径的媒体白名单限制）。
-  const uploadsRoot = join(process.cwd(), "public", "uploads", "gen-video-refs", token);
-  await mkdir(uploadsRoot, { recursive: true });
+  // ---- 两条入口 ----
+  //
+  // A) 带 planToken：用户已在「方案确认」环节看过这份规划，跳过识图/旁白/配音/分镜，
+  //    直接渲染。这样确认方案与出片之间不会重复跑一次 1~2 分钟的规划。
+  // B) 不带 planToken：旧的直接出片路径。后台定时出片（content-ingest）等无人场景
+  //    仍走这里，行为与改造前完全一致。
+  const planToken = String(form.get("planToken") ?? "").trim();
+  const savedPlan = planToken
+    ? await prisma.videoPlan.findFirst({ where: { token: planToken, userId: user.id } })
+    : null;
+  if (planToken && !savedPlan) return jsonError("方案不存在或已过期，请重新生成方案。", 404);
 
-  const savedImagePaths: string[] = [];
-  // 参考图的对外可访问 URL。落盘路径是本机绝对路径，只有服务端能读；
-  // 前端要回显必须用 /uploads/... 形式。两者在同一次循环里 push，索引天然对齐。
-  const referenceImageUrls: string[] = [];
-  for (let i = 0; i < imageFiles.length; i++) {
-    const file = imageFiles[i];
-    const extension = extname(file.name).toLowerCase();
-    if (!allowedImageExtensions.has(extension)) continue;
-    if (file.size > maxUploadBytes) continue;
-    const target = join(uploadsRoot, `ref-${i}${extension}`);
-    await writeFile(target, Buffer.from(await file.arrayBuffer()));
-    savedImagePaths.push(target);
-    referenceImageUrls.push(`/uploads/gen-video-refs/${token}/ref-${i}${extension}`);
+  let savedImagePaths: string[];
+  let referenceImageUrls: string[];
+  let token: string;
+
+  if (savedPlan) {
+    // 复用规划阶段落盘的素材与配音：token 必须一致，否则配音文件找不到。
+    token = savedPlan.token;
+    savedImagePaths = JSON.parse(savedPlan.materialsJson) as string[];
+    referenceImageUrls = savedImagePaths.map((p) =>
+      `/uploads/gen-video-refs/${token}/${basename(p)}`
+    );
+  } else {
+    if (!imageFiles.length) return jsonError("请至少上传一张参考图。");
+    token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    // 参考图落在 public/uploads 下，两条引擎都直接读本机绝对路径；
+    // 不再需要往 ~/.openclaw/workspace/remotion-refs/ 复制一份（旧路径的媒体白名单限制）。
+    const uploadsRoot = join(process.cwd(), "public", "uploads", "gen-video-refs", token);
+    await mkdir(uploadsRoot, { recursive: true });
+
+    savedImagePaths = [];
+    // 参考图的对外可访问 URL。落盘路径是本机绝对路径，只有服务端能读；
+    // 前端要回显必须用 /uploads/... 形式。两者在同一次循环里 push，索引天然对齐。
+    referenceImageUrls = [];
+    for (let i = 0; i < imageFiles.length; i++) {
+      const file = imageFiles[i];
+      const extension = extname(file.name).toLowerCase();
+      if (!allowedImageExtensions.has(extension)) continue;
+      if (file.size > maxUploadBytes) continue;
+      const target = join(uploadsRoot, `ref-${i}${extension}`);
+      await writeFile(target, Buffer.from(await file.arrayBuffer()));
+      savedImagePaths.push(target);
+      referenceImageUrls.push(`/uploads/gen-video-refs/${token}/ref-${i}${extension}`);
+    }
+    if (!savedImagePaths.length) return jsonError("参考图格式不支持，请上传 JPG / PNG / WebP。");
   }
-  if (!savedImagePaths.length) return jsonError("参考图格式不支持，请上传 JPG / PNG / WebP。");
 
   // 本次输入的回显上下文，全程传给 formatProgressMessage（占位 / 进度 / 完成 / 失败四处共用）。
   const inputContext: VideoInputContext = { referenceImages: referenceImageUrls, requirement };
@@ -111,7 +139,11 @@ export async function POST(request: Request, context: { params: { id: string } }
   const task = await prisma.openClawTask.create({
     data: { userId: user.id, type: "gen-video", prompt: requirement.slice(0, 200), status: "RUNNING" },
   });
-  const progress = ["已接收参考图，正在准备 Remotion 视频创作任务…"];
+  const progress = [
+    savedPlan
+      ? "已接收你确认的方案，正在准备 Remotion 视频创作任务…"
+      : "已接收参考图，正在准备 Remotion 视频创作任务…",
+  ];
   const progressMessage = await prisma.message.create({
     data: { conversationId: conversation.id, role: "ASSISTANT", content: formatProgressMessage(inputContext, progress) },
   });
@@ -145,14 +177,24 @@ export async function POST(request: Request, context: { params: { id: string } }
           targetSeconds: parseTargetSeconds(requirement),
           ttsProvider,
           theme,
+          look,
           bgmPath: pickBgm(),
           // 归属用户：配音 / 分镜 / 识图都按该用户「系统配置」里的模型服务来调用
           userId: user.id,
+          // 用户已确认的方案：带上来就跳过识图/旁白/配音/分镜，直接渲染
+          resume: savedPlan ? (JSON.parse(savedPlan.draftJson) as VideoPlanDraft) : undefined,
           renderOverride: engine === "openclaw" ? renderViaOpenClaw : undefined,
           onProgress: sendProgress,
         });
 
         if (!result.ok) throw new Error(result.error || "视频生成失败。");
+
+        // 方案已出片，标记为 RENDERED（刷新后前端据此不再重复出片）
+        if (savedPlan) {
+          await prisma.videoPlan
+            .update({ where: { id: savedPlan.id }, data: { status: "RENDERED" } })
+            .catch(() => undefined);
+        }
 
         const finalUrl = result.videoUrl ?? null;
         const coverUrl = result.coverUrl ?? null;

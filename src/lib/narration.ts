@@ -1,15 +1,27 @@
 /**
  * 旁白文案 + 标题生成（「一键生成视频」的自动配文）。
  *
- * 用智谱 GLM 对话模型，根据用户的整体创作要求生成：
+ * 根据用户的整体创作要求生成：
  *   - title：视频标题（8~14 字，用于片头展示与内容库标题）
  *   - segments：口播旁白（用于 TTS 配音与逐句字幕）
  * 旁白长度由 targetSeconds（目标口播时长）决定——视频时长即由 TTS 旁白时长决定，
  * 因此必须让旁白长度服从创作要求中的时长目标，否则视频会比预期短。
  * 实测 GLM 单次生成倾向偏短，故在字数不足目标 85% 时自动扩充（最多 2 次）。
- * 模型可用环境变量覆盖：NARRATION_MODEL（默认 glm-4-flash）。
  * 失败返回 null，由上层降级（无旁白，仅画面）。
+ *
+ * ## 为什么接收 insights
+ *
+ * 早先这里只收 `imageCount`，于是旁白对「这些图到底是什么」一无所知，
+ * 只能按创作要求凭空写 —— 结果常常是旁白讲的人和画面里拍的东西对不上。
+ * 识图结果（caption/mood/subject）在 pipeline 里本来就已经拿到了，
+ * 却没有一路传到这里，是「先理解素材再出方案」链路上最明显的一处断点。
+ *
+ * ## 模型来源
+ *
+ * 走**当前用户**在「系统配置 → 模型配置」里为 chat 指定的服务；
+ * 没有配置时回落全局 env 的智谱 GLM（保留旧行为，便于后台出片等无人场景）。
  */
+import { chatComplete } from "./llm-client";
 
 const ZHIPU_API_KEY = process.env.ZHIPU_API_KEY ?? "";
 const ZHIPU_CHAT_API = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
@@ -22,6 +34,13 @@ export type NarrationScript = {
   fullText: string;
   /** 分句（用于参考/兜底字幕） */
   segments: string[];
+};
+
+/** 识图结果的最小形状（与 vision.ImageInsight 对齐，此处不依赖该模块避免循环引用）。 */
+export type NarrationInsight = {
+  caption?: string;
+  mood?: string;
+  subject?: string;
 };
 
 /** 从模型返回文本里尽量解析出 { title, segments }。 */
@@ -74,8 +93,27 @@ function trimToMaxChars(text: string, maxChars: number): string {
   return out.trim() || text;
 }
 
-/** 调用智谱 GLM 对话，返回纯文本（失败返回 null）。 */
-async function chatOnce(prompt: string): Promise<string | null> {
+/**
+ * 调用模型一次，返回纯文本（失败返回 null）。
+ *
+ * 有 userId 时优先走用户自己的 chat 服务；没有配置或调用失败时回落全局 env 的智谱 GLM。
+ * 两条路都失败才返回 null，由上层降级成「无旁白，仅画面」。
+ */
+async function chatOnce(prompt: string, userId?: string): Promise<string | null> {
+  if (userId) {
+    try {
+      const r = await chatComplete({
+        userId,
+        capability: "chat",
+        prompt,
+        temperature: 0.6,
+        timeoutMs: 90_000,
+      });
+      return r.content.trim() || null;
+    } catch {
+      // 未配置 chat 服务或调用失败 → 尝试全局 env 兜底
+    }
+  }
   try {
     const res = await fetch(ZHIPU_CHAT_API, {
       method: "POST",
@@ -102,7 +140,8 @@ async function chatOnce(prompt: string): Promise<string | null> {
 async function expandNarrationScript(
   existing: string,
   requirement: string,
-  targetChars: number
+  targetChars: number,
+  userId?: string
 ): Promise<string | null> {
   const prompt = [
     "下面是一条竖版短视频的口播旁白，请保持主题与温暖口语风格不变，把它自然扩充得更充实。",
@@ -115,7 +154,7 @@ async function expandNarrationScript(
   ]
     .filter(Boolean)
     .join("\n");
-  const text = await chatOnce(prompt);
+  const text = await chatOnce(prompt, userId);
   if (!text) return null;
   // 去掉模型可能带的引号/围栏
   return text.replace(/```/g, "").replace(/^["“”]+|["“”]+$/g, "").trim();
@@ -126,22 +165,46 @@ async function expandNarrationScript(
  *
  * targetSeconds：目标口播时长（秒）。默认 30s，封顶 40s（兼顾渲染耗时）。
  * 视频时长 = TTS 旁白时长，所以旁白字数必须服从该目标。
+ *
+ * insights：识图结果。给了就会写进 prompt —— 这让旁白能「看着素材说话」，
+ * 而不是只知道「有 N 张图」。没有识图（未配 vision 模型）时行为与改造前一致。
  */
 export async function generateNarrationScript(
   requirement: string,
   imageCount: number,
-  targetSeconds = 30
+  targetSeconds = 30,
+  insights: NarrationInsight[] = [],
+  userId?: string
 ): Promise<NarrationScript | null> {
-  if (!ZHIPU_API_KEY) return null;
+  if (!userId && !ZHIPU_API_KEY) return null;
 
   // 目标时长（秒）→ 目标字数（中文口播约 4.5 字/秒）。封顶 60s、下限 8s。
   const safeTarget = Math.min(60, Math.max(8, Math.round(targetSeconds || 30)));
   const targetChars = Math.round(safeTarget * 4.5);
 
+  // 有描述的图才写进 prompt：全空的 insight 列表等于没识别，传了反而误导模型。
+  const described = insights.filter((i) => (i.caption ?? "").trim());
+  const materialLines =
+    described.length > 0
+      ? described
+          .slice(0, 12)
+          .map(
+            (i, k) =>
+              `图${k + 1}：${(i.caption ?? "").trim()}` +
+              `${i.mood ? `（氛围：${i.mood.trim()}）` : ""}` +
+              `${i.subject ? `（主体：${i.subject.trim()}）` : ""}`,
+          )
+          .join("\n")
+      : imageCount > 0
+        ? `参考图共 ${imageCount} 张，画面围绕这些视觉素材展开。`
+        : "";
+
   const prompt = [
     "你是短视频文案专家。请为一条竖版短视频输出「标题 + 口播旁白」。",
     `创作主题 / 要求：${requirement?.trim() || "温暖治愈风格，主题由你根据常识合理设定"}`,
-    imageCount > 0 ? `参考图共 ${imageCount} 张，画面围绕这些视觉素材展开。` : "",
+    described.length > 0
+      ? `以下是系统识别出的素材内容，旁白必须围绕这些画面展开，不要描述画面里没有的东西：\n${materialLines}`
+      : materialLines,
     "写作要求：",
     "- 标题：8~14 个字，有吸引力、能勾起共鸣，概括主题，不要引号和标点堆砌",
     // 旁白长度服从目标时长：这是视频时长的唯一决定因素，必须严格遵守。
@@ -156,7 +219,7 @@ export async function generateNarrationScript(
     .filter(Boolean)
     .join("\n");
 
-  const raw = await chatOnce(prompt);
+  const raw = await chatOnce(prompt, userId);
   if (!raw) return null;
   const { title, segments } = parseScript(raw);
   if (!segments.length) return null;
@@ -172,7 +235,7 @@ export async function generateNarrationScript(
 
   let expandRounds = 0;
   while (countChars(fullText) < lowChars && expandRounds < 2) {
-    const expanded = await expandNarrationScript(fullText, requirement, targetChars);
+    const expanded = await expandNarrationScript(fullText, requirement, targetChars, userId);
     if (!expanded) break;
     const sentences = splitSentences(expanded);
     if (sentences.length < 2) break; // 扩充结果异常，保留原文

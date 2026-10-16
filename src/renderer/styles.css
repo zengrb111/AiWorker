@@ -1895,6 +1895,134 @@ textarea:focus {
 }
 .gen-video-engine-hint { flex: 1 1 100%; font-size: 11px; color: var(--muted); line-height: 1.5; }
 
+/* 一键生成视频：效果微调（主题之外的加法与覆盖）
+   设计取舍见 platform-client.tsx 面板注释：只开放外挂特效 / 统一运镜 / 字幕样式三个维度。 */
+.gen-video-look {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--panel-soft);
+}
+.gen-video-look-title { font-size: 12.5px; font-weight: 800; color: var(--text-main); }
+.gen-video-look-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.gen-video-look-label { font-size: 12px; color: var(--muted); white-space: nowrap; min-width: 62px; }
+.gen-video-look-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 auto; }
+.gen-video-look-chip {
+  padding: 4px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-sub);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+.gen-video-look-chip:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-dark); }
+.gen-video-look-chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.gen-video-look-chip:disabled { opacity: 0.4; cursor: not-allowed; }
+.gen-video-look select {
+  flex: 1 1 auto;
+  min-width: 170px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* 一键生成视频：方案生成中的等待提示 */
+.gen-video-plan-loading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 14px;
+  border: 1px dashed var(--accent);
+  border-radius: 10px;
+  background: rgba(43, 124, 255, 0.05);
+  color: var(--accent-dark);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* 一键生成视频：AI 方案展示区 */
+.gen-video-plan {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f7faff, #eef5ff);
+  box-shadow: 0 6px 18px rgba(43, 124, 255, 0.1);
+}
+.gen-video-plan-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.gen-video-plan-head strong { font-size: 14px; font-weight: 800; color: var(--text-main); }
+.gen-video-plan-meta { font-size: 11.5px; color: var(--muted); font-weight: 700; }
+.gen-video-plan-row { display: flex; align-items: baseline; gap: 10px; font-size: 12.5px; }
+.gen-video-plan-key { flex: 0 0 62px; color: var(--muted); font-weight: 800; }
+.gen-video-plan-val { flex: 1 1 auto; min-width: 0; color: var(--text-main); font-weight: 700; }
+.gen-video-plan-note { display: block; margin-top: 2px; font-weight: 500; font-size: 11.5px; color: var(--muted); }
+.gen-video-plan-block { display: grid; gap: 6px; }
+.gen-video-plan-block .gen-video-plan-key { flex: none; }
+
+/* AI 理解到的素材 */
+.gen-video-insight-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.gen-video-insight {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12px;
+  color: var(--text-main);
+}
+.gen-video-insight-no { font-weight: 800; color: var(--accent); }
+.gen-video-insight-swatch { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(0, 0, 0, 0.12); flex: none; }
+.gen-video-insight-text em { font-style: normal; color: var(--muted); }
+
+/* 镜头安排 */
+.gen-video-scene-list { display: grid; gap: 5px; max-height: 260px; overflow-y: auto; padding-right: 4px; }
+.gen-video-scene {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: #fff;
+  font-size: 12px;
+}
+.gen-video-scene-no { flex: none; width: 18px; height: 18px; border-radius: 6px; background: #eef3fb; color: var(--accent); font-size: 11px; font-weight: 800; display: grid; place-items: center; }
+.gen-video-scene-time { flex: none; font-variant-numeric: tabular-nums; color: var(--accent-dark); font-weight: 800; }
+.gen-video-scene-body { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.gen-video-scene-imgs { color: var(--text-main); font-weight: 700; }
+.gen-video-scene-motion { color: var(--muted); }
+.gen-video-scene-overlay { padding: 1px 7px; border-radius: 6px; background: #f2f7ff; color: var(--accent-dark); font-size: 11.5px; font-weight: 700; }
+.gen-video-scene-note { flex: 1 1 100%; color: var(--muted); font-size: 11.5px; }
+
+.gen-video-plan-narration { font-size: 12.5px; color: var(--text-sub); }
+.gen-video-plan-narration summary { cursor: pointer; font-weight: 800; color: var(--accent-dark); }
+.gen-video-plan-narration p { margin: 6px 0 0; line-height: 1.75; color: var(--text-main); }
+
+.gen-video-plan-warnings { display: grid; gap: 5px; }
+.gen-video-plan-warn {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #fdf6e8;
+  border: 1px solid #f0dcb4;
+  color: #92600a;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
 /* 一键生成视频：大图预览 lightbox */
 .gen-video-lightbox { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.78); cursor: zoom-out; }
 .gen-video-lightbox img { max-width: 90vw; max-height: 90vh; border-radius: 8px; box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5); cursor: default; }

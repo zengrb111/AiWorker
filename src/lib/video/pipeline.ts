@@ -48,12 +48,17 @@ import {
 } from "./render";
 import { checkVideoFrames } from "./frame-check";
 import {
+  applyLook,
   normalizeBeats,
   planClipStoryboard,
   planStoryboard,
   synthesizeBeats,
+  toPlanSummary,
+  type CaptionStyleKey,
   type ClipStoryboard,
+  type LookConfig,
   type MaterialInsight,
+  type PlanSummary,
   type Storyboard,
   type StoryboardPlanResult,
   type TimelineBeat,
@@ -126,7 +131,71 @@ export type PipelineInput = {
    * 这样新旧两条引擎的成片观感一致，回退时也不会退回到"另一套后期"。
    */
   renderOverride?: (context: RenderContext) => Promise<{ ok: boolean; outputPath: string; detail: string }>;
+  /**
+   * 外观覆盖：在主题之上叠加特效层 / 统一运镜 / 指定字幕样式。
+   *
+   * 由**用户**决定，不交给 DSH —— 观感偏好不是模型该猜的东西，
+   * 交给模型只会得到「每次不一样的风格」，反而不可复现。
+   * 缺省（undefined）时成片观感与改造前完全一致。
+   */
+  look?: LookConfig;
+  /**
+   * 已确认的规划阶段产物（来自 `runVideoPlanStage`）。
+   *
+   * 给了它就**跳过**识图/旁白/配音/分镜，直接进入渲染 ——
+   * 这是「先出方案给用户确认，再出片」的第二段。用户确认前的那一次
+   * 规划结果存进 VideoPlan 表，确认后原样取回，避免重复跑一次
+   * 1~2 分钟的识图+配音+DSH。
+   */
+  resume?: VideoPlanDraft;
   onProgress?: (text: string) => void;
+};
+
+/**
+ * 规划阶段的产物：一切「渲染之前」能算出来的东西。
+ *
+ * 这个对象会整体序列化进 VideoPlan 表，所以**只放可 JSON 化的纯数据**，
+ * 不要往里塞文件句柄或函数。
+ */
+export type VideoPlanDraft = {
+  /** 素材绝对路径（规划与渲染必须是同一批文件，故 token 一致）。 */
+  materials: string[];
+  /** 完整的分镜（含 look 覆盖），渲染阶段直接喂 Remotion。 */
+  storyboard: Storyboard;
+  /** 时间轴骨架，诊断用。 */
+  beatCount: number;
+  /** 识图结果：给方案面板展示「AI 理解到的素材」。 */
+  insights: MaterialInsight[];
+  narration: string;
+  title: string;
+  /** 配音文件绝对路径；为空表示无配音版本。 */
+  audioPath: string | null;
+  audioSeconds: number;
+  /** 实际生效的主题 key。 */
+  theme: string;
+  /** 识图自动选主题的理由，供界面如实告知。 */
+  themeReason: string;
+  /** 字幕样式（已写入 storyboard.look，这里冗余一份便于渲染阶段直接取用）。 */
+  captionStyle: CaptionStyleKey;
+  totalSeconds: number;
+  /** 规划阶段的诊断信息。 */
+  diagnostics: {
+    visionRecognized: number;
+    visionTotal: number;
+    dshAvailable: boolean;
+    dshReason?: string;
+    storyboardFallback: boolean;
+    storyboardAttempts: number;
+    sceneCount: number;
+    timelineBeats: number;
+    /** 配音实际使用的引擎与是否发生降级。 */
+    ttsEngine?: string;
+    ttsFallbackReason?: string;
+    /** 规划耗时（毫秒），用于界面上「方案生成用时」。 */
+    elapsedMs: number;
+  };
+  /** 供前端直接渲染的方案摘要。 */
+  summary: PlanSummary;
 };
 
 /** 传给 renderOverride 的上下文。 */
@@ -205,10 +274,252 @@ export function parseTargetSeconds(requirement: string, fallback = 30): number {
 }
 
 /**
+ * 规划阶段：识图 → 自动选风格 → 旁白 → 配音 → DSH 分镜，**不渲染**。
+ *
+ * ## 为什么单独拆出来
+ *
+ * 早先这些步骤全都藏在 `runVideoPipeline` 里，而该函数由「点击开始生成」触发，
+ * 于是用户在 2~5 分钟的渲染开始之前，**没有任何机会看到 AI 到底打算怎么剪这条片子**：
+ * 分镜结果只变成一行进度文本「分镜规划完成（N 段）」混在几十条进度里，
+ * 更谈不上确认或修改。需求是「先理解素材 → 出方案 → 用户选 → 再生成」。
+ *
+ * 拆开之后，规划阶段（约 1~2 分钟，主要是配音与 DSH）产出一个可序列化的
+ * `VideoPlanDraft`，存进 VideoPlan 表；用户确认后由 `runVideoPipeline`
+ * 带 `resume` 回来，直接从渲染开始 —— 规划不必重跑。
+ *
+ * ## 为什么规划阶段必须包含配音
+ *
+ * 分镜的时间轴骨架 `beats` 来自 TTS 的**句级时间戳**（`buildBeats`），
+ * 不跑配音就没有真实时间点，分镜只能是估算。所以方案阶段天然要等配音完成，
+ * 这一点已与产品确认并接受。
+ *
+ * 与 `runVideoPipeline` 一样不抛错：规划失败也要返回 `ok:false` + 可读原因。
+ */
+export async function runVideoPlanStage(
+  input: PlanStageInput,
+): Promise<{ ok: true; draft: VideoPlanDraft } | { ok: false; error: string }> {
+  const started = Date.now();
+  const notify = input.onProgress ?? (() => undefined);
+  const record: string[] = [];
+
+  const spec = MODE_SPEC[input.mode];
+  const workDir = input.workDir ?? join(process.cwd(), "public", "uploads", `${spec.prefix}-work`, input.token);
+  mkdirSync(workDir, { recursive: true });
+
+  // ---- 1. 素材归一化 ----
+  const materials = normalizeMaterials(input.materials);
+  if (materials.length === 0) return { ok: false, error: "没有可用素材，无法规划视频方案。" };
+
+  // ---- 1.5 识图：素材语义 + 整体色调画像 ----
+  //
+  // ① 每张图的语义描述 → 喂 DSH，让它把「对的图放在对的句子上」而非按顺序轮播；
+  // ② 整体色调 → 自动挑一套协调主题，用户不必懂配色。
+  // 任何一步失败都退回改造前行为（insights 为空 → 按顺序轮播 + 用户选/默认主题），
+  // 识图是纯增强，绝不允许它让规划失败。
+  let insights: MaterialInsight[] = [];
+  let autoThemeKey: string | null = null;
+  let visionRecognized = 0;
+  let visionTotal = 0;
+  const imageMaterials = materials.filter((m) => m.kind === "image");
+  if (input.mode === "generate" && imageMaterials.length) {
+    const status = await visionStatus({ userId: input.userId });
+    if (status.ok) {
+      notify("正在识别素材图片内容…");
+      try {
+        const found = await insightImages(
+          imageMaterials.map((m) => m.absolutePath),
+          { userId: input.userId },
+        );
+        insights = imageMaterials.map((m, k) => {
+          const one = found[k];
+          return one
+            ? {
+                path: m.absolutePath,
+                caption: one.caption,
+                mood: one.mood,
+                subject: one.subject,
+                dominantColor: one.dominantColor,
+                isDark: one.isDark,
+              }
+            : { path: m.absolutePath, caption: "", mood: "", subject: "", dominantColor: "" };
+        });
+        visionTotal = imageMaterials.length;
+        visionRecognized = countInsights(insights);
+        if (visionRecognized > 0) {
+          record.push(`识别 ${visionRecognized}/${visionTotal} 张`);
+          // 自动选主题：仅当用户没有显式指定时才生效
+          if (!input.theme) {
+            const choice = inferStyle(insights.filter((i) => i.caption));
+            if (choice) {
+              autoThemeKey = choice.themeKey;
+              notify(`已根据素材色调自动选择风格「${choice.theme.label}」`);
+            }
+          }
+        } else {
+          record.push("未能识别任何图片，按原顺序轮播");
+        }
+      } catch (error) {
+        record.push(`识别异常，已忽略：${(error as Error).message}`);
+      }
+    } else {
+      record.push(`识图不可用（${status.reason}），按原顺序轮播`);
+    }
+  }
+
+  /** 最终生效的主题：用户显式选择 > 识图推断 > 缺省（规划层用默认）。 */
+  const effectiveTheme = input.theme ?? autoThemeKey ?? undefined;
+  const themeReason =
+    input.theme
+      ? "你手动指定的风格"
+      : autoThemeKey
+        ? "AI 识别素材主色调后自动挑选，避免配色与画面打架"
+        : "未能推断素材色调，使用默认风格";
+
+  notify(`已就绪 ${materials.length} 份素材，开始规划分镜…`);
+
+  // ---- 2. 旁白（剪辑 / 复刻链路由 ASR 提供，不需要再生成）----
+  let narrationText = input.narrationText?.trim() ?? "";
+  let videoTitle = input.title?.trim() ?? "";
+  if (!narrationText && input.mode === "generate") {
+    notify("正在根据创作要求生成标题与旁白文案…");
+    const script = await generateNarrationScript(
+      input.requirement,
+      materials.length,
+      input.targetSeconds,
+      insights,
+      input.userId,
+    );
+    narrationText = script?.fullText ?? "";
+    videoTitle = videoTitle || (script?.title ?? "");
+    if (narrationText) notify(`已生成标题「${videoTitle}」与旁白（${script!.segments.length} 句）`);
+  }
+
+  // ---- 3. 配音 ----
+  const ttsProvider = resolveTtsProvider(input.ttsProvider, DEFAULT_TTS_PROVIDER);
+  let audio: { audioPath: string; durationSeconds: number; captions: WordCaption[] } | null = null;
+  let ttsEngine: string | undefined;
+  let ttsFallbackReason: string | undefined;
+  // 剪辑 / 复刻链路已有 ASR 字幕与原声，不需要再合成一份配音
+  const needVoice = Boolean(narrationText) && input.mode === "generate";
+  if (needVoice) {
+    notify(`正在用${TTS_ENGINE_LABELS[ttsProvider]}合成配音…`);
+    try {
+      const tts = await synthesizeNarration(narrationText, workDir, undefined, ttsProvider, {
+        userId: input.userId,
+      });
+      audio = { audioPath: tts.audioPath, durationSeconds: tts.durationSeconds, captions: tts.captions };
+      ttsEngine = tts.engine ?? ttsProvider;
+      ttsFallbackReason = tts.fallbackReason;
+      if (tts.engine && tts.engine !== ttsProvider) {
+        // 引擎与用户选择不一致 = 发生了降级回退。
+        // 必须带上真实原因：早先只说「引擎不可用」，用户无从判断是缺 key、限流还是参数错。
+        const reason = tts.fallbackReason ? `。原因：${tts.fallbackReason.slice(0, 160)}` : "";
+        notify(
+          `所选引擎不可用，已自动切换到${TTS_ENGINE_LABELS[tts.engine]}合成配音（约 ${tts.durationSeconds.toFixed(1)} 秒）${reason}`,
+        );
+      } else {
+        notify(`配音合成完成（约 ${tts.durationSeconds.toFixed(1)} 秒）`);
+      }
+    } catch (error) {
+      // 配音失败不阻断：无配音版本也能出方案
+      const message = (error as Error).message;
+      notify(`配音合成失败，将生成无配音版本：${message}`);
+    }
+  }
+
+  // ---- 4. 分镜：DSH 出稿，失败自动兜底 ----
+  const totalSeconds = Math.max(6, audio?.durationSeconds ?? input.targetSeconds);
+  const dsh = await getDshStatus(input.userId);
+  const beats = buildBeats(
+    input.captions?.length ? input.captions : audio?.captions,
+    totalSeconds,
+  );
+  const plan = await planStoryboardFor(
+    input,
+    materials,
+    totalSeconds,
+    beats,
+    insights,
+    effectiveTheme,
+    dsh.ok,
+    notify,
+  );
+  reportPlan(plan, dsh.ok, notify);
+
+  const board = applyLook(plan.storyboard, {
+    captionStyle: input.look?.captionStyle,
+    ...(input.look?.effects ? { effects: input.look.effects } : {}),
+    ...(input.look?.motion ? { motion: input.look.motion } : {}),
+  }) as Storyboard;
+
+  const sceneCount = "scenes" in board ? board.scenes.length : 0;
+  const draft: VideoPlanDraft = {
+    materials: materials.map((m) => m.absolutePath),
+    storyboard: board,
+    beatCount: beats.length,
+    insights,
+    narration: narrationText,
+    title: videoTitle,
+    audioPath: audio?.audioPath ?? null,
+    audioSeconds: audio?.durationSeconds ?? 0,
+    theme: board.theme,
+    themeReason,
+    captionStyle: input.look?.captionStyle ?? "classic",
+    totalSeconds,
+    diagnostics: {
+      visionRecognized,
+      visionTotal,
+      dshAvailable: dsh.ok,
+      dshReason: dsh.ok ? undefined : dsh.reason,
+      storyboardFallback: plan.fallback,
+      storyboardAttempts: plan.diagnostics.attempts,
+      sceneCount,
+      timelineBeats: beats.length,
+      ttsEngine,
+      ttsFallbackReason,
+      elapsedMs: Date.now() - started,
+    },
+    summary: toPlanSummary(
+      { ...plan, storyboard: board },
+      {
+        imagePaths: materials.map((m) => m.absolutePath),
+        insights,
+        captionStyle: input.look?.captionStyle,
+      },
+    ),
+  };
+  if (record.length) console.log(`[plan-stage] ${input.token}：${record.join("；")}`);
+  return { ok: true, draft };
+}
+
+/** 规划阶段的输入。渲染阶段用不到 `look` 之外的任何渲染参数。 */
+export type PlanStageInput = {
+  mode: PipelineMode;
+  token: string;
+  materials: string[];
+  requirement: string;
+  targetSeconds: number;
+  userId: string;
+  narrationText?: string;
+  title?: string;
+  outroText?: string;
+  ttsProvider?: TtsProvider;
+  captions?: WordCaption[];
+  theme?: string;
+  look?: LookConfig;
+  /** 配音工作目录；不给则用「<prefix>-work/<token>」。渲染阶段必须沿用同一个。 */
+  workDir?: string;
+  onProgress?: (text: string) => void;
+};
+
+/**
  * 跑完整条出片流程。
  *
  * 不抛错：任何环节失败都通过 `ok:false` + `error` 返回，
  * 由路由决定是落 FAILED，还是回退旧引擎重试。
+ *
+ * 传了 `input.resume` 时跳过识图/旁白/配音/分镜，直接从渲染开始
+ * （用户已在方案确认环节看过并接受这份规划结果）。
  */
 export async function runVideoPipeline(input: PipelineInput): Promise<PipelineResult> {
   const started = Date.now();
@@ -249,9 +560,110 @@ export async function runVideoPipeline(input: PipelineInput): Promise<PipelineRe
   let narrationText = input.narrationText?.trim() ?? "";
 
   try {
-    // ---- 1. 素材归一化 ----
-    const materials = normalizeMaterials(input.materials);
-    diagnostics.materialCount = materials.length;
+    // ---- 1~4. 规划阶段 ----
+    //
+    // resume 分支：用户已在方案确认环节看过这份规划，直接取用。
+    // 必须复用**同一个 workDir**（同一个 token），否则配音文件找不到。
+    let materials: Material[];
+    let plan: StoryboardPlanResult | null = null;
+    let beats: TimelineBeat[] = [];
+    let audio: { audioPath: string; durationSeconds: number; captions: WordCaption[] } | null = null;
+    let totalSeconds = input.targetSeconds;
+
+    if (input.resume) {
+      const draft = input.resume;
+      materials = normalizeMaterials(draft.materials);
+      videoTitle = draft.title || videoTitle;
+      narrationText = draft.narration || narrationText;
+      // 规划阶段已经把 look 写进 storyboard，这里不再重复应用。
+      plan = { storyboard: draft.storyboard, fallback: draft.diagnostics.storyboardFallback, diagnostics: {
+        attempts: draft.diagnostics.storyboardAttempts,
+        usedDsh: draft.diagnostics.dshAvailable,
+        elapsedMs: draft.diagnostics.elapsedMs,
+        rawLength: 0,
+      } };
+      beats = draft.storyboard.beats ?? [];
+      // 用分镜自带的时间轴骨架还原字幕，而不是按字数估算：
+      // beats 本身就是 TTS 的句级时间戳（只是归一化过），比估算准。
+      audio = draft.audioPath
+        ? {
+            audioPath: draft.audioPath,
+            durationSeconds: draft.audioSeconds,
+            captions: beatsToCaptions(beats),
+          }
+        : null;
+      totalSeconds = draft.totalSeconds;
+      diagnostics.materialCount = materials.length;
+      diagnostics.narrationSeconds = draft.audioSeconds;
+      diagnostics.storyboardFallback = draft.diagnostics.storyboardFallback;
+      diagnostics.storyboardAttempts = draft.diagnostics.storyboardAttempts;
+      diagnostics.sceneCount = draft.diagnostics.sceneCount;
+      diagnostics.timelineBeats = draft.beatCount;
+      diagnostics.visionRecognized = draft.diagnostics.visionRecognized;
+      diagnostics.visionTotal = draft.diagnostics.visionTotal;
+      diagnostics.dshAvailable = draft.diagnostics.dshAvailable;
+      diagnostics.dshReason = draft.diagnostics.dshReason;
+      record("沿用已确认方案", true, `${draft.diagnostics.sceneCount} 个镜头 / 风格 ${draft.theme}`);
+      notify(`已沿用你确认的方案（${draft.diagnostics.sceneCount} 个镜头），开始渲染…`);
+    } else {
+      const stage = await runVideoPlanStage({
+        mode: input.mode,
+        token: input.token,
+        materials: input.materials,
+        requirement: input.requirement,
+        targetSeconds: input.targetSeconds,
+        userId: input.userId,
+        narrationText: input.narrationText,
+        title: input.title,
+        outroText: input.outroText,
+        ttsProvider: input.ttsProvider,
+        captions: input.captions,
+        theme: input.theme,
+        look: input.look,
+        workDir,
+        onProgress: notify,
+      });
+      if (!stage.ok) {
+        record("规划阶段", false, stage.error);
+        return finish({
+          ok: false,
+          error: stage.error,
+          title: videoTitle,
+          narration: narrationText,
+          engineUsed: "dsh-remotion",
+        });
+      }
+      const draft = stage.draft;
+      materials = normalizeMaterials(draft.materials);
+      videoTitle = draft.title || videoTitle;
+      narrationText = draft.narration || narrationText;
+      plan = { storyboard: draft.storyboard, fallback: draft.diagnostics.storyboardFallback, diagnostics: {
+        attempts: draft.diagnostics.storyboardAttempts,
+        usedDsh: draft.diagnostics.dshAvailable,
+        elapsedMs: draft.diagnostics.elapsedMs,
+        rawLength: 0,
+      } };
+      beats = draft.storyboard.beats ?? [];
+      audio = draft.audioPath
+        ? {
+            audioPath: draft.audioPath,
+            durationSeconds: draft.audioSeconds,
+            captions: beatsToCaptions(beats),
+          }
+        : null;
+      totalSeconds = draft.totalSeconds;
+      diagnostics.materialCount = materials.length;
+      diagnostics.narrationSeconds = draft.audioSeconds;
+      diagnostics.storyboardFallback = draft.diagnostics.storyboardFallback;
+      diagnostics.storyboardAttempts = draft.diagnostics.storyboardAttempts;
+      diagnostics.sceneCount = draft.diagnostics.sceneCount;
+      diagnostics.timelineBeats = draft.beatCount;
+      diagnostics.visionRecognized = draft.diagnostics.visionRecognized;
+      diagnostics.visionTotal = draft.diagnostics.visionTotal;
+      diagnostics.dshAvailable = draft.diagnostics.dshAvailable;
+      diagnostics.dshReason = draft.diagnostics.dshReason;
+    }
+
     if (materials.length === 0) {
       record("素材归一化", false, "没有可用素材");
       return finish({
@@ -261,157 +673,6 @@ export async function runVideoPipeline(input: PipelineInput): Promise<PipelineRe
         narration: narrationText,
         engineUsed: "dsh-remotion",
       });
-    }
-
-    // ---- 1.5 识图（增强项，失败静默降级）----
-    //
-    // 产出两份东西：
-    //   ① 每张图的语义描述 → 喂给 DSH，让它把「对的图放在对的句子上」，
-    //      而不是按列表顺序轮播；
-    //   ② 整体色调画像 → 自动挑一套协调的主题，用户不必懂配色。
-    //
-    // 任何一步失败都退回改造前行为：insights 为空 → 按顺序轮播 + 用户选/默认主题。
-    // 识图是纯增强，绝不允许它让出片失败。
-    let insights: MaterialInsight[] = [];
-    let autoThemeKey: string | null = null;
-    const wantVision = input.mode === "generate" && materials.some((m) => m.kind === "image");
-    if (wantVision) {
-      const status = await visionStatus({ userId: input.userId });
-      if (status.ok && input.userId) {
-        notify("正在识别素材图片内容…");
-        try {
-          const imagePaths = materials.filter((m) => m.kind === "image").map((m) => m.absolutePath);
-          const found = await insightImages(imagePaths, { userId: input.userId });
-          // 只保留图片类结果，且与 materials 的下标对齐
-          const imageIndexes = materials
-            .map((m, i) => (m.kind === "image" ? i : -1))
-            .filter((i) => i >= 0);
-          insights = imageIndexes.map((idx, k) => {
-            const one = found[k];
-            return one
-              ? {
-                  path: materials[idx].absolutePath,
-                  caption: one.caption,
-                  mood: one.mood,
-                  subject: one.subject,
-                  dominantColor: one.dominantColor,
-                  isDark: one.isDark,
-                }
-              : {
-                  path: materials[idx].absolutePath,
-                  caption: "",
-                  mood: "",
-                  subject: "",
-                  dominantColor: "",
-                };
-          });
-
-          const recognized = countInsights(insights);
-          diagnostics.visionRecognized = recognized;
-          diagnostics.visionTotal = imagePaths.length;
-          if (recognized > 0) {
-            record("素材识图", true, `识别 ${recognized}/${imagePaths.length} 张`);
-
-            // 自动选主题：仅当用户没有显式指定时才生效
-            if (!input.theme) {
-              const choice = inferStyle(insights.filter((i) => i.caption));
-              if (choice) {
-                autoThemeKey = choice.themeKey;
-                diagnostics.autoTheme = choice.themeKey;
-                diagnostics.autoThemeReason = choice.reason;
-                notify(`已根据素材色调自动选择风格「${choice.theme.label}」`);
-              }
-            }
-          } else {
-            record("素材识图", false, "未能识别任何图片，按原顺序轮播");
-          }
-        } catch (error) {
-          record("素材识图", false, `识别异常，已忽略：${(error as Error).message}`);
-        }
-      } else {
-        record("素材识图", false, `识图不可用（${!status.ok ? status.reason : "缺少登录用户"}），按原顺序轮播`);
-      }
-    }
-
-    /** 最终生效的主题：用户显式选择 > 识图推断 > 未指定（规划层用默认）。 */
-    const effectiveTheme = input.theme ?? autoThemeKey ?? undefined;
-    notify(`已就绪 ${materials.length} 份素材，开始规划分镜…`);
-
-    // ---- 2. 旁白（剪辑 / 复刻链路由 ASR 提供，不需要再生成） ----
-    if (!narrationText && input.mode === "generate") {
-      notify("正在根据创作要求生成标题与旁白文案…");
-      const script = await generateNarrationScript(input.requirement, materials.length, input.targetSeconds);
-      narrationText = script?.fullText ?? "";
-      videoTitle = videoTitle || (script?.title ?? "");
-      if (narrationText) notify(`已生成标题「${videoTitle}」与旁白（${script!.segments.length} 句）`);
-    }
-
-    // ---- 3. 配音 ----
-    const ttsProvider = resolveTtsProvider(input.ttsProvider, DEFAULT_TTS_PROVIDER);
-    let audio: { audioPath: string; durationSeconds: number; captions: WordCaption[] } | null = null;
-    // 剪辑 / 复刻链路已有 ASR 字幕与原声，不需要再合成一份配音
-    const needVoice = Boolean(narrationText) && input.mode === "generate";
-    if (needVoice) {
-      notify(`正在用${TTS_ENGINE_LABELS[ttsProvider]}合成配音…`);
-      try {
-        const tts = await synthesizeNarration(narrationText, workDir, undefined, ttsProvider, {
-          userId: input.userId
-        });
-        audio = { audioPath: tts.audioPath, durationSeconds: tts.durationSeconds, captions: tts.captions };
-        diagnostics.narrationSeconds = tts.durationSeconds;
-        if (tts.engine && tts.engine !== ttsProvider) {
-          // 引擎与用户选择不一致 = 发生了降级回退。
-          // 必须带上真实原因：早先只说「引擎不可用」，用户无从判断是缺 key、限流还是参数错。
-          const reason = tts.fallbackReason ? `。原因：${tts.fallbackReason.slice(0, 160)}` : "";
-          notify(
-            `所选引擎不可用，已自动切换到${TTS_ENGINE_LABELS[tts.engine]}合成配音（约 ${tts.durationSeconds.toFixed(1)} 秒）${reason}`,
-          );
-          record("配音引擎降级", false, `${ttsProvider} → ${tts.engine}：${tts.fallbackReason ?? "原因未记录"}`);
-        } else {
-          notify(`配音合成完成（约 ${tts.durationSeconds.toFixed(1)} 秒）`);
-        }
-      } catch (error) {
-        // 配音失败不阻断出片：无配音版本也是完整成片
-        const message = (error as Error).message;
-        record("配音合成", false, message);
-        notify(`配音合成失败，将生成无配音版本：${message}`);
-      }
-    } else if (narrationText) {
-      notify("沿用原视频音轨与 ASR 字幕，跳过配音合成…");
-    } else {
-      notify("未生成旁白文案，直接进入画面渲染…");
-    }
-
-    // ---- 4. 分镜：DSH 出稿，失败自动兜底 ----
-    // 画面总时长跟配音走；没有配音就用调用方给的目标时长。
-    // 分镜与渲染两处都要用，提到循环外只算一次。
-    const totalSeconds = Math.max(6, audio?.durationSeconds ?? input.targetSeconds);
-
-    // 走旧引擎时不规划分镜 —— 旧路径自己现场写渲染代码，规划纯属浪费一次 DSH 调用
-    let plan: StoryboardPlanResult | null = null;
-    let beats: TimelineBeat[] = [];
-    if (!input.renderOverride) {
-      const dsh = await getDshStatus(input.userId);
-      diagnostics.dshAvailable = dsh.ok;
-      if (!dsh.ok) diagnostics.dshReason = dsh.reason;
-
-      // P0：把配音/ASR 的句级时间戳折成时间轴骨架，分镜挂在它上面 → 成片长度 = 口播长度
-      beats = buildBeats(input.captions?.length ? input.captions : audio?.captions, totalSeconds);
-      plan = await planStoryboardFor(
-        input,
-        materials,
-        totalSeconds,
-        beats,
-        insights,
-        effectiveTheme,
-        dsh.ok,
-        notify,
-      );
-      diagnostics.storyboardFallback = plan.fallback;
-      diagnostics.storyboardAttempts = plan.diagnostics.attempts;
-      diagnostics.sceneCount = countSegments(plan.storyboard);
-      diagnostics.timelineBeats = beats.length;
-      reportPlan(plan, dsh.ok, notify);
     }
 
     // ---- 5. 渲染画面（Remotion，或由调用方替换成旧引擎） ----
@@ -508,12 +769,16 @@ export async function runVideoPipeline(input: PipelineInput): Promise<PipelineRe
 
     // 字幕来源二选一：剪辑链路的 ASR 字幕优先，避免同一句话出现两层字幕
     const captions = input.captions?.length ? input.captions : audio?.captions;
+    // 字幕样式：resume 分支用方案里确认过的（规划阶段已写进 storyboard.look），
+    // 否则用本次请求带的 look；都没有就是 classic（与改造前一致）。
+    const captionStyle =
+      (input.resume?.captionStyle ?? input.look?.captionStyle ?? "classic") as CaptionStyleKey;
     if (captions?.length) {
       const subAbs = join(videosDir, `${prefix}-${input.token}-sub.mp4`);
       const srtPath = join(workDir, "captions.srt");
       const srt = buildSrtFromCaptions(captions, srtPath);
       if (srt.ok) {
-        const burn = await burnSubtitles(currentAbs, srtPath, subAbs, notify);
+        const burn = await burnSubtitles(currentAbs, srtPath, subAbs, notify, captionStyle);
         record("字幕烧录", burn.ok, burn.ok ? `${srt.cueCount} 句` : burn.reason);
         if (burn.ok) {
           currentAbs = subAbs;
@@ -608,13 +873,25 @@ function buildBeats(captions: WordCaption[] | undefined, durationSeconds: number
 }
 
 /**
+ * 时间轴骨架还原成字幕条目。
+ *
+ * 规划阶段与渲染阶段是两次 HTTP 请求，原始 TTS 字幕对象不会跨请求传递；
+ * 而 beats 本来就是从字幕归一化来的，所以反向还原比按字数重新估算准确得多。
+ */
+function beatsToCaptions(beats: TimelineBeat[]): WordCaption[] {
+  return beats
+    .filter((b) => b.text && b.text.trim() && b.endMs > b.startMs)
+    .map((b) => ({ word: b.text.trim(), startMs: b.startMs, endMs: b.endMs }));
+}
+
+/**
  * 分镜规划：按 mode 选图片分镜或片段分镜。
  *
  * 这一步永不失败 —— DSH 不可用或输出不合法时，规划层会退回确定性兜底分镜。
  * `dshAvailable=false` 时直接返回 null 让规划层走兜底，不做无谓的重试。
  */
 async function planStoryboardFor(
-  input: PipelineInput,
+  input: Pick<PlanStageInput, "mode" | "userId" | "token" | "requirement" | "outroText">,
   materials: Material[],
   totalSeconds: number,
   beats: TimelineBeat[],

@@ -50,11 +50,38 @@ function resolveFreeFont(): string | null {
 }
 
 /** 把 SRT 字幕烧录进视频（Noto Sans SC，SIL OFL 1.1 免费可商用）。 */
+/**
+ * 字幕外观预设（libass `force_style` 片段）。
+ *
+ * ## 为什么字幕样式不走 Remotion
+ *
+ * 出片链路的字幕是这一步烧录的，Remotion 的 `CaptionLayer` 实际空转
+ * （见 remotion/src/components/CaptionLayer.tsx 头部注释）。
+ * 所以「让用户选字幕样式」必须落在 force_style 上，否则选了等于没选。
+ *
+ * classic 是改造前的原样（56 号白字黑描边、底部 MarginV=340），
+ * 保持向后兼容；其余三套在字号/描边/底框/位置上做区分。
+ */
+export type CaptionLook = "classic" | "bold-yellow" | "boxed-dark" | "minimal-line";
+
+const CAPTION_STYLES: Record<CaptionLook, string> = {
+  // 原样保留：白色常规字 + 3px 黑描边 + 轻微阴影
+  classic: "FontSize=56,Bold=0,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=340",
+  // 更醒目：加粗 + 主题暖黄 + 粗描边，适合口播知识类
+  "bold-yellow": "FontSize=62,Bold=1,PrimaryColour=&H00E1FF&,OutlineColour=&H00101010&,BorderStyle=1,Outline=5,Shadow=2,Alignment=2,MarginV=360",
+  // 带底框：半透明黑底 + 白字，小字也读得清
+  "boxed-dark": "FontSize=52,Bold=1,PrimaryColour=&HFFFFFF&,OutlineColour=&HC0000000&,BackColour=&HB0000000&,BorderStyle=3,Outline=14,Shadow=0,Alignment=2,MarginV=320",
+  // 极简：细描边小字，靠留白而不是靠底框，适合叙事类
+  "minimal-line": "FontSize=48,Bold=0,PrimaryColour=&HFFFFFF&,OutlineColour=&H40000000&,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=380",
+};
+
+/** 字幕样式烧录（Noto Sans SC，SIL OFL 1.1 免费可商用）。 */
 export async function burnSubtitles(
   inputPath: string,
   srtPath: string,
   outputPath: string,
   onProgress?: (t: string) => void,
+  look: CaptionLook = "classic",
 ): Promise<StitchResult> {
   if (!existsSync(inputPath)) return { ok: false, reason: `输入不存在：${inputPath}` };
   if (!existsSync(srtPath)) return { ok: false, reason: `字幕文件不存在：${srtPath}` };
@@ -71,8 +98,9 @@ export async function burnSubtitles(
   const escaped = srtPath.replace(/\\/g, "/").replace(/:/g, "\\:");
   const escapedFont = resolvedFont.replace(/\\/g, "/").replace(/:/g, "\\:");
   const fontfile = `fontfile=${escapedFont}`;
-  // SRT 样式：56 号常规白字 + 3px 黑描边 + 轻微阴影，底部居中（竖版安全区）。
-  const filter = `subtitles='${escaped}':charenc=UTF-8:force_style='${fontfile},PlayResX=1080,PlayResY=1920,FontSize=56,Bold=0,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginL=60,MarginR=60,MarginV=340'`;
+  // 未知样式一律回落 classic，绝不因为一个拼错的 key 让字幕烧录整步失败。
+  const style = CAPTION_STYLES[look] ?? CAPTION_STYLES.classic;
+  const filter = `subtitles='${escaped}':charenc=UTF-8:force_style='${fontfile},PlayResX=1080,PlayResY=1920,${style}'`;
   onProgress?.("正在烧录字幕...");
   const r = await runTool(FFMPEG, [
     "-y", "-i", inputPath, "-vf", filter,

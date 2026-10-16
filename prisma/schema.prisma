@@ -18,6 +18,7 @@ model User {
   conversations  Conversation[]
   contentItems   ContentItem[]
   openClawTasks  OpenClawTask[]
+  videoPlans     VideoPlan[]
   knowledgeBases KnowledgeBase[]
   platformAccounts       PlatformAccount[]
   platformSiteMetrics    PlatformSiteMetric[]
@@ -164,6 +165,36 @@ model OpenClawTask {
   error      String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+}
+
+/// 视频方案（用户确认前的规划产物）
+///
+/// 为什么要落库：规划阶段（识图 + 旁白 + 配音 + DSH 分镜）要跑 1~2 分钟，
+/// 结果此前只活在请求内存里，用户刷新页面或误关面板就得重新等一次。
+/// 落库后可以「关掉页面、隔天回来继续生成」，也能在渲染阶段复用同一份配音
+/// 文件（音频落在 workDir，靠 token 定位）。
+///
+/// token 同时是素材与配音的工作目录标识 —— 规划与渲染**必须**是同一个 token，
+/// 否则渲染阶段找不到配音文件。
+model VideoPlan {
+  id             String   @id @default(cuid())
+  token          String   @unique // 与工作目录同名（public/uploads/gen-video-work/<token>）
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationId String?
+  /// PLANNED（待确认） | RENDERED（已出片） | ABANDONED（放弃）
+  status         String   @default("PLANNED")
+  /// 创作要求原文（用户可能确认前改过，便于追溯）
+  requirement    String
+  /// VideoPlanDraft 的完整 JSON（分镜 / 识图 / 诊断 / 摘要），渲染阶段直接取用
+  draftJson      String
+  /// 落库时的素材绝对路径，JSON 数组
+  materialsJson  String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([conversationId])
 }
 
 /// 发布记录（内容库条目 → 各发布渠道）

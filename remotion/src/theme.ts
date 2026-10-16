@@ -15,6 +15,11 @@
  * - damping 大 → 稳重克制（叙事类）
  */
 import { FONT_DISPLAY, FONT_MONO, FONT_SANS } from "./fonts";
+// VisualEffect 现在由渲染契约（vertical/schema.ts）统一定义，
+// 这里 re-export 只是为了让 `from "../theme"` 这条旧 import 路径继续可用。
+import type { VisualEffect } from "./vertical/schema";
+export type { VisualEffect };
+export { VISUAL_EFFECTS } from "./vertical/schema";
 
 export type SpringConfig = {
   damping: number;
@@ -30,18 +35,10 @@ export type SpringConfig = {
  *
  * 这些层由 VerticalStoryboard 统一挂载，组件自身不需要知道主题。
  * 空数组 = 纯净风格，只有配色与动效差异。
+ *
+ * 注意：`theme.effects` 是**主题的基线**，用户还可以在 `LookConfig.effects`
+ * 里额外挂载，两者取并集 —— 见 `resolveEffectLayers()`。
  */
-export type VisualEffect =
-  /** RGB 色彩错位 + 像素偏移 + 扫描线（故障艺术） */
-  | "glitch"
-  /** 高饱和流体渐变 + 金属光泽（酸性设计） */
-  | "acid-flow"
-  /** 撕纸边框 + 胶带贴纸 + 复印噪点（拼贴胶带风） */
-  | "collage"
-  /** 严格网格线 + 十字标记（瑞士网格） */
-  | "swiss-grid";
-
-export const VISUAL_EFFECTS: VisualEffect[] = ["glitch", "acid-flow", "collage", "swiss-grid"];
 
 export type ThemeConfig = {
   key: string;

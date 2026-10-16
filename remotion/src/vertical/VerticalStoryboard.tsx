@@ -1,6 +1,6 @@
 import React from "react";
 import { AbsoluteFill, Sequence } from "remotion";
-import type { SceneSpec, Storyboard } from "./schema";
+import type { CameraMotion, SceneSpec, Storyboard } from "./schema";
 import { resolveTheme } from "../theme";
 import { CAPTION_MARGIN_BOTTOM, SAFE_AREA_BOTTOM } from "./frames";
 import { layoutStoryboard } from "./layout";
@@ -31,7 +31,9 @@ const Scene: React.FC<{
   frames: number;
   index: number;
   themeKey: string;
-}> = ({ scene, from, frames, index, themeKey }) => {
+  /** 来自 LookConfig.motion：强制统一运镜；缺省用 DSH 逐场景给的运镜。 */
+  motionOverride?: CameraMotion;
+}> = ({ scene, from, frames, index, themeKey, motionOverride }) => {
   const theme = resolveTheme(themeKey);
 
   return (
@@ -50,7 +52,7 @@ const Scene: React.FC<{
         <SceneFrameLayer durationInFrames={frames} bottom={SAFE_AREA_BOTTOM}>
           <CrossfadeImages
             images={scene.images}
-            motion={scene.animation}
+            motion={motionOverride ?? scene.animation}
             durationInFrames={frames}
             seed={index + 1}
           />
@@ -87,6 +89,8 @@ export const VerticalStoryboard: React.FC<VerticalStoryboardProps> = ({ storyboa
   const theme = resolveTheme(storyboard.theme);
   // 时间轴只在这里算一次，场景与片尾共用（layout 同时也是 Root.tsx 算 composition 时长的依据）。
   const layout = layoutStoryboard(storyboard);
+  // Look 覆盖：从主题之外补挂特效层、统一运镜（缺省都不覆盖，保持改造前观感）。
+  const look = storyboard.look;
 
   return (
     <AbsoluteFill style={{ backgroundColor: theme.backgroundColor }}>
@@ -98,6 +102,7 @@ export const VerticalStoryboard: React.FC<VerticalStoryboardProps> = ({ storyboa
           frames={layout.spans[i].frames}
           index={i}
           themeKey={storyboard.theme}
+          motionOverride={look?.motion}
         />
       ))}
 
@@ -105,7 +110,11 @@ export const VerticalStoryboard: React.FC<VerticalStoryboardProps> = ({ storyboa
       <OverlayLayer overlays={layout.overlays} themeKey={storyboard.theme} />
 
       {/* 主题视觉层：故障/酸性/拼贴/网格等质感。空 effects 时不渲染任何东西。 */}
-      <ThemeEffects theme={theme} stickerText={storyboard.outro?.text} />
+      <ThemeEffects
+        theme={theme}
+        stickerText={storyboard.outro?.text}
+        extraEffects={look?.effects}
+      />
 
       {storyboard.outro && layout.outroFrom !== null ? (
         <Sequence from={layout.outroFrom} durationInFrames={layout.outroFrames} name="outro">

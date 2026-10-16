@@ -57,6 +57,9 @@ export const ClipFilmstrip: React.FC<ClipFilmstripProps> = ({
   const theme = resolveTheme(storyboard.theme);
   // 片尾起始帧与 Root.tsx 的 composition 时长取同一份排版，避免片尾被裁或尾部留黑。
   const layout = layoutClipStoryboard(storyboard);
+  // Look 覆盖：外挂特效层、统一静图运镜（缺省都不覆盖）。
+  const look = storyboard.look;
+  const stillMotion = look?.motion ?? defaultImageMotion;
 
   const planned: PlannedClip[] = storyboard.clips.map((clip, i) => {
     const kind = clip.transition ?? defaultTransition;
@@ -107,7 +110,7 @@ export const ClipFilmstrip: React.FC<ClipFilmstripProps> = ({
                     src={clip.src}
                     durationInFrames={sequenceFrames}
                     trimStartFrames={secondsToFrames(clip.trimStartSeconds ?? 0)}
-                    motion={defaultImageMotion}
+                    motion={stillMotion}
                     muted
                   />
                 </AbsoluteFill>
@@ -123,7 +126,7 @@ export const ClipFilmstrip: React.FC<ClipFilmstripProps> = ({
       <OverlayLayer overlays={layout.overlays} themeKey={storyboard.theme} />
 
       {/* 主题视觉层：故障/酸性/拼贴/网格等质感 */}
-      <ThemeEffects theme={theme} stickerText={storyboard.outro?.text} />
+      <ThemeEffects theme={theme} stickerText={storyboard.outro?.text} extraEffects={look?.effects} />
 
       {layout.outroFrom !== null ? (
         <Sequence from={layout.outroFrom} durationInFrames={layout.outroFrames} name="outro">
