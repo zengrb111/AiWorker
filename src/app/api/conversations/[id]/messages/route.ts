@@ -2,6 +2,9 @@ import { jsonError, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { chatComplete, chatCompleteStream } from "@/lib/llm-client";
+import { openClawClient, friendlyGatewayError, classifyGatewayError } from "@/lib/openclaw";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { searchWeb } from "@/lib/web-search";
 import { snapshotUserConfig, resolveCapabilityConfig, type ResolvedModelConfig } from "@/lib/model-credentials";
 import { generateCoverImage, generateImageUrls, coverPlatformOf, type CoverPlatform } from "@/lib/image-gen";
@@ -270,6 +273,127 @@ function buildCronBlock(jobs: UserScheduledJob[] | null, userId: string): string
   return lines.join("\n");
 }
 
+/**
+ * 收集该用户最近上传的素材图片绝对路径。
+ *
+ * 素材落盘在 `public/uploads/gen-video-refs/<token>/`（gen-video 面板上传）与
+ * `public/uploads/gen-video-prep/<token>/`（热点一键生成的配图下载）。
+ * 按目录 mtime 倒序取最近的若干张，够 OpenClaw 引用即可。
+ *
+ * 刻意不递归、不扫全站：素材量可能很大，而 prompt 里只需要最近几张。
+ * 任何 IO 失败都返回空数组 —— 这只是提示素材，不该让会话发不出去。
+ */
+function collectUserMaterialPaths(userId: string, limit = 20): string[] {
+  const root = join(process.cwd(), "public", "uploads");
+  const buckets = ["gen-video-refs", "gen-video-prep"];
+  const found: Array<{ path: string; mtimeMs: number }> = [];
+  try {
+    for (const bucket of buckets) {
+      const bucketDir = join(root, bucket);
+      if (!existsSync(bucketDir)) continue;
+      const tokens = readdirSync(bucketDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name);
+      for (const token of tokens) {
+        const dir = join(bucketDir, token);
+        let stat;
+        try {
+          stat = statSync(dir);
+        } catch {
+          continue;
+        }
+        let files: string[];
+        try {
+          files = readdirSync(dir);
+        } catch {
+          continue;
+        }
+        for (const file of files) {
+          if (!/\.(jpe?g|png|webp)$/i.test(file)) continue;
+          found.push({ path: join(dir, file), mtimeMs: stat.mtimeMs });
+        }
+      }
+    }
+  } catch (error) {
+    console.warn(
+      `[messages] 收集素材路径失败（不影响会话）：${error instanceof Error ? error.message : String(error)}`
+    );
+    return [];
+  }
+  return found
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, limit)
+    .map((item) => item.path);
+}
+
+/**
+ * 视频能力说明块（方案 C 的核心注入）。
+ *
+ * 为什么必须注入：OpenClaw 是"第一交互人"，它要知道平台有视频能力、以及**怎么用**。
+ * 不注入的话用户说"帮我做个视频"，它只会回一段文字，不会去 spawn 平台 CLI。
+ *
+ * 设计取舍：
+ *  · 只在用户消息**疑似视频请求**时注入。无条件注入会让每条对话都背上几百字
+ *    的工具说明，既浪费 token 又稀释注意力。
+ *  · 命令行签名写死，不让 OpenClaw 自由发挥参数名 —— 它拼错一个参数名，
+ *    CLI 就会以"未知参数"失败，而它很可能反复重试同一个错命令。
+ *  · 素材路径只给**当前用户自己的**（由平台上传时注入），它无法构造别人的路径。
+ */
+function buildVideoCapabilityBlock(
+  userId: string | undefined,
+  content: string,
+  userMaterials?: string[]
+): string {
+  // 只有疑似视频诉求才注入，避免每次对话都带一大段工具说明。
+  const looksLikeVideoRequest =
+    /(视频|短片|影片|剪辑|片子|做个.{0,6}(视频|短片)|生成.{0,4}视频|拍.{0,4}(视频|短片)|短视频|口播)/i.test(
+      content
+    );
+  if (!looksLikeVideoRequest) return "";
+
+  const safeUserId = (userId ?? "").trim();
+  const materialLines = (userMaterials ?? [])
+    .filter((p) => p.trim())
+    .map((p, i) => `  ${i + 1}. ${p.trim()}`)
+    .join("\n");
+
+  return [
+    "【平台视频能力（用户提到了视频，按下面说明操作）】",
+    "",
+    "平台提供一条视频生成命令，你可以通过执行它来为用户生成视频。命令需原样执行，不要改写参数名：",
+    "",
+    "  npx tsx scripts/aiworker-video.mts \\",
+    "    --user-id <用户ID> \\",
+    "    --requirement \"<创作要求，从用户消息提炼，20-200字>\" \\",
+    "    --materials <图片路径1> <图片路径2> ... \\",
+    "    [--theme <主题key>] [--target-seconds <秒数>] \\",
+    "    [--look-effects <特效,特效>] [--look-motion <运镜>] [--caption-style <字幕样式>]",
+    "",
+    "参数说明：",
+    `- --user-id：固定填 ${safeUserId || "<当前用户ID>"}（**必须填这个值，不要填别的**）`,
+    "- --requirement：必填。从用户消息提炼创作要求，包含主题、风格倾向、要突出的信息",
+    "- --materials：必填。图片绝对路径列表，空格分隔；见下方「该用户的素材」",
+    "- --theme：可选。warm-default 温暖治愈 / cool-night 冷调夜色 / clean-light 明亮清新 / film-revive 胶片复古 / acid-graphics 酸性设计 / glitch-art 故障艺术 / collage-zine 拼贴胶带 / swiss-grid 瑞士网格 / mono-ink 单色水墨。不填则由 AI 按素材色调自动挑选",
+    "- --target-seconds：可选，目标口播时长（秒），默认 20",
+    "- --look-effects：可选，叠加特效层，最多 2 个，逗号分隔。可选值：glitch 故障艺术 / acid-flow 酸性流体 / collage 撕纸拼贴 / swiss-grid 瑞士网格",
+    "- --look-motion：可选，统一运镜。可选值：ken-burns 缓慢推进 / parallax 视差景深 / zoom-in 推近 / drift-up 上移 / drift-down 下移 / static 静止。不填则由 AI 逐镜头挑选",
+    "- --caption-style：可选，字幕样式。可选值：classic 经典白字 / bold-yellow 醒目黄字 / boxed-dark 半透明底框 / minimal-line 极简细描边",
+    "",
+    "命令输出：stdout 最后一行是 JSON。",
+    '  成功：{"ok":true,"token":"...","title":"...","videoPath":"...","coverPath":"...","durationSeconds":19.4,"narration":"...","sceneCount":7}',
+    '  失败：{"ok":false,"error":"具体原因"}',
+    "",
+    "执行要求：",
+    "1. 用户没有提供素材图片时，先问用户要图，不要凭空调用命令（--materials 不能为空）",
+    "2. 命令可能要跑 1-3 分钟，这是正常的，耐心等待它结束，不要中断",
+    "3. 成功后把 title / narration / 视频已生成的事实自然地转述给用户，不要把 JSON 原文和文件路径丢给用户",
+    "4. 失败时把 error 里的原因用中文解释给用户，并给出可行的下一步建议",
+    materialLines
+      ? ["", "【该用户的素材（只有这些，不要使用或猜测其它路径）】", materialLines].join("\n")
+      : ["", "【该用户的素材】用户尚未上传任何素材图片。请先引导用户在对话中上传图片。"].join("\n")
+  ].join("\n");
+}
+
 function buildTaskPrompt(
   contextText: string,
   content: string,
@@ -277,7 +401,8 @@ function buildTaskPrompt(
   authText?: string,
   userId?: string,
   wechatDelivery?: WechatDeliveryTarget | null,
-  cronJobs?: UserScheduledJob[] | null
+  cronJobs?: UserScheduledJob[] | null,
+  userMaterials?: string[]
 ): string {
   // 图文/文案类请求：约定输出格式（# 一级标题开头），让自动入库判定稳定命中，
   // 也保证 generateArticleTitle 能提到干净的标题。
@@ -304,6 +429,8 @@ function buildTaskPrompt(
   return [
     isolationBlock,
     ...(cronBlock ? ["", cronBlock] : []),
+    "",
+    buildVideoCapabilityBlock(userId, content, userMaterials),
     "",
     "请结合以下历史会话上下文继续完成用户任务。",
     "",
@@ -1058,6 +1185,10 @@ await prisma.message.create({
   const wechatDelivery = resolveWechatDeliveryTarget(wechatBinding);
   // 该用户自己的定时任务清单（按会话 key 过滤），注入后 AI 无需（也不允许）去看全局 cron。
   const userCronJobs = await loadUserScheduledJobs(user.id);
+  // 该用户最近上传的素材路径。只收集**属于该用户**的目录，
+  // 让 OpenClaw 能把用户消息里提到的"这些图"解析成真实路径，
+  // 同时它无法构造别人的路径（路径由平台给定，见 buildVideoCapabilityBlock）。
+  const userMaterials = collectUserMaterialPaths(user.id);
   const prompt = buildTaskPrompt(
     conversationContext,
     content,
@@ -1065,7 +1196,8 @@ await prisma.message.create({
     authCtx.promptBlock,
     user.id,
     wechatDelivery,
-    userCronJobs
+    userCronJobs,
+    userMaterials
   );
 
   const task = await prisma.openClawTask.create({
@@ -1077,35 +1209,11 @@ await prisma.message.create({
     }
   });
 
-  // 先解析该用户的「对话与写作」模型配置：未配置时直接给出明确引导，
-  // 不建任务、不让前端空等 SSE。
-  let chatConfig: ResolvedModelConfig | null = null;
-  let chatConfigError = "";
-  try {
-    chatConfig = await resolveCapabilityConfig(user.id, "chat");
-  } catch (error) {
-    chatConfigError = error instanceof Error ? error.message : "尚未配置对话模型。";
-  }
-  if (!chatConfig) {
-    await prisma.openClawTask.update({
-      where: { id: task.id },
-      data: { status: "FAILED", error: chatConfigError }
-    });
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(sseEncode({ type: "error", error: chatConfigError }));
-        controller.close();
-      }
-    });
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
-        "X-Accel-Buffering": "no"
-      }
-    });
-  }
+  // 会话主链路走 OpenClaw 网关（v3 方案）：
+  //   · 模型凭据由 OpenClaw 自己管（openclaw.json + 私有 sqlite），平台不再解析 chat 分配；
+  //   · 平台侧能力（识图/TTS/搜索/向量/旁白）仍走 resolveCapabilityConfig(userId, ...)，
+  //     那套体系原样保留，只是不再是会话的来源。
+  // 网关未启动时 probeGatewayHandshake 会给出结构化诊断，文案由 friendlyGatewayError 统一产出。
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -1132,13 +1240,13 @@ await prisma.message.create({
           safeEnqueue(sseEncode({ type: "delta", text: referenceProcess }));
         }
 
-        const result = await chatCompleteStream({
-          userId: user.id,
-          capability: "chat",
-          config: chatConfig,
-          prompt,
-          onDelta: (deltaText) => safeEnqueue(sseEncode({ type: "delta", text: deltaText }))
-        });
+        // 主链路：OpenClaw 网关。sessionKey 按 userId 派生，实现多用户隔离。
+        // sendTaskStream 内部带 300 秒连接预算 + 网关慢启动重试，失败时抛出的
+        // 错误已由 friendlyGatewayError 翻译成可操作中文提示。
+        const result = await openClawClient.sendTaskStream(
+          { message: content, context: conversationContext, prompt, conversationId: conversation.id, userId: user.id },
+          (deltaText) => safeEnqueue(sseEncode({ type: "delta", text: deltaText }))
+        );
 
         if (!result.content.trim()) {
           throw new Error("助手返回了空回复，请重试。");
@@ -1156,9 +1264,11 @@ await prisma.message.create({
           where: { id: task.id },
           data: {
             status: "SUCCEEDED",
+            // OpenClaw 模式下模型由网关自行决定（读它自己的配置），
+            // 平台侧不再知道 provider/model，只记录 runId 便于回网关追溯。
             resultJson: JSON.stringify({
-              provider: result.providerLabel,
-              model: result.model
+              engine: "openclaw",
+              runId: result.taskId ?? null
             })
           }
         });
@@ -1203,6 +1313,13 @@ await prisma.message.create({
         const err = error as Error & { partialContent?: string; code?: string };
         const partial = (err.partialContent || "").trim();
 
+        // 网关类错误统一翻译成可操作中文提示（未启动/端口占用/凭据缺失/鉴权失败/超时）。
+        // 判定依据是 error.code 而非 message 文本，因此「空 message」场景也能给对结论。
+        // 非网关错误（如 chat.send 未返回 runId）原样透出。
+        const diagnosis = classifyGatewayError(err);
+        const userFacingMessage =
+          diagnosis.kind === "unknown" ? err.message : friendlyGatewayError(err, { wasRetried: false });
+
         // 超时/中断时若已有流式内容，保存部分内容并照常走自动入库判定，
         // 避免用户已经看到的图文因超时全部丢失。
         if (partial.length >= 100) {
@@ -1218,7 +1335,7 @@ await prisma.message.create({
             where: { id: task.id },
             data: {
               status: "FAILED",
-              error: `${err.message}（已保留流式部分内容）`
+              error: `${userFacingMessage}（已保留流式部分内容）`
             }
           });
 
@@ -1256,14 +1373,14 @@ await prisma.message.create({
             where: { id: task.id },
             data: {
               status: "FAILED",
-              error: err.message || "OpenClaw 调用失败。"
+              error: userFacingMessage || "助手未返回内容，请重试。"
             }
           });
           // soft=true 表示「不是真失败，只是本端等待超时」：网关侧的 run 仍在
           // 继续执行，前端据此用提示色而非报错色呈现，避免误导用户重发。
           safeEnqueue(sseEncode({
             type: "error",
-            error: err.message || "OpenClaw 调用失败。",
+            error: userFacingMessage || "助手未返回内容，请重试。",
             soft: err.code === "TIMEOUT"
           }));
         }

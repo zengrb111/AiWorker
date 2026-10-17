@@ -982,7 +982,12 @@ export function toPlanSummary(
           particles: PARTICLE_LABELS[s.particles ?? "none"] ?? s.particles ?? "无",
           overlays: mine.map((o) => ({
             kind: o.kind,
-            text: (o.text ?? o.value ?? o.label ?? o.subtitle ?? "").trim().slice(0, 40),
+            // DSH 偶而会把 value 填成数字（如 {"value":20}），此时 o.text 为 undefined、
+            // ?? 链一路落到 20，再 .trim() 就抛 "…is not a function" 让整条规划崩掉。
+            // 这里逐个转成字符串，非字符串值统一按空处理。
+            text: String(o.text ?? o.value ?? o.label ?? o.subtitle ?? "")
+              .trim()
+              .slice(0, 40),
             position: o.position ?? "bottom",
           })),
           imageNotes: s.images.map((p) => notesByPath.get(p) ?? "").filter(Boolean),

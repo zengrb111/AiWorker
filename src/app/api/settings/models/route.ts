@@ -14,6 +14,7 @@ import {
   type Capability
 } from "@/lib/model-credentials";
 import { findPreset } from "@/lib/model-presets";
+import { syncModelKeyToOpenClaw, setOpenClawDefaultModel } from "@/lib/openclaw-settings-sync";
 
 /**
  * /api/settings/models —— 当前登录用户的模型服务（GET 列表 / POST 保存）。
@@ -187,6 +188,42 @@ export async function POST(request: Request) {
 
   invalidateUserCache(user.id);
 
+  // ---- OpenClaw 同步（v3：只同步主对话模型）----
+  //
+  // 会话改走 OpenClaw 后，「主对话模型」的权威来源是 OpenClaw 自己。
+  // 用户在平台保存模型服务时，若该服务正被分配为 chat 能力，就把 key 也交给
+  // OpenClaw；否则不碰 —— 识图/TTS/搜索/向量等能力由平台直连消费，
+  // 写过去只会造成两份无用配置。
+  //
+  // 失败不阻断保存：Prisma 已是平台侧事实来源，OpenClaw 同步失败只提示，
+  // 用户可以之后重试或手动在 OpenClaw 侧配置。
+  let openclawSync: { ok: boolean; reason?: string } | undefined;
+  if (!isSearchProvider) {
+    const chatAssignment = await prisma.userModelAssignment.findFirst({
+      where: { userId: user.id, capability: "chat", providerRowId: saved.id }
+    });
+    if (chatAssignment) {
+      // 只有真的填了新 key 才同步；编辑时留空 apiKey 表示不修改，
+      // 此时 OpenClaw 侧的 key 也无需更新。
+      if (apiKey) {
+        const credential = decryptProviderCredential(saved.credentialEnc);
+        const outcome = await syncModelKeyToOpenClaw({
+          provider: saved.providerId,
+          apiKey: credential?.apiKey ?? "",
+          profileId: `${saved.providerId}:manual`
+        });
+        openclawSync = outcome.ok ? { ok: true } : { ok: false, reason: outcome.reason };
+      }
+      // 模型 id 变化时同步默认模型（让会话立刻用上新选的模型）
+      if (openclawSync?.ok !== false && chatAssignment.model) {
+        const modelOutcome = await setOpenClawDefaultModel(chatAssignment.model);
+        if (!modelOutcome.ok) {
+          openclawSync = { ok: false, reason: modelOutcome.reason };
+        }
+      }
+    }
+  }
+
   return jsonOk({
     item: {
       id: saved.id,
@@ -200,6 +237,7 @@ export async function POST(request: Request) {
       usedBy: [],
       createdAt: saved.createdAt.toISOString()
     },
-    isSearchProvider
+    isSearchProvider,
+    openclawSync
   });
 }

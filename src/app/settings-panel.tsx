@@ -98,6 +98,18 @@ const CAPABILITY_FALLBACK_NOTE: Record<string, string> = {
   search: "未指定时使用内置公开热榜（百度 / 抖音 / 头条 / 知乎，零配置零密钥）；指定自己的搜索服务可获得按关键词检索的结果。"
 };
 
+/**
+ * 主对话模型（chat）的 OpenClaw 同步说明（v3 方案）。
+ *
+ * 为什么必须加：会话改走 OpenClaw 后，模型选择权的实际生效点在 OpenClaw 侧。
+ * 用户在这里改 chat 模型时，如果没有任何说明，会预期「立刻生效」；
+ * 而 key 要经 `paste-api-key` 写进 OpenClaw 的私有 sqlite，模型切换也可能
+ * 需要网关重载才完全生效 —— 不加这句，用户会以为平台坏了。
+ */
+const CAPABILITY_OPENCLAW_NOTE: Record<string, string> = {
+  chat: "主对话模型的 API Key 保存后会同步到 OpenClaw，会话实际使用 OpenClaw 里的模型配置。修改后需重启 OpenClaw 网关方可生效。"
+};
+
 function formatTime(iso?: string | null): string {
   if (!iso) return "未验证";
   return new Date(iso).toLocaleString("zh-CN", {
@@ -114,6 +126,11 @@ export default function SettingsPanel({ resetToken }: { resetToken: number }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  /**
+   * OpenClaw 同步失败信息（v3：仅 chat 能力会同步）。
+   * 保存成功但同步失败时在此展示，避免用户以为配置已生效。
+   */
+  const [syncError, setSyncError] = useState<{ capability: string; reason: string } | null>(null);
   const [draft, setDraft] = useState<DraftModel | null>(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
@@ -312,11 +329,21 @@ export default function SettingsPanel({ resetToken }: { resetToken: number }) {
           }))
         })
       });
-      const json = (await res.json()) as { ok: boolean; error?: string };
+      const json = (await res.json()) as {
+        ok: boolean;
+        error?: string;
+        openclawSync?: { ok: boolean; reason?: string };
+      };
       if (!json.ok) {
         setNotice(json.error ?? "保存失败。");
         return;
       }
+      // OpenClaw 同步失败不阻断保存（Prisma 已是事实来源），但要让用户看见。
+      setSyncError(
+        json.openclawSync && !json.openclawSync.ok
+          ? { capability: "chat", reason: json.openclawSync.reason ?? "未知原因" }
+          : null
+      );
       setNotice(
         missingCount > 0
           ? "分配已保存，未指定的能力在使用时会提示去系统配置。"
@@ -460,6 +487,16 @@ export default function SettingsPanel({ resetToken }: { resetToken: number }) {
                   <div className="cfg-assign-hint">{row.hint}</div>
                   {!current.providerRowId && CAPABILITY_FALLBACK_NOTE[row.capability] && (
                     <div className="cfg-assign-hint">{CAPABILITY_FALLBACK_NOTE[row.capability]}</div>
+                  )}
+                  {CAPABILITY_OPENCLAW_NOTE[row.capability] && (
+                    <div className="cfg-assign-hint cfg-assign-hint-openclaw">
+                      {CAPABILITY_OPENCLAW_NOTE[row.capability]}
+                    </div>
+                  )}
+                  {syncError?.capability === row.capability && (
+                    <div className="cfg-assign-hint cfg-assign-hint-error">
+                      同步到 OpenClaw 失败：{syncError.reason}
+                    </div>
                   )}
                 </div>
                 <div className="cfg-assign-controls">

@@ -1,7 +1,8 @@
 import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { requireUser } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
-import { invalidateUserCache, type Capability } from "@/lib/model-credentials";
+import { invalidateUserCache, decryptProviderCredential, type Capability } from "@/lib/model-credentials";
+import { syncModelKeyToOpenClaw, setOpenClawDefaultModel } from "@/lib/openclaw-settings-sync";
 
 type AssignmentBody = {
   assignments?: Array<{ capability?: string; providerRowId?: string | null; model?: string | null }>;
@@ -87,6 +88,33 @@ export async function PUT(request: Request) {
   ]);
   invalidateUserCache(user.id);
 
+  // ---- OpenClaw 同步（v3：只同步主对话模型）----
+  //
+  // 用户在「默认模型分配」里改 chat 时，OpenClaw 侧的默认模型要跟着变。
+  // 同时把该服务的 key 也推一份过去 —— 用户可能刚给一个新服务配了 key
+  // 就把它设为 chat，此时 OpenClaw 还没有这个 provider 的凭据。
+  // 失败不阻断保存，只在响应里带回原因供界面提示。
+  let openclawSync: { ok: boolean; reason?: string } | undefined;
+  const chatRow = resolved.find((row) => row.capability === "chat");
+  if (chatRow) {
+    const provider = providerById.get(chatRow.providerRowId);
+    if (provider) {
+      const credential = decryptProviderCredential(provider.credentialEnc);
+      const keyOutcome = await syncModelKeyToOpenClaw({
+        provider: provider.providerId,
+        apiKey: credential?.apiKey ?? "",
+        profileId: `${provider.providerId}:manual`
+      });
+      if (!keyOutcome.ok) {
+        openclawSync = { ok: false, reason: keyOutcome.reason };
+      } else {
+        const modelOutcome = await setOpenClawDefaultModel(chatRow.model);
+        if (!modelOutcome.ok) openclawSync = { ok: false, reason: modelOutcome.reason };
+        else openclawSync = { ok: true };
+      }
+    }
+  }
+
   const assignments = await prisma.userModelAssignment.findMany({ where: { userId: user.id } });
   return jsonOk({
     saved: resolved.length,
@@ -95,6 +123,7 @@ export async function PUT(request: Request) {
       capability: row.capability,
       providerRowId: row.providerRowId,
       model: row.model
-    }))
+    })),
+    openclawSync
   });
 }

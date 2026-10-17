@@ -43,6 +43,21 @@ function isSoftError(error: unknown): boolean {
 }
 
 /**
+ * 从助手回复里提取视频任务 token。
+ *
+ * 方案 C：OpenClaw spawn 平台 CLI 后，会把 CLI 输出的 JSON 内容转述给用户，
+ * 其中 `token` 字段是唯一能关联到 CLI 进程与进度文件的标识。
+ * 匹配形如 `"token":"1792201507948-nzhg66ke"` 的片段。
+ *
+ * 匹配不到返回 null（普通对话，不启动轮询）。
+ */
+function extractVideoToken(content: string): string | null {
+  if (!content) return null;
+  const match = content.match(/"token"\s*:\s*"([A-Za-z0-9_-]{8,64})"/);
+  return match ? match[1] : null;
+}
+
+/**
  * 后端返回的「模型未配置」结构化错误。
  *
  * 与 `ModelConfigErrorKind`（src/lib/model-credentials.ts）一一对应。
@@ -571,6 +586,19 @@ export default function PlatformClient() {
   const [chatInput, setChatInput] = useState("");
   const [chatError, setChatError] = useState("");
   const [chatErrorSoft, setChatErrorSoft] = useState(false);
+  /**
+   * 视频 CLI 任务进度（方案 C：OpenClaw spawn 的独立进程，进度靠轮询）。
+   *
+   * 渲染时按 3 秒间隔查 /gen-video/cli-status，终态后停轮询并展示成品链接。
+   */
+  const [videoTaskProgress, setVideoTaskProgress] = useState<{
+    token: string;
+    stage: string;
+    percent: number;
+    message: string;
+    terminal: boolean;
+    videoUrl: string | null;
+  } | null>(null);
   const [sending, setSending] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
@@ -649,6 +677,8 @@ export default function PlatformClient() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+  /** 聊天输入区（含展开的面板）容器，用于把实际高度同步给消息列表的留白。 */
+  const chatInputBoxRef = useRef<HTMLFormElement | null>(null);
   const isPinnedRef = useRef(true); // 用户是否在底部附近（用于自动滚动判断）
   const lastScrollHeightRef = useRef(0); // 上一次看到的内容总高度，用来区分「内容变长」和「用户主动上滑」
   const [activeTurnIndex, setActiveTurnIndex] = useState(-1);
@@ -839,6 +869,38 @@ export default function PlatformClient() {
   }, [chatInput]);
 
   /**
+   * 把聊天输入区的**实际高度**写进 CSS 变量 --chat-input-height。
+   *
+   * 背景：消息列表用 `padding-bottom: var(--chat-input-height)` 给输入框留位，
+   * 而该变量原本是写死的 140px。一旦输入框里展开面板（视频方案确认、一键剪视频等），
+   * 实际高度可能到 500px+，底部消息会被输入框盖住，面板自身的按钮也可能被推出视口
+   * —— 用户看到的现象是「按钮看不到，聊天对话框也看不到，要缩放网页才行」。
+   *
+   * 用 ResizeObserver 而非在渲染后量一次：面板是异步展开的
+   * （生成方案要等 1~2 分钟），且文本域会随输入自动增高，都需要实时跟随。
+   */
+  useEffect(() => {
+    const box = chatInputBoxRef.current;
+    if (!box) return;
+
+    const sync = () => {
+      // offsetHeight 含 padding 与 border，正是消息列表需要让出的总高度
+      const height = Math.ceil(box.offsetHeight);
+      document.documentElement.style.setProperty("--chat-input-height", `${height}px`);
+    };
+
+    sync();
+    if (typeof ResizeObserver === "undefined") {
+      // 极端老浏览器兜底：窗口尺寸变化时重算（面板展开不会触发 resize，但比没有好）
+      window.addEventListener("resize", sync);
+      return () => window.removeEventListener("resize", sync);
+    }
+    const observer = new ResizeObserver(sync);
+    observer.observe(box);
+    return () => observer.disconnect();
+  }, []);
+
+  /**
    * 切换模型：切换期间锁定输入框，并在对话流里展示切换过程
    * （切换只是改会话配置，不会触发一次模型调用）。
    */
@@ -960,6 +1022,69 @@ export default function PlatformClient() {
     const timer = window.setTimeout(() => setToast(null), 4000);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  /**
+   * 视频 CLI 进度轮询（方案 C）。
+   *
+   * CLI 是 OpenClaw spawn 的独立进程，不经 Next.js，所以拿不到 SSE，
+   * 只能按 3 秒间隔查 cli-status。终态（成功/失败）后停轮询并刷新会话列表，
+   * 让 from-cli 落库的那条 assistant 消息显示出来。
+   */
+  useEffect(() => {
+    if (!videoTaskProgress || videoTaskProgress.terminal) return;
+    if (!activeConversation) return;
+    const conversationId = activeConversation.id;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await api<{
+          ok: boolean;
+          data?:
+            | { status: "pending" }
+            | {
+                status: "ok";
+                stage: string;
+                percent: number;
+                message: string;
+                terminal: boolean;
+                videoUrl: string | null;
+              };
+          error?: string;
+        }>(`/api/conversations/${conversationId}/gen-video/cli-status?token=${encodeURIComponent(videoTaskProgress.token)}`);
+        if (cancelled) return;
+        if (!res.ok || !res.data || res.data.status === "pending") return;
+        // 提到局部变量：TS 不会把 res.data 的收窄带进 setState 闭包。
+        const snapshot = res.data;
+        if (snapshot.status !== "ok") return;
+        setVideoTaskProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                stage: snapshot.stage,
+                percent: snapshot.percent,
+                message: snapshot.message,
+                terminal: snapshot.terminal,
+                videoUrl: snapshot.videoUrl,
+              }
+            : null,
+        );
+        if (snapshot.terminal) {
+          // 终态：刷新会话，把 from-cli 落库的成片消息显示出来
+          await refreshConversations();
+        }
+      } catch {
+        // 轮询失败不打扰用户：下一轮会重试，终态时自然停止。
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [videoTaskProgress?.token, videoTaskProgress?.terminal, activeConversation?.id]);
 
   // 切换对话、或从其它分区（内容库等）切回「对话」时，定位到最新一条回复的末尾并重置高亮。
   // 注意：对话面板是条件渲染，切走会整块卸载，切回来时滚动位置会归零，所以这里必须补一次贴底。
@@ -1231,6 +1356,19 @@ export default function PlatformClient() {
             }
             if (content === "一键复刻爆款视频") {
               setRemakePanelOpen(true);
+            }
+            // 方案 C：OpenClaw 可能 spawn 了平台视频 CLI。它回传的 JSON 里带 token，
+            // 检测到就启动进度轮询，让用户在看会话的地方看到出片进度。
+            const videoToken = extractVideoToken(data.message?.content ?? "");
+            if (videoToken) {
+              setVideoTaskProgress({
+                token: videoToken,
+                stage: "pending",
+                percent: 0,
+                message: "视频任务已启动…",
+                terminal: false,
+                videoUrl: null,
+              });
             }
           } else if (data.type === "error") {
             throw streamError(data.error, data.soft === true);
@@ -2552,11 +2690,46 @@ export default function PlatformClient() {
                       </svg>
                     </button>
                   )}
-                  <form className="chat-input" onSubmit={sendMessage}>
+                  <form className="chat-input" ref={chatInputBoxRef} onSubmit={sendMessage}>
                     {chatError && (
                       <p className={chatErrorSoft ? "chat-error-inline chat-notice-warn" : "error-text chat-error-inline"}>
                         {chatError}
                       </p>
+                    )}
+                    {videoTaskProgress && (
+                      <div className={`video-task-progress${videoTaskProgress.terminal ? " terminal" : ""}`}>
+                        <div className="video-task-progress-head">
+                          <span className="video-task-progress-label">
+                            {videoTaskProgress.stage === "failed"
+                              ? "视频生成失败"
+                              : videoTaskProgress.terminal
+                                ? "视频已生成"
+                                : "视频生成中"}
+                          </span>
+                          <span className="video-task-progress-percent">{videoTaskProgress.percent}%</span>
+                        </div>
+                        <div className="video-task-progress-bar">
+                          <div
+                            className="video-task-progress-fill"
+                            style={{ width: `${videoTaskProgress.percent}%` }}
+                          />
+                        </div>
+                        <p className="video-task-progress-message">{videoTaskProgress.message}</p>
+                        {videoTaskProgress.videoUrl && (
+                          <a className="video-task-progress-link" href={videoTaskProgress.videoUrl} target="_blank" rel="noreferrer">
+                            查看成片 →
+                          </a>
+                        )}
+                        {videoTaskProgress.terminal && (
+                          <button
+                            type="button"
+                            className="video-task-progress-dismiss"
+                            onClick={() => setVideoTaskProgress(null)}
+                          >
+                            知道了
+                          </button>
+                        )}
+                      </div>
                     )}
                     {montagePanelOpen && (
                       <div className="viral-remake-panel montage-upload-panel">
