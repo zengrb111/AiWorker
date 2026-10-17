@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { encryptCredential, normalizeCookie } from "@/lib/platform-creds";
-import { PLATFORM_META, inferSiteKind, verifyHealingCredential, verifyPlatformCredential, verifySiteCredential, verifyFrontierCredential } from "@/lib/platform-sync";
+import { PLATFORM_META, inferSiteKind, kickChannelsCollector, kickWechatCollector, verifyHealingCredential, verifyPlatformCredential, verifySiteCredential, verifyFrontierCredential } from "@/lib/platform-sync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -109,6 +109,22 @@ export async function POST(req: Request) {
   if (cookie.length < 20) {
     return NextResponse.json({ ok: false, message: "请粘贴完整的平台 Cookie" }, { status: 400 });
   }
+  // 公众号 Cookie 形态校验：静态接口无法区分有效/失效（微信对两者返回同一 SPA 外壳），
+  // 至少先拦住明显不完整/贴错的 Cookie。
+  if (platform === "wechat") {
+    if (!/(^|;\s*)slave_sid=[^;]{8,}/.test(cookie)) {
+      return NextResponse.json(
+        { ok: false, message: "公众号 Cookie 缺少 slave_sid，请复制完整的 Request Headers → Cookie" },
+        { status: 400 }
+      );
+    }
+    if (!/(^|;\s*)(bizuin|slave_user|data_ticket)=/.test(cookie)) {
+      return NextResponse.json(
+        { ok: false, message: "公众号 Cookie 不完整（缺少 bizuin / slave_user / data_ticket）" },
+        { status: 400 }
+      );
+    }
+  }
 
   // 真实请求平台接口验证凭据有效性
   const verified = await verifyPlatformCredential(platform, cookie);
@@ -140,6 +156,16 @@ export async function POST(req: Request) {
       lastVerifyAt: new Date(),
     },
   });
+  // 公众号后台是 SPA，服务端静态请求无法真正校验登录态 → 绑定后立刻跑一次采集器
+  // （headless Chrome 执行 JS 拿 token）。成功/失败都会把结果写回账号状态。
+  if (platform === "wechat" || platform === "channels") {
+    try {
+      if (platform === "channels") kickChannelsCollector(account.id);
+      else kickWechatCollector(account.id);
+    } catch {
+      /* 采集器启动失败不影响绑定本身 */
+    }
+  }
   return NextResponse.json({
     ok: true,
     account: {

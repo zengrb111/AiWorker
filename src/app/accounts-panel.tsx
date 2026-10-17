@@ -130,7 +130,22 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
         headers: { "Content-Type": "application/json" },
         body,
       });
-      const json = (await res.json()) as { ok: boolean; message?: string };
+      // 服务端异常时可能返回 HTML（如 <pre>missing parameter</pre>），直接 res.json() 会抛
+      // "Unexpected token '<' ... is not valid JSON"，这里先取文本再解析，给出可读提示。
+      const raw = await res.text();
+      let json: { ok: boolean; message?: string } | null = null;
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        json = null;
+      }
+      if (!json) {
+        setBindMsg({
+          ok: false,
+          text: `服务返回异常（HTTP ${res.status}）：${raw.replace(/<[^>]*>/g, " ").trim().slice(0, 120) || "空响应"}`,
+        });
+        return;
+      }
       if (!json.ok) {
         setBindMsg({ ok: false, text: json.message || "绑定失败，请检查凭据是否完整。" });
         return;

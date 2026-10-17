@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import ChinaProvinceMap from "./china-province-map";
 
 /**
  * 「效果分析」真实面板 —— 数据来自各渠道真实采集：
@@ -72,6 +73,23 @@ type MetricItem = {
   hasSource?: boolean;
   /** 平台原文链接（标题可点击新标签打开查看实际作品） */
   url?: string | null;
+  /** 各时间窗口的每内容增量（内容型平台：窗口内最新快照 − 窗口前快照）；微信生态无内容级数据为 null。
+   *  cumulative = 累计（取每篇内容最新快照的真实值，不受采集断档影响）。 */
+  byWindow?: {
+    yesterday: WindowDelta | null;
+    last7: WindowDelta | null;
+    last30: WindowDelta | null;
+    cumulative: WindowDelta | null;
+  };
+};
+
+type WindowDelta = {
+  views: number;
+  likes: number;
+  comments: number;
+  collects: number;
+  shares: number;
+  metricDate: string;
 };
 
 type MetricsData = {
@@ -82,14 +100,34 @@ type MetricsData = {
   /** 非官网渠道的账号级日指标（公众号 / 视频号涨粉） */
   dailyMetrics?: DailyMetric[];
   accounts?: Array<{ id: string; platform: string; displayName: string; status: string; lastSyncAt?: string | null }>;
+  /** 已授权渠道集合：效果分析只展示这些渠道 */
+  authorizedPlatforms?: string[];
   syncedAt?: string | null;
+  /** 时间窗口聚合：各渠道在 昨日 / 最近7天 / 最近30天 的流量矩阵 */
+  windows?: {
+    yesterday: Record<string, WindowVec & { name: string }>;
+    last7: Record<string, WindowVec & { name: string }>;
+    last30: Record<string, WindowVec & { name: string }>;
+  };
+  /** 粉丝维度（用户维度 tab）：新增/累计粉丝数 + 地域分布 */
+  fanStats?: {
+    byPlatform: Array<{ platform: string; name: string; newFansYesterday: number; newFans7: number; newFans30: number; fansTotal: number }>;
+    regions: Array<{ platform: string; name: string; metricDate: string; provinces: Array<{ province: string; fans: number }> }>;
+  };
+};
+
+/** 时间窗口流量向量：阅读 / 点赞❤️ / 微信点赞👍 / 评论 / 分享 / 收藏 */
+type WindowVec = {
+  views: number;
+  likes: number;
+  wechatLikes: number;
+  comments: number;
+  shares: number;
+  collects: number;
 };
 
 function num(n: number): string {
-  if (n >= 100000000) return (n / 100000000).toFixed(1).replace(/\.0$/, "") + "亿";
-  if (n >= 10000) return (n / 10000).toFixed(1).replace(/\.0$/, "") + "w";
-  if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
-  return String(n);
+  return n.toLocaleString("en-US");
 }
 
 /**
@@ -124,6 +162,44 @@ const PLATFORM_LABEL: Record<string, string> = {
 /** 微信生态渠道：在效果分析里额外展示「阅读人数 / 在看 / 涨粉」专属数据 */
 const WECHAT_PLATFORMS = ["wechat", "channels"];
 
+/**
+ * 时间窗口流量矩阵里每个指标「哪些平台能提供」。
+ * 内容型平台（xhs/toutiao/site）reading 取 views；微信生态（wechat/channels）reading 取 reads、
+ * 微信点赞👍 取 wows（在看），且不提供评论/收藏 → 对应格显示「—」而非 0，避免误导。
+ */
+const WINDOW_METRIC_PLATFORMS: Record<keyof WindowVec, string[]> = {
+  views: ["site", "xhs", "toutiao", "wechat", "channels"],
+  likes: ["xhs", "toutiao", "wechat", "channels"],
+  wechatLikes: ["wechat", "channels"],
+  comments: ["xhs", "toutiao"],
+  shares: ["xhs", "wechat", "channels"],
+  collects: ["xhs", "toutiao"],
+};
+
+/** 流量矩阵要展示的 6 个维度（顺序即表格行序，图标即用户要求的表示法） */
+const WINDOW_METRIC_ROWS: Array<{ key: keyof WindowVec; label: string; icon: string }> = [
+  { key: "views", label: "阅读", icon: "📖" },
+  { key: "likes", label: "点赞", icon: "❤️" },
+  { key: "wechatLikes", label: "微信点赞", icon: "👍" },
+  { key: "comments", label: "评论", icon: "💬" },
+  { key: "shares", label: "分享", icon: "🔁" },
+  { key: "collects", label: "收藏", icon: "⭐" },
+];
+
+const EMPTY_VEC: WindowVec = { views: 0, likes: 0, wechatLikes: 0, comments: 0, shares: 0, collects: 0 };
+
+/** 流量矩阵单格：不支持该指标的平台显示「—」，否则显示数值 */
+function winCell(platform: string, key: keyof WindowVec, v: WindowVec) {
+  if (!WINDOW_METRIC_PLATFORMS[key].includes(platform)) {
+    return (
+      <span className="col-n na" title="该平台不提供此指标">
+        —
+      </span>
+    );
+  }
+  return <span className="col-n">{num(v[key])}</span>;
+}
+
 function metricCell(platform: string, key: string, value: number, strong = false) {
   const supported = PLATFORM_METRICS[platform];
   if (supported && !supported.includes(key)) {
@@ -145,10 +221,17 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
   const syncPollRef = useRef<number | null>(null);
   const [channel, setChannel] = useState<"all" | "site" | "xhs" | "toutiao" | "wechat" | "channels" | "healing" | "aiworker">("all");
   const [query, setQuery] = useState("");
-  const [shown, setShown] = useState(100);
+  // 内容效果明细分页：每页 10 条
+  const [detailPage, setDetailPage] = useState(1);
+  const [detailJump, setDetailJump] = useState("");
 
   // 爆款拆解：子视图 + 拆解弹窗
-  const [tab, setTab] = useState<"data" | "lib">("data");
+  const [tab, setTab] = useState<"data" | "lib" | "user">("data");
+  // 流量矩阵时间窗口筛选，默认「累计」（保证低频/断档采集的渠道如小红书的观看数始终可见）
+  const [winWindow, setWinWindow] = useState<"yesterday" | "last7" | "last30" | "cumulative">("cumulative");
+  // 用户维度 · 省级分布表格分页
+  const [regionPage, setRegionPage] = useState(1);
+  const [regionJump, setRegionJump] = useState("");
   const [lib, setLib] = useState<LibItem[] | null>(null);
   const [modal, setModal] = useState<{
     id?: string; platform: string; contentKey: string; title: string;
@@ -412,51 +495,70 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
   }
 
   const perPlatform = data?.perPlatform || [];
-  const allItems = data?.items || [];
-  const siteDays = data?.siteDays || [];
-  // 「官网今日 PV/UV」按今天的日期取，不能取 siteDays 的最后一行——
-  // 最后一行可能是昨天（今天还没产生访问/还没同步），那样会把旧数据当今日展示。
-  const todayStr = (() => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  })();
-  const siteToday = siteDays.find((d) => d.date === todayStr) ?? null;
+  // 只展示已授权渠道：未授权渠道的历史数据不再出现在效果分析里
+  const authorizedSet = new Set<string>(
+    data?.authorizedPlatforms || (data?.accounts || []).map((a) => a.platform),
+  );
+  const allItems = (data?.items || []).filter(
+    (it) => authorizedSet.size === 0 || authorizedSet.has(it.platform),
+  );
 
-  // 渠道筛选 + 标题搜索（全量明细，不分渠道截断）
-  const filtered = allItems.filter((it) => {
+  const WIN_LABEL: Record<string, string> = { yesterday: "昨日", last7: "最近7天", last30: "最近30天", cumulative: "累计" };
+
+  // 内容效果明细：随顶部时间窗口联动（真实 byWindow：窗口内最新快照 − 窗口前快照）。
+  // windowAll = 该窗口内有增量的全部作品（不受渠道/搜索影响，用于 chips 计数）。
+  const windowAll = allItems
+    .map((it) => ({ it, w: it.byWindow?.[winWindow] ?? null }))
+    .filter((x) => x.w !== null);
+  const filtered = windowAll.filter(({ it }) => {
     if (channel !== "all" && it.platform !== channel) return false;
     if (query && !it.title.toLowerCase().includes(query.toLowerCase())) return false;
     return true;
   });
-  const items = filtered.slice(0, shown);
-  const totalViews = perPlatform.reduce((s, p) => s + p.views, 0);
-  const totalInteractions = perPlatform.reduce((s, p) => s + p.likes + p.comments + p.collects + p.shares, 0);
-  const maxPv = Math.max(1, ...siteDays.map((d) => d.pv));
+  const detailList = [...filtered].sort((a, b) => b.w!.views - a.w!.views);
+  const DETAIL_PAGE_SIZE = 10;
+  const detailTotalPages = Math.max(1, Math.ceil(detailList.length / DETAIL_PAGE_SIZE));
+  const safeDetailPage = Math.min(detailPage, detailTotalPages);
+  const items = detailList.slice(
+    (safeDetailPage - 1) * DETAIL_PAGE_SIZE,
+    safeDetailPage * DETAIL_PAGE_SIZE,
+  );
+  // 最近一次采集日期（用于空状态提示，避免用户误以为页面坏了）
+  const latestMetricDate = allItems.reduce((m, it) => (it.metricDate > m ? it.metricDate : m), "");
 
-  // 微信生态（公众号 / 视频号）：账号级汇总（后台采集器回填）+ 涨粉。
-  // 这类后台只提供账号级数据、不提供内容级明细，因此以「账号级汇总」为准展示。
-  const wechatRows = perPlatform.filter((p) => WECHAT_PLATFORMS.includes(p.platform));
-  const dailyMetrics = data?.dailyMetrics || [];
-  const accountStatsOf = (platform: string) => {
-    const rows = dailyMetrics.filter((d) => d.platform === platform);
-    const latest = rows.length ? rows[rows.length - 1] : null;
-    return {
-      has: rows.length > 0,
-      latest,
-      todayFans: rows.find((d) => d.metricDate === todayStr)?.fans ?? 0,
-      totalFans: rows.reduce((s, d) => s + d.fans, 0),
-    };
-  };
+  // 时间窗口流量矩阵：各渠道在 昨日 / 最近7天 / 最近30天 的 6 维流量。
+  const windows = data?.windows;
+  const fanStats = data?.fanStats;
+  // 矩阵要展示的渠道集合：**只取已授权渠道**（未授权的一律不出现）
+  const matrixPlatforms = (() => {
+    const order = ["site", "xhs", "toutiao", "wechat", "channels", "healing", "aiworker"];
+    const set = new Set<string>();
+    if (authorizedSet.size > 0) {
+      for (const p of authorizedSet) set.add(p);
+    } else {
+      // 兜底：拿不到授权信息时（未登录/接口异常）用有数据的渠道，避免白屏
+      if (windows) {
+        for (const w of [windows.yesterday, windows.last7, windows.last30]) {
+          for (const k of Object.keys(w)) set.add(k);
+        }
+      }
+      for (const p of perPlatform) set.add(p.platform);
+    }
+    return [...set].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  })();
+  const vecOf = (w: Record<string, WindowVec & { name: string }> | undefined, platform: string): WindowVec & { name: string } =>
+    (w && w[platform]) || { ...EMPTY_VEC, name: PLATFORM_LABEL[platform] || platform };
 
   return (
     <div className="pub-root">
       <div className="pub-toolbar">
         <div className="pub-title-group">
           <h2>效果分析</h2>
-          <p className="pub-subtitle">官网 · 小红书 · 头条号 · 公众号 · 视频号 真实投放效果</p>
+          <p className="pub-subtitle">已授权渠道的真实投放效果（未授权渠道不展示）</p>
         </div>
         <div className="ana-tabs">
-          <button className={tab === "data" ? "ana-tab active" : "ana-tab"} onClick={() => setTab("data")}>效果数据</button>
+          <button className={tab === "data" ? "ana-tab active" : "ana-tab"} onClick={() => setTab("data")}>流量维度</button>
+          <button className={tab === "user" ? "ana-tab active" : "ana-tab"} onClick={() => setTab("user")}>用户维度</button>
           <button className={tab === "lib" ? "ana-tab active" : "ana-tab"} onClick={() => { setTab("lib"); void refreshLib(); }}>
             爆款拆解库{lib && lib.length ? `（${lib.length}）` : ""}
           </button>
@@ -474,25 +576,6 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
       {syncMsg && <div className={syncMsg.ok ? "pub-alert ok" : "pub-alert"}>{syncMsg.text}</div>}
       {error && <div className="pub-alert">{error}</div>}
 
-      <div className="pub-stats">
-        <div className="pub-stat">
-          <div className="k">累计浏览</div>
-          <div className="v">{num(totalViews)}</div>
-        </div>
-        <div className="pub-stat">
-          <div className="k">累计互动</div>
-          <div className="v ok">{num(totalInteractions)}</div>
-        </div>
-        <div className="pub-stat">
-          <div className="k">官网今日 PV</div>
-          <div className="v">{siteToday ? num(siteToday.pv) : "—"}</div>
-        </div>
-        <div className="pub-stat">
-          <div className="k">官网今日 UV</div>
-          <div className="v">{siteToday ? num(siteToday.uv) : "—"}</div>
-        </div>
-      </div>
-
       {tab === "data" && (
         loading && !data ? (
         <div className="pub-empty">正在加载效果数据…</div>
@@ -504,111 +587,73 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
         </div>
       ) : (
         <>
-          {siteDays.length > 0 && (
-            <div className="ana-site-days">
-              <div className="ana-section-title">官网流量（近 {siteDays.length} 天）</div>
-              <div className="ana-bars">
-                {siteDays.map((d) => (
-                  <div key={d.date} className="ana-bar-item" title={`${d.date}：PV ${d.pv} / UV ${d.uv}`}>
-                    <div className="ana-bar" style={{ height: `${Math.max(6, (d.pv / maxPv) * 72)}px` }} />
-                    <div className="ana-bar-date">{d.date.slice(5)}</div>
-                  </div>
-                ))}
+          {/* 流量矩阵：单列表，按时间窗口筛选（默认昨日） */}
+          <div className="ana-section-title">各渠道流量矩阵（阅读 📖 / 点赞 ❤️ / 微信点赞 👍 / 评论 💬 / 分享 🔁 / 收藏 ⭐）</div>
+          {windows ? (
+            <>
+              <div className="ana-win-filter">
+                <span className="ana-win-filter-label">时间范围</span>
+                <button className={winWindow === "cumulative" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("cumulative")}>累计</button>
+                <button className={winWindow === "yesterday" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("yesterday")}>昨日</button>
+                <button className={winWindow === "last7" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("last7")}>最近7天</button>
+                <button className={winWindow === "last30" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("last30")}>最近30天</button>
               </div>
-            </div>
+              <table className="ana-win-list">
+                <thead>
+                  <tr>
+                    <th className="ana-win-list-ch">渠道</th>
+                    {WINDOW_METRIC_ROWS.map((m) => (
+                      <th key={m.key} title={m.label}>
+                        <span className="ana-win-list-ico">{m.icon}</span>
+                        <span className="ana-win-list-th-label">{m.label}</span>
+                      </th>
+                    ))}
+                    <th className="ana-win-list-cn">内容数</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {matrixPlatforms.map((platform) => {
+                    const wv = windows?.[winWindow]?.[platform];
+                    const hasWinData = !!wv;
+                    const v = vecOf(windows[winWindow], platform);
+                    const contents = perPlatform.find((p) => p.platform === platform)?.contents ?? 0;
+                    return (
+                      <tr key={platform}>
+                        <td className="ana-win-list-ch">
+                          <span className={`acct-plat-badge ${platform}`}>{PLATFORM_LABEL[platform] || platform}</span>
+                        </td>
+                        {WINDOW_METRIC_ROWS.map((m) => (
+                          <td key={m.key}>
+                            {hasWinData ? (
+                              winCell(platform, m.key, v)
+                            ) : (
+                              <span className="col-n na" title="该渠道在所选时间范围内还没有采集到数据">—</span>
+                            )}
+                          </td>
+                        ))}
+                        <td className="ana-win-list-cn">{num(contents)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {!matrixPlatforms.some((p) => windows?.[winWindow]?.[p]) && (
+                <p className="pub-empty-hint" style={{ margin: "10px 2px 0" }}>
+                  所选时间范围（{WIN_LABEL[winWindow]}）暂时没有采集数据。可切换到「最近7天 / 最近30天」查看，或点右上角「同步数据」。
+                </p>
+              )}
+            </>
+          ) : (
+            <div className="pub-empty">暂无时间窗口数据，点右上角「同步数据」后查看。</div>
           )}
-
-          {wechatRows.length > 0 && (
-            <div className="ana-site-days">
-              <div className="ana-section-title">微信生态数据（公众号 / 视频号）</div>
-              <div className="ana-wechat-grid">
-                {wechatRows.map((p) => {
-                  const acc = accountStatsOf(p.platform);
-                  const L = acc.latest;
-                  const isWechat = p.platform === "wechat";
-                  const hint = acc.has
-                    ? "账号级数据由浏览器采集器回填（该后台只提供账号级汇总，不提供内容级明细）"
-                    : "尚未采集到账号级数据：点右上角「同步数据」触发浏览器采集器（约 1-2 分钟）";
-                  const show = (n?: number) => (acc.has && typeof n === "number" ? num(n) : "—");
-                  return (
-                    <div key={p.platform} className="ana-wechat-card">
-                      <div className="ana-wechat-head">
-                        <span className={`acct-plat-badge ${p.platform}`}>{p.name}</span>
-                        <span className="ana-wechat-sub">{p.contents} 篇内容</span>
-                      </div>
-                      <div className="ana-wechat-stats">
-                        <div className="ana-wechat-stat" title={hint}>
-                          <span className="k">{isWechat ? "阅读次数" : "播放量"}</span>
-                          <span className="v">{show(L?.reads)}</span>
-                        </div>
-                        <div className="ana-wechat-stat" title="该后台未提供人数口径">
-                          <span className="k">阅读人数</span>
-                          <span className="v">—</span>
-                        </div>
-                        <div className="ana-wechat-stat" title={hint}>
-                          <span className="k">在看</span>
-                          <span className="v">{show(L?.wows)}</span>
-                        </div>
-                        <div className="ana-wechat-stat" title={hint}>
-                          <span className="k">点赞</span>
-                          <span className="v">{show(L?.likes)}</span>
-                        </div>
-                        <div className="ana-wechat-stat" title={hint}>
-                          <span className="k">分享</span>
-                          <span className="v">{show(L?.shares)}</span>
-                        </div>
-                        <div className="ana-wechat-stat" title="该后台未提供收藏口径">
-                          <span className="k">收藏</span>
-                          <span className="v">—</span>
-                        </div>
-                        <div className="ana-wechat-stat" title={hint + "（涨粉口径待接入用户分析接口）"}>
-                          <span className="k">今日涨粉</span>
-                          <span className="v">{show(acc.todayFans)}</span>
-                        </div>
-                        <div className="ana-wechat-stat" title={hint}>
-                          <span className="k">累计涨粉</span>
-                          <span className="v">{acc.has && acc.totalFans > 0 ? num(acc.totalFans) : "—"}</span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          <div className="ana-section-title">各渠道数据对比</div>
-          <div className="pub-list">
-            <div className="pub-head ana-head ana-cols-summary">
-              <span className="col-plat">渠道</span>
-              <span className="col-n">内容数</span>
-              <span className="col-n">浏览</span>
-              <span className="col-n">展现</span>
-              <span className="col-n">点赞</span>
-              <span className="col-n">评论</span>
-              <span className="col-n">收藏</span>
-              <span className="col-n">分享</span>
-            </div>
-            {perPlatform.map((p) => (
-              <div key={p.platform} className="pub-row ana-row ana-cols-summary">
-                <span className="col-plat">
-                  <span className={`acct-plat-badge ${p.platform}`}>{p.name}</span>
-                </span>
-                <span className="col-n">{p.contents}</span>
-                {metricCell(p.platform, "views", p.views, true)}
-                {metricCell(p.platform, "impressions", p.impressions)}
-                {metricCell(p.platform, "likes", p.likes)}
-                {metricCell(p.platform, "comments", p.comments)}
-                {metricCell(p.platform, "collects", p.collects)}
-                {metricCell(p.platform, "shares", p.shares)}
-              </div>
-            ))}
-          </div>
 
           {allItems.length > 0 && (
             <>
               <div className="ana-section-title">
-                内容效果明细（共 {filtered.length} 条{channel !== "all" || query ? ` / 全部 ${allItems.length} 条` : ""}）
+                内容效果明细 · {WIN_LABEL[winWindow]}
+                <span className="ana-demo-sub">
+                  （共 {detailList.length} 条{channel !== "all" || query ? ` / 全部 ${windowAll.length} 条` : ""}）
+                </span>
               </div>
               <div className="ana-filter-bar">
                 <div className="ana-chips">
@@ -623,20 +668,23 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
                       ["healing", "官网-AI回忆录"],
                       ["aiworker", "官网-AI员工"],
                     ] as const
-                  ).map(([key, label]) => (
+                  )
+                    // 只列已授权渠道（同矩阵口径）
+                    .filter(([key]) => key === "all" || authorizedSet.size === 0 || authorizedSet.has(key))
+                    .map(([key, label]) => (
                     <button
                       key={key}
                       className={`ana-chip ${channel === key ? "on" : ""}`}
                       onClick={() => {
                         setChannel(key);
-                        setShown(100);
+                        setDetailPage(1);
                       }}
                     >
                       {label}
                       <span className="ana-chip-n">
                         {key === "all"
-                          ? allItems.length
-                          : allItems.filter((it) => it.platform === key).length}
+                          ? windowAll.length
+                          : windowAll.filter(({ it }) => it.platform === key).length}
                       </span>
                     </button>
                   ))}
@@ -648,7 +696,7 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
                   value={query}
                   onChange={(e) => {
                     setQuery(e.target.value);
-                    setShown(100);
+                    setDetailPage(1);
                   }}
                 />
               </div>
@@ -656,60 +704,97 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
                 <div className="pub-head ana-head ana-cols-detail">
                   <span className="col-plat">渠道</span>
                   <span className="col-title">标题</span>
-                  <span className="col-n">浏览</span>
-                  <span className="col-n">展现</span>
+                  <span className="col-n">阅读</span>
                   <span className="col-n">点赞</span>
                   <span className="col-n">评论</span>
                   <span className="col-n">收藏</span>
                   <span className="col-n">分享</span>
                   <span className="col-n">数据日期</span>
                 </div>
-                {items.map((it) => {
+                {items.map(({ it, w }) => {
                   const done = (lib || []).find((b) => b.platform === it.platform && b.contentKey === it.contentKey);
                   return (
-                  <div key={`${it.platform}-${it.contentKey}`} className="pub-row ana-row ana-cols-detail">
-                    <span className="col-plat">
-                      <span className={`acct-plat-badge ${it.platform}`}>{it.platformName}</span>
-                    </span>
-                    <span className="col-title">
-                      {it.url ? (
-                        <a className="pub-row-title" href={it.url} target="_blank" rel="noreferrer" title={`${it.title}（点击查看原文）`}>{it.title}</a>
-                      ) : (
-                        <span className="pub-row-title" title={it.title}>{it.title}</span>
-                      )}
-                      {it.hasSource ? (
-                        <button
-                          className={done ? "ana-decomp-btn done" : "ana-decomp-btn"}
-                          onClick={() => void openDecompose(it)}
-                        >
-                          {done ? "查看拆解" : "拆解"}
-                        </button>
-                      ) : (
-                        <button
-                          className="ana-decomp-btn disabled"
-                          disabled
-                          title="该内容暂无原文（视频类没有文字原文，或原文还没采集到）。请先点右上角「同步数据」重新采集。"
-                        >
-                          无原文
-                        </button>
-                      )}
-                    </span>
-                    {metricCell(it.platform, "views", it.views, true)}
-                    {metricCell(it.platform, "impressions", it.impressions)}
-                    {metricCell(it.platform, "likes", it.likes)}
-                    {metricCell(it.platform, "comments", it.comments)}
-                    {metricCell(it.platform, "collects", it.collects)}
-                    {metricCell(it.platform, "shares", it.shares)}
-                    <span className="col-n">{it.metricDate.slice(5)}</span>
-                  </div>
+                    <div key={`${it.platform}-${it.contentKey}`} className="pub-row ana-row ana-cols-detail">
+                      <span className="col-plat">
+                        <span className={`acct-plat-badge ${it.platform}`}>{it.platformName}</span>
+                      </span>
+                      <span className="col-title">
+                        {it.url ? (
+                          <a className="pub-row-title" href={it.url} target="_blank" rel="noreferrer" title={`${it.title}（点击查看原文）`}>{it.title}</a>
+                        ) : (
+                          <span className="pub-row-title" title={it.title}>{it.title}</span>
+                        )}
+                        {it.hasSource ? (
+                          <button
+                            className={done ? "ana-decomp-btn done" : "ana-decomp-btn"}
+                            onClick={() => void openDecompose(it)}
+                          >
+                            {done ? "查看拆解" : "拆解"}
+                          </button>
+                        ) : (
+                          <button
+                            className="ana-decomp-btn disabled"
+                            disabled
+                            title="该内容暂无原文（视频类没有文字原文，或原文还没采集到）。请先点右上角「同步数据」重新采集。"
+                          >
+                            无原文
+                          </button>
+                        )}
+                      </span>
+                      {metricCell(it.platform, "views", w!.views, true)}
+                      {metricCell(it.platform, "likes", w!.likes)}
+                      {metricCell(it.platform, "comments", w!.comments)}
+                      {metricCell(it.platform, "collects", w!.collects)}
+                      {metricCell(it.platform, "shares", w!.shares)}
+                      <span className="col-n">{w!.metricDate.slice(5)}</span>
+                    </div>
                   );
                 })}
-                {items.length === 0 && <div className="ana-no-match">没有匹配的内容。</div>}
+                {items.length === 0 && (
+                  <div className="ana-no-match">
+                    {WIN_LABEL[winWindow]}没有新增作品数据
+                    {latestMetricDate ? `（最近一次采集：${latestMetricDate}）` : ""}。
+                    可切换上方时间范围查看「最近7天 / 最近30天」，或点右上角「同步数据」重新采集。
+                  </div>
+                )}
               </div>
-              {shown < filtered.length && (
-                <div className="ana-more-wrap">
-                  <button className="pub-refresh" onClick={() => setShown((n) => n + 200)}>
-                    加载更多（已显示 {items.length} / {filtered.length}）
+              {detailList.length > DETAIL_PAGE_SIZE && (
+                <div className="ana-detail-pager">
+                  <button
+                    disabled={safeDetailPage <= 1}
+                    onClick={() => setDetailPage(safeDetailPage - 1)}
+                    aria-label="上一页"
+                  >
+                    ‹
+                  </button>
+                  <span className="ana-pageno">{safeDetailPage} / {detailTotalPages}</span>
+                  <button
+                    disabled={safeDetailPage >= detailTotalPages}
+                    onClick={() => setDetailPage(safeDetailPage + 1)}
+                    aria-label="下一页"
+                  >
+                    ›
+                  </button>
+                  <input
+                    value={detailJump}
+                    onChange={(e) => setDetailJump(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        const n = parseInt(detailJump, 10);
+                        if (Number.isFinite(n)) setDetailPage(Math.max(1, Math.min(detailTotalPages, n)));
+                        setDetailJump("");
+                      }
+                    }}
+                    placeholder="页码"
+                  />
+                  <button
+                    onClick={() => {
+                      const n = parseInt(detailJump, 10);
+                      if (Number.isFinite(n)) setDetailPage(Math.max(1, Math.min(detailTotalPages, n)));
+                      setDetailJump("");
+                    }}
+                  >
+                    跳转
                   </button>
                 </div>
               )}
@@ -718,6 +803,169 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
         </>
       ))}
 
+      {tab === "user" && (() => {
+        const hasData = !!(fanStats && (fanStats.byPlatform?.length || fanStats.regions?.length));
+        if (!hasData) {
+          return (
+            <>
+              <div className="ana-section-title">用户维度 · 粉丝增长与地域分布</div>
+              <div className="pub-empty-card">
+                <div className="pub-empty-ico">👥</div>
+                <p>还没有粉丝数据。</p>
+                <p className="pub-empty-hint">
+                  粉丝数据来自微信生态（公众号 / 视频号）后台「用户分析」。请先在「平台授权管理」确认公众号登录态有效
+                  （Cookie 过期需重新授权），再点右上角「同步数据」。采集成功后，这里会显示新增粉丝、累计粉丝与省级分布。
+                </p>
+              </div>
+            </>
+          );
+        }
+        const fs = fanStats!;
+        const newFansOf = (p: any) =>
+          winWindow === "yesterday" ? p.newFansYesterday : winWindow === "last7" ? p.newFans7 : p.newFans30;
+        // 全渠道合计
+        const totalNewFans = fs.byPlatform.reduce(
+          (s: number, p: any) => s + (p.hasData === false ? 0 : Number(newFansOf(p)) || 0),
+          0,
+        );
+        const totalFansAll = fs.byPlatform.reduce((s: number, p: any) => s + (Number(p.fansTotal) || 0), 0);
+        const regionFansOf = (pr: any) => pr.fans ?? 0;
+        // 合并各渠道：同一省份的粉丝数跨渠道相加
+        const mergedMap = new Map<string, number>();
+        for (const r of fs.regions) {
+          for (const pr of r.provinces) {
+            mergedMap.set(pr.province, (mergedMap.get(pr.province) ?? 0) + regionFansOf(pr));
+          }
+        }
+        const mergedRegions = [...mergedMap.entries()]
+          .map(([province, fans]) => ({ province, fans }))
+          .filter((x) => x.fans > 0)
+          .sort((a, b) => b.fans - a.fans);
+        const totalRegionFans = mergedRegions.reduce((s, x) => s + x.fans, 0);
+        const REGION_PAGE_SIZE = 10;
+        const totalPages = Math.max(1, Math.ceil(mergedRegions.length / REGION_PAGE_SIZE));
+        const safePage = Math.min(regionPage, totalPages);
+        const pageRegions = mergedRegions.slice((safePage - 1) * REGION_PAGE_SIZE, safePage * REGION_PAGE_SIZE);
+        return (
+          <>
+            <div className="ana-section-title">用户维度 · 粉丝增长与地域分布</div>
+
+            {/* 时间筛选：与「流量维度」tab 一致，默认昨日 */}
+            <div className="ana-win-filter">
+              <span className="ana-win-filter-label">时间范围</span>
+              <button className={winWindow === "cumulative" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("cumulative")}>累计</button>
+              <button className={winWindow === "yesterday" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("yesterday")}>昨日</button>
+              <button className={winWindow === "last7" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("last7")}>最近7天</button>
+              <button className={winWindow === "last30" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("last30")}>最近30天</button>
+            </div>
+
+            {/* 粉丝增长：单列表（渠道为行，不再每渠道分一块） */}
+            <div className="ana-section-title">粉丝增长（{WIN_LABEL[winWindow]}新增）</div>
+            <div className="ana-user-list">
+              <div className="ana-user-row ana-user-head-row">
+                <span className="col-plat">渠道</span>
+                <span className="col-n">新增粉丝 · {WIN_LABEL[winWindow]}</span>
+                <span className="col-n">累计粉丝数</span>
+              </div>
+              {fs.byPlatform.map((p: any) => (
+                <div key={p.platform} className="ana-user-row">
+                  <span className="col-plat">
+                    <span className={`acct-plat-badge ${p.platform}`}>{p.name}</span>
+                  </span>
+                  <span className="col-n strong">{p.hasData === false ? "—" : num(newFansOf(p))}</span>
+                  <span className="col-n ok">{p.fansTotal > 0 ? num(p.fansTotal) : "—"}</span>
+                </div>
+              ))}
+              {fs.byPlatform.length > 1 && (
+                <div className="ana-user-row ana-user-total-row">
+                  <span className="col-plat">全渠道合计</span>
+                  <span className="col-n strong">{num(totalNewFans)}</span>
+                  <span className="col-n ok">{totalFansAll > 0 ? num(totalFansAll) : "—"}</span>
+                </div>
+              )}
+            </div>
+
+            {/* 省级分布：合并各渠道后，左侧地图 + 右侧地域/用户数/占比表。
+                即使暂时没有地域数据也把地图渲染出来（叠加占位提示），避免整块消失。 */}
+            {(
+              <>
+                <div className="ana-section-title">
+                  省级分布（已合并各渠道）
+                  {fs.regions[0]?.metricDate ? `（${fs.regions[0].metricDate} 快照）` : ""}
+                </div>
+                <div className="ana-region-card">
+                  <div className="ana-region-map">
+                    <ChinaProvinceMap data={mergedRegions.map((x) => ({ name: x.province, value: x.fans }))} />
+                    {mergedRegions.length === 0 && (
+                      <div className="ana-region-empty">
+                        暂无地域数据
+                        <span>公众号「用户属性」采集到省份分布后会自动着色</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="ana-region-table-wrap">
+                    <table className="ana-region-table">
+                      <thead>
+                        <tr>
+                          <th>地域</th>
+                          <th>用户数</th>
+                          <th>占比</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pageRegions.map((x) => (
+                          <tr key={x.province}>
+                            <td className="rg-name">{x.province}</td>
+                            <td className="rg-num">{num(x.fans)}</td>
+                            <td className="rg-pct">
+                              {totalRegionFans > 0 ? ((x.fans / totalRegionFans) * 100).toFixed(2) : "0.00"}%
+                            </td>
+                          </tr>
+                        ))}
+                        {pageRegions.length === 0 && (
+                          <tr>
+                            <td colSpan={3} className="rg-empty">暂无地域数据</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                    {mergedRegions.length > 0 && (
+                    <div className="ana-region-pager">
+                      <button disabled={safePage <= 1} onClick={() => setRegionPage(safePage - 1)} aria-label="上一页">‹</button>
+                      <span className="ana-region-pageno">{safePage} / {totalPages}</span>
+                      <button disabled={safePage >= totalPages} onClick={() => setRegionPage(safePage + 1)} aria-label="下一页">›</button>
+                      <input
+                        className="ana-region-jump"
+                        value={regionJump}
+                        onChange={(e) => setRegionJump(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            const n = parseInt(regionJump, 10);
+                            if (Number.isFinite(n)) setRegionPage(Math.max(1, Math.min(totalPages, n)));
+                            setRegionJump("");
+                          }
+                        }}
+                        placeholder="页码"
+                      />
+                      <button
+                        onClick={() => {
+                          const n = parseInt(regionJump, 10);
+                          if (Number.isFinite(n)) setRegionPage(Math.max(1, Math.min(totalPages, n)));
+                          setRegionJump("");
+                        }}
+                      >
+                        跳转
+                      </button>
+                    </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </>
+        );
+      })()}
+
       {tab === "lib" && (
         <>
           <div className="ana-section-title">爆款拆解库（共 {(lib || []).length} 条）</div>
@@ -725,7 +973,7 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
             <div className="pub-empty-card">
               <div className="pub-empty-ico">◫</div>
               <p>还没有拆解记录。</p>
-              <p className="pub-empty-hint">在「效果数据」里对高阅读量内容点「拆解」，AI 会基于原文提炼它的优势点；编辑确认后「设为每日任务参考」，次日内容生产将复用其结构。</p>
+              <p className="pub-empty-hint">在「流量维度」里对高阅读量内容点「拆解」，AI 会基于原文提炼它的优势点；编辑确认后「设为每日任务参考」，次日内容生产将复用其结构。</p>
             </div>
           ) : (
             <div className="pub-list">

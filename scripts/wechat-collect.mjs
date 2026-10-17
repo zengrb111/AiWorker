@@ -178,7 +178,72 @@ async function main() {
       reads30: pickRange(summaryRaw?.read_summary, 3),
       ok: summaryRaw?.base_resp?.ret === 0,
     };
+    // 平台自带的窗口总计（近7天 / 近30天）：微信只给汇总、没有按天数据，
+    // 必须原样入库，否则平台近7天只能累加我们残缺的日行（会显示成 1）。
+    const winAt = (t) => ({
+      reads: pickRange(summaryRaw?.read_summary, t),
+      shares: pickRange(summaryRaw?.share_summary, t),
+      likes: pickRange(summaryRaw?.like_summary, t),
+      wows: pickRange(summaryRaw?.zaikan_summary, t),
+      comments: pickRange(summaryRaw?.comment_summary, t),
+    });
+    const summary7 = winAt(2);
+    const summary30 = winAt(3);
     console.log('[wechat-collect] 账号级汇总:', JSON.stringify(summary));
+
+    // ---- 2.5) 粉丝维度（用户分析，best-effort，失败不影响主流程）----
+    // 累计粉丝数：用户增长 useraction 的 cumulate_user（窗口末日累计）；
+    // 地域分布：用户属性 userattr 的 provinces。任一接口不可用/字段变更均静默跳过。
+    let fanTotal = null;
+    let fanDays = [];
+    let regions = [];
+    try {
+      // 用户分析「关注者增长」真实接口：/misc/useranalysis?begin_date&end_date&source=99999999
+      // 返回 category_list[].list = [{date,new_user,cancel_user,netgain_user,cumulate_user}]
+      const p2 = (n) => String(n).padStart(2, '0');
+      const fmt = (d) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+      const endD = new Date();
+      endD.setDate(endD.getDate() - 1); // 昨天（今日数据未跑完）
+      const startD = new Date(endD);
+      startD.setDate(startD.getDate() - 40);
+      const growth = await callApi(
+        `/misc/useranalysis?begin_date=${fmt(startD)}&end_date=${fmt(endD)}&source=99999999&token=${token}&lang=zh_CN&f=json&ajax=1`
+      );
+      const cats = Array.isArray(growth?.category_list) ? growth.category_list : [];
+      const cat = cats.find((c) => Number(c?.user_source) === 99999999) || cats[0];
+      const glist = Array.isArray(cat?.list) ? cat.list : [];
+      if (glist.length) {
+        const normDate = (v) => {
+          const m = /^(\d{4})-?(\d{2})-?(\d{2})$/.exec(String(v || "").trim());
+          return m ? `${m[1]}-${m[2]}-${m[3]}` : "";
+        };
+        fanDays = glist
+          .map((x) => ({
+            date: normDate(x?.date),
+            newFans: Math.max(0, Number(x?.new_user) || 0),
+            cumulate: Number(x?.cumulate_user) > 0 ? Number(x.cumulate_user) : null,
+          }))
+          .filter((x) => x.date)
+          .sort((a, b) => (a.date < b.date ? -1 : 1));
+        const last = fanDays[fanDays.length - 1];
+        if (last && last.cumulate) fanTotal = last.cumulate;
+      }
+    } catch (e) {
+      console.warn('[wechat-collect] 粉丝增长数据获取失败（忽略）:', e.message);
+    }
+    try {
+      const attr = await callApi(`/misc/userattr?action=getuserattr&type=1&token=${token}&lang=zh_CN&f=json&ajax=1`);
+      const provinces = attr?.provinces || attr?.data?.provinces || [];
+      if (Array.isArray(provinces)) {
+        regions = provinces
+          .map((p) => ({ province: String(p?.name || p?.province || "").trim(), fans: Number(p?.value ?? p?.count ?? 0) }))
+          .filter((p) => p.province && Number.isFinite(p.fans) && p.fans > 0)
+          .slice(0, 34);
+      }
+    } catch (e) {
+      console.warn('[wechat-collect] 粉丝地域分布获取失败（忽略）:', e.message);
+    }
+    console.log('[wechat-collect] 粉丝维度:', JSON.stringify({ fanTotal, fanDayCount: fanDays.length, regionCount: regions.length }));
 
     if (notes.length === 0 && !summary.ok) {
       throw new Error('未取到任何数据（列表与汇总接口都为空）');
@@ -189,10 +254,29 @@ async function main() {
     const ingestToken = (envText.match(/CONTENT_INGEST_TOKEN="([^"]+)"/) || [])[1];
     if (!ingestToken) throw new Error('.env.local 缺少 CONTENT_INGEST_TOKEN');
 
+    // 微信「内容分析」的 type=1 是「昨日」口径（今日数据未跑完），汇总记到昨天
+    const y = new Date();
+    y.setDate(y.getDate() - 1);
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const summaryDate = `${y.getFullYear()}-${pad2(y.getMonth() + 1)}-${pad2(y.getDate())}`;
+
+    const pushBody = {
+      platform: PLATFORM,
+      accountId,
+      notes,
+      summary,
+      summary7,
+      summary30,
+      metricDate: summaryDate,
+    };
+    if (fanTotal != null) pushBody.fanTotal = fanTotal;
+    if (fanDays.length) pushBody.fanDays = fanDays;
+    if (regions.length) pushBody.regions = regions;
+
     const res = await fetch(`${API}/api/platform-metrics/ingest`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ingestToken}` },
-      body: JSON.stringify({ platform: PLATFORM, accountId, notes, summary }),
+      body: JSON.stringify(pushBody),
     });
     const out = await res.json().catch(() => null);
     console.log('[wechat-collect] 入库结果 HTTP', res.status, JSON.stringify(out));

@@ -4276,7 +4276,7 @@ textarea:focus {
 /* 内容明细表：渠道 / 标题 / 浏览 / 展现 / 点赞 / 评论 / 收藏 / 分享 / 日期 */
 .pub-head.ana-head.ana-cols-detail,
 .pub-row.ana-row.ana-cols-detail {
-  grid-template-columns: 84px minmax(0, 1fr) repeat(6, 54px) 62px;
+  grid-template-columns: 84px minmax(0, 1fr) repeat(5, 54px) 62px;
 }
 
 /* 平台不提供的指标显示「—」而不是 0，避免误读 */
@@ -4290,6 +4290,367 @@ textarea:focus {
 .pub-row.ana-row .col-n.strong { font-weight: 800; color: var(--text-main); }
 
 .pub-head.ana-head .col-n { text-align: right; }
+
+/* ===== 效果分析 · 流量矩阵（单列表 + 时间窗口筛选） ===== */
+.ana-win-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 10px;
+  flex-wrap: wrap;
+}
+
+.ana-win-filter-label {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-right: 2px;
+}
+
+.ana-win-seg {
+  border: 1px solid var(--line-soft);
+  background: #fff;
+  color: var(--text-main);
+  border-radius: 8px;
+  padding: 5px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ana-win-seg:hover { border-color: var(--accent); }
+
+.ana-win-seg.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.ana-win-list {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  background: #fff;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.ana-win-list th,
+.ana-win-list td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ana-win-list thead th {
+  background: #f7f9fc;
+  color: var(--text-dim);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.ana-win-list tbody tr:last-child td { border-bottom: none; }
+.ana-win-list tbody tr:hover { background: #f7faff; }
+
+.ana-win-list-ch {
+  text-align: left !important;
+  min-width: 120px;
+}
+
+.ana-win-list-cn {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.ana-win-list-ico {
+  display: inline-block;
+  width: 18px;
+  text-align: center;
+  margin-right: 3px;
+}
+
+.ana-win-list-th-label { font-weight: 700; }
+
+.ana-win-list .col-n { text-align: right; color: var(--text-main); }
+.ana-win-list .col-n.na {
+  color: var(--text-dim);
+  opacity: 0.45;
+}
+
+/* ===== 效果分析 · 用户维度（粉丝增长 + 地域分布） ===== */
+.ana-demo-badge {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+  color: #d46b08;
+  font-size: 11px;
+  font-weight: 700;
+  vertical-align: middle;
+}
+
+.ana-demo-hint {
+  margin: -2px 0 8px;
+}
+
+.ana-demo-sub {
+  margin-left: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* 粉丝增长 · 单列表（渠道为行） */
+.ana-user-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.ana-user-row {
+  display: grid;
+  grid-template-columns: 140px 1fr 1fr;
+  align-items: center;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+
+.ana-user-row:last-child { border-bottom: none; }
+
+.ana-user-head-row {
+  background: #f7f8fa;
+  color: var(--text-dim);
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.ana-user-row .col-plat { font-weight: 600; }
+
+.ana-user-row .col-n {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ana-user-row .col-n.strong {
+  color: var(--accent);
+  font-weight: 800;
+  font-size: 16px;
+}
+
+.ana-user-row .col-n.ok {
+  color: #2a9d5c;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.ana-user-total-row {
+  background: #f7f8fa;
+  border-top: 1px solid var(--line-soft);
+  font-weight: 700;
+}
+
+.ana-user-total-row .col-plat { color: var(--text-main); }
+
+/* 省级分布 · 左地图 + 右表格（参考微信后台「省级分布」版式） */
+.ana-region-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 22px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: #fff;
+  padding: 16px 18px 18px;
+}
+
+.ana-region-map {
+  position: relative;
+  min-height: 360px;
+}
+
+.ana-region-table-wrap {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--line-soft);
+  padding-left: 22px;
+}
+
+.ana-region-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.ana-region-table th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 700;
+  font-size: 12px;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.ana-region-table th:nth-child(2),
+.ana-region-table td:nth-child(2) { text-align: right; }
+
+.ana-region-table th:nth-child(3),
+.ana-region-table td:nth-child(3) { text-align: right; }
+
+.ana-region-table td {
+  padding: 10px 6px;
+  border-bottom: 1px solid var(--line-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.ana-region-table .rg-name {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.ana-region-table .rg-num { color: var(--text-main); }
+
+.ana-region-table .rg-pct { color: var(--text-dim); }
+
+.ana-region-table .rg-empty {
+  text-align: center;
+  color: var(--text-dim);
+  padding: 30px 0 !important;
+}
+
+/* 无地域数据时地图上的占位提示 */
+.ana-region-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.74);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none;
+}
+
+.ana-region-empty span {
+  font-size: 12px;
+  font-weight: 400;
+  opacity: 0.85;
+}
+
+.ana-region-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.ana-region-pager button {
+  border: 1px solid var(--line-soft);
+  background: #fff;
+  border-radius: 6px;
+  padding: 3px 9px;
+  cursor: pointer;
+  color: var(--text-main);
+  font-size: 12px;
+}
+
+.ana-region-pager button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ana-region-pager button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.ana-region-pageno {
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+}
+
+.ana-region-jump {
+  width: 46px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 3px 6px;
+  text-align: center;
+  font-size: 12px;
+  outline: none;
+}
+
+.ana-region-jump:focus { border-color: var(--accent); }
+
+/* 内容效果明细 · 分页（每页 10 条） */
+.ana-detail-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 0 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.ana-detail-pager button {
+  border: 1px solid var(--line-soft);
+  background: #fff;
+  border-radius: 6px;
+  padding: 3px 9px;
+  cursor: pointer;
+  color: var(--text-main);
+  font-size: 12px;
+}
+
+.ana-detail-pager button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ana-detail-pager button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.ana-detail-pager .ana-pageno {
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+}
+
+.ana-detail-pager input {
+  width: 46px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 3px 6px;
+  text-align: center;
+  font-size: 12px;
+  outline: none;
+}
+
+.ana-detail-pager input:focus { border-color: var(--accent); }
+
+@media (max-width: 900px) {
+  .ana-region-card { grid-template-columns: 1fr; }
+  .ana-region-table-wrap { border-left: none; border-top: 1px solid var(--line-soft); padding-left: 0; padding-top: 14px; }
+  .ana-region-map { min-height: 300px; }
+}
 
 /* ===== Publish panel（发布管理） ===== */
 
