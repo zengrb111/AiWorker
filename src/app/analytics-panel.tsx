@@ -228,7 +228,7 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
   // 爆款拆解：子视图 + 拆解弹窗
   const [tab, setTab] = useState<"data" | "lib" | "user">("data");
   // 流量矩阵时间窗口筛选，默认「累计」（保证低频/断档采集的渠道如小红书的观看数始终可见）
-  const [winWindow, setWinWindow] = useState<"yesterday" | "last7" | "last30" | "cumulative">("cumulative");
+  const [winWindow, setWinWindow] = useState<"yesterday" | "last7" | "last30" | "cumulative">("yesterday");
   // 用户维度 · 省级分布表格分页
   const [regionPage, setRegionPage] = useState(1);
   const [regionJump, setRegionJump] = useState("");
@@ -593,7 +593,6 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
             <>
               <div className="ana-win-filter">
                 <span className="ana-win-filter-label">时间范围</span>
-                <button className={winWindow === "cumulative" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("cumulative")}>累计</button>
                 <button className={winWindow === "yesterday" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("yesterday")}>昨日</button>
                 <button className={winWindow === "last7" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("last7")}>最近7天</button>
                 <button className={winWindow === "last30" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("last30")}>最近30天</button>
@@ -853,7 +852,6 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
             {/* 时间筛选：与「流量维度」tab 一致，默认昨日 */}
             <div className="ana-win-filter">
               <span className="ana-win-filter-label">时间范围</span>
-              <button className={winWindow === "cumulative" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("cumulative")}>累计</button>
               <button className={winWindow === "yesterday" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("yesterday")}>昨日</button>
               <button className={winWindow === "last7" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("last7")}>最近7天</button>
               <button className={winWindow === "last30" ? "ana-win-seg on" : "ana-win-seg"} onClick={() => setWinWindow("last30")}>最近30天</button>
