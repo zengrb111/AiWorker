@@ -190,8 +190,23 @@ export type TimelineBeat = {
   text: string;
 };
 
-/** 文字图层类型。 */
+/**
+ * 文字 / 图层类型。
+ *
+ * ## 两类图层，职责严格分离
+ *
+ * - **规划型**（前 9 种）：由 DSH 自由决定「这句话压什么文字」，只带单值字段。
+ * - **数据型**（后 6 种）：**不由模型输出**，由服务端把文章分析产出的
+ *   `article.charts`（已过溯源闸门）翻译成 OverlaySpec 注入（见 src/lib/video/chart-overlays.ts）。
+ *
+ * 为什么要分开而不是都交给模型：
+ * 1. 图表的**数值必须可溯源**。模型照着二手摘要重新编一遍数字，溯源闸门就白设了；
+ * 2. 让模型输出多系列坐标轴与 N×M 规格表，它会编字段名，校验重试一次就是一分多钟。
+ *
+ * 于是分镜 prompt 的 kind 取值域只给前 9 种（`PLANNED_OVERLAY_KINDS`）。
+ */
 export type OverlayKind =
+  /* 规划型：由 DSH 输出 */
   | "section_title"
   | "stat_reveal"
   | "hero_title"
@@ -200,8 +215,16 @@ export type OverlayKind =
   | "text_card"
   | "callout"
   | "comparison"
-  | "progress";
+  | "progress"
+  /* 数据型：由服务端从文章图表注入，模型不许输出 */
+  | "bar_chart"
+  | "line_chart"
+  | "donut"
+  | "kpi_grid"
+  | "spec_table"
+  | "bullet_list";
 
+/** 全部合法图层类型（渲染层与校验器认这一份）。 */
 export const OVERLAY_KINDS: OverlayKind[] = [
   "section_title",
   "stat_reveal",
@@ -212,7 +235,29 @@ export const OVERLAY_KINDS: OverlayKind[] = [
   "callout",
   "comparison",
   "progress",
+  "bar_chart",
+  "line_chart",
+  "donut",
+  "kpi_grid",
+  "spec_table",
+  "bullet_list",
 ];
+
+/** 交给 DSH 自由规划的图层类型 —— prompt 的取值域只能给这一份。 */
+export const PLANNED_OVERLAY_KINDS: OverlayKind[] = OVERLAY_KINDS.slice(0, 9);
+
+/** 数据型图层类型，服务端注入用。 */
+export const DATA_OVERLAY_KINDS: OverlayKind[] = OVERLAY_KINDS.slice(9);
+
+/** 数据型图层的中文名，给方案摘要与提示文案用。 */
+export const DATA_OVERLAY_KIND_LABELS: Record<string, string> = {
+  bar_chart: "柱状图",
+  line_chart: "折线图",
+  donut: "环形图",
+  kpi_grid: "数字卡组",
+  spec_table: "规格表",
+  bullet_list: "要点卡片",
+};
 
 /** 位置。 */
 export type OverlayPosition = "top" | "center" | "bottom";
@@ -247,11 +292,31 @@ export type SceneSpec = {
   backgroundOverlay?: number;
 };
 
+/** 图表里的一个数据点。label 与 value 是唯一的必需字段，其余按 kind 取用。 */
+export type ChartDataPoint = { label: string; value: number };
+
+/** 折线图的一个系列。 */
+export type ChartSeries = { name: string; points: ChartDataPoint[] };
+
+/** 数字卡组里的一张卡。value/unit/delta 分开存，才能让单位用小字异色渲染。 */
+export type KpiCard = {
+  value: string;
+  unit?: string;
+  label?: string;
+  delta?: string;
+  deltaLabel?: string;
+};
+
 /**
  * 文字图层。
  *
  * 与场景分离的独立图层，有自己的绝对进出时间 —— 同一句旁白可以既换图又压一张数据卡。
  * 这是「文字动效」的全部来源：本地版 Explainer 的 overlays 就是这套东西。
+ *
+ * 单值字段（value / label / progress…）只服务于规划型图层；
+ * 数组字段（items / series / cards / rows / bullets）只服务于数据型图层 ——
+ * 早先这里只有单值字段，于是渲染层只能表达「一句话配一块浮层」，
+ * 多系列坐标轴、N 行 N 列规格表这类**信息密度**在契约层就写不出来。
  */
 export type OverlaySpec = {
   id: string;
@@ -263,7 +328,7 @@ export type OverlaySpec = {
   position?: OverlayPosition;
   text?: string;
   subtitle?: string;
-  /** stat_reveal / stat_card 用。 */
+  /** stat_reveal / stat_card 用；数据型图层里作图表标题的兜底。 */
   value?: string;
   label?: string;
   /** callout 用。 */
@@ -279,6 +344,53 @@ export type OverlaySpec = {
   providers?: string[];
   /** 覆盖主题主色。 */
   accentColor?: string;
+
+  /* ---------------- 数据型图层专用（服务端从文章图表注入） ---------------- */
+
+  /** bar_chart / donut 用：横轴或环的构成项。 */
+  items?: ChartDataPoint[];
+  /** line_chart 用：多条折线。 */
+  series?: ChartSeries[];
+  /** kpi_grid 用：一组数字卡。 */
+  cards?: KpiCard[];
+  /** spec_table 用：表头。列数即 rows 每行的长度。 */
+  columns?: string[];
+  /** spec_table 用：数据行。 */
+  rows?: string[][];
+  /** bullet_list 用：要点卡片文案。 */
+  bullets?: string[];
+  /** 数值单位（显示在轴标注 / 大数字右侧的小字）。 */
+  unit?: string;
+  /** 图下方的注释。 */
+  note?: string;
+  /** 高亮项下标：bar / donut / line 会把这一项描成主色、其余压成低饱和。 */
+  highlightIndex?: number;
+};
+
+/**
+ * 常驻页面装饰（贯穿全片，不是某个时间段的图层）。
+ *
+ * 为什么要挂在 storyboard 而不是 overlay：
+ * overlay 有一个致命的约束 —— 它的 outSeconds 不能超过最后一个场景的出点
+ * （schema 校验里就是这么写的，否则文字会压到下一个镜头）。
+ * 而「顶部彩条 + 页眉 + 底部进度线」这种**从第 0 帧贯穿到最后一帧**的东西
+ * 在 overlay 机制里根本无法表达，所以它是 storyboard 的一等字段。
+ *
+ * 全字段可选；全空时不渲染任何东西，对既有分镜零影响。
+ */
+export type ChromeSpec = {
+  /** 顶部 6px 主题彩条。 */
+  topBar?: boolean;
+  /** 页眉主文字（左上角）。 */
+  headerText?: string;
+  /** 页眉副文字。 */
+  headerSubtitle?: string;
+  /** 页脚文字（右下角），常用于标注来源。 */
+  footerText?: string;
+  /** 页脚下方的常驻进度线（按时间轴线性推进）。 */
+  progress?: boolean;
+  /** 页眉/页脚文字色，缺省取主题正文色。 */
+  color?: string;
 };
 
 /** 片尾卡。 */
@@ -315,6 +427,13 @@ export type Storyboard = {
    * 交给模型只会得到「每次不一样的风格」，反而不可复现。
    */
   look?: LookConfig;
+  /**
+   * 常驻页面装饰（可选）：顶部彩条 / 页眉 / 页脚 / 进度线。
+   *
+   * 由**服务端**填（文章转视频时带文章标题与来源），不交给 DSH ——
+   * 模型每次给不同的页眉文案会让成片风格漂移。
+   */
+  chrome?: ChromeSpec;
 };
 
 /** 视频片段（剪视频 / 复刻用）。 */
@@ -346,6 +465,8 @@ export type ClipStoryboard = {
   outro?: OutroSpec;
   /** 与 Storyboard 同构的外观覆盖，供两条链路共用同一套校验。 */
   look?: LookConfig;
+  /** 与 Storyboard 同构的常驻页面装饰。 */
+  chrome?: ChromeSpec;
 };
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; errors: string[] };
@@ -371,8 +492,10 @@ function checkCaptions(cues: unknown, errors: string[]): void {
       errors.push(`captions[${i}].text 缺失或为空`);
       return;
     }
-    if (!isPositiveNumber(c.startMs as number) || !isPositiveNumber(c.endMs as number)) {
-      errors.push(`captions[${i}] 的 startMs/endMs 必须是正数`);
+    // 同 beats：首条字幕从 0 毫秒开始是正常的，不该判成错误。
+    const startOk = typeof c.startMs === "number" && Number.isFinite(c.startMs) && c.startMs >= 0;
+    if (!startOk || !isPositiveNumber(c.endMs as number)) {
+      errors.push(`captions[${i}] 的 startMs 必须是不小于 0 的数字，endMs 必须是正数`);
       return;
     }
     if ((c.endMs as number) <= (c.startMs as number)) {
@@ -401,8 +524,11 @@ function checkBeats(beats: unknown, errors: string[]): void {
   }
   beats.forEach((beat, i) => {
     const b = beat as Partial<TimelineBeat> | null;
-    if (!b || !isPositiveNumber(b.startMs as number) || !isPositiveNumber(b.endMs as number)) {
-      errors.push(`beats[${i}] 的 startMs/endMs 必须是正数`);
+    // startMs 允许为 0：时间轴第一句天然从 0 开始，此前用「必须是正数」判定会把
+    // 模型最守规矩的输出判成错误，白白多跑一次几十秒的 DSH 才靠重试蒙对。
+    const startOk = !!b && typeof b.startMs === "number" && Number.isFinite(b.startMs) && b.startMs >= 0;
+    if (!b || !startOk || !isPositiveNumber(b.endMs as number)) {
+      errors.push(`beats[${i}] 的 startMs 必须是不小于 0 的数字，endMs 必须是正数`);
       return;
     }
     if ((b.endMs as number) <= (b.startMs as number)) {
@@ -430,6 +556,120 @@ function checkOutPoints(
       `${label} 最后一个 outSeconds(${last.toFixed(2)}) 超过口播总长 ${narrationSeconds.toFixed(2)}，` +
         `画面会比口播长出 ${(last - narrationSeconds).toFixed(2)} 秒（尾部无人填充会黑屏）`,
     );
+  }
+}
+
+/**
+ * 校验数据型图层的数据字段。
+ *
+ * 规划型图层只有单值字段，缺了就显示成空串，肉眼可见；
+ * 数据型图层缺的是**数组** —— 渲染层会画出空的坐标轴 / 空表格，
+ * 看起来像「图坏了」而不是「数据没给」。所以这里必须逐个查空。
+ */
+function checkChartData(o: Partial<OverlaySpec>, index: number, errors: string[]): void {
+  const at = `overlays[${index}]`;
+
+  const chartPoints = (points: unknown, where: string): boolean => {
+    if (!Array.isArray(points) || points.length === 0) {
+      errors.push(`${at}.${where} 必须是非空数组`);
+      return false;
+    }
+    points.forEach((p, j) => {
+      const point = p as Partial<ChartDataPoint> | null;
+      if (!point || typeof point.label !== "string" || !point.label.trim()) {
+        errors.push(`${at}.${where}[${j}].label 缺失`);
+      }
+      if (!point || typeof point.value !== "number" || !Number.isFinite(point.value)) {
+        errors.push(`${at}.${where}[${j}].value 必须是数字`);
+      }
+    });
+    return true;
+  };
+
+  switch (o.kind) {
+    case "bar_chart":
+    case "donut":
+      chartPoints(o.items, "items");
+      break;
+
+    case "line_chart":
+      if (!Array.isArray(o.series) || o.series.length === 0) {
+        errors.push(`${at}.series 必须是非空数组`);
+        break;
+      }
+      o.series.forEach((s, j) => {
+        if (!s || typeof s.name !== "string" || !s.name.trim()) errors.push(`${at}.series[${j}].name 缺失`);
+        if (s) chartPoints(s.points, `series[${j}].points`);
+      });
+      break;
+
+    case "kpi_grid":
+      if (!Array.isArray(o.cards) || o.cards.length === 0) {
+        errors.push(`${at}.cards 必须是非空数组`);
+        break;
+      }
+      o.cards.forEach((c, j) => {
+        if (!c || typeof c.value !== "string" || !c.value.trim()) {
+          errors.push(`${at}.cards[${j}].value 缺失`);
+        }
+      });
+      break;
+
+    case "spec_table": {
+      const cols = Array.isArray(o.columns) ? o.columns : [];
+      if (cols.length === 0) {
+        errors.push(`${at}.columns 必须是非空数组（表头）`);
+        break;
+      }
+      if (!Array.isArray(o.rows) || o.rows.length === 0) {
+        errors.push(`${at}.rows 必须是非空数组`);
+        break;
+      }
+      o.rows.forEach((row, j) => {
+        if (!Array.isArray(row) || row.length !== cols.length) {
+          errors.push(`${at}.rows[${j}] 必须恰好有 ${cols.length} 列`);
+        }
+      });
+      break;
+    }
+
+    case "bullet_list":
+      if (!Array.isArray(o.bullets) || o.bullets.length === 0) {
+        errors.push(`${at}.bullets 必须是非空数组`);
+      } else if (o.bullets.length > 6) {
+        errors.push(`${at}.bullets 最多 6 条，实际 ${o.bullets.length} 条`);
+      }
+      break;
+
+    default:
+      break;
+  }
+
+  if (o.highlightIndex !== undefined) {
+    const i = o.highlightIndex;
+    if (typeof i !== "number" || !Number.isInteger(i) || i < 0) {
+      errors.push(`${at}.highlightIndex 必须是不小于 0 的整数`);
+    }
+  }
+}
+
+/** 校验常驻页面装饰。 */
+function checkChrome(chrome: unknown, errors: string[]): void {
+  if (chrome === undefined || chrome === null) return;
+  if (typeof chrome !== "object") {
+    errors.push("chrome 必须是对象");
+    return;
+  }
+  const c = chrome as Partial<ChromeSpec>;
+  for (const key of ["headerText", "headerSubtitle", "footerText", "color"] as const) {
+    const v = c[key];
+    if (v !== undefined && typeof v !== "string") errors.push(`chrome.${key} 必须是字符串`);
+  }
+  if (c.color !== undefined && !HEX.test(c.color)) {
+    errors.push("chrome.color 必须是 #rgb / #rrggbb / #rrggbbaa 颜色值");
+  }
+  for (const key of ["topBar", "progress"] as const) {
+    if (c[key] !== undefined && typeof c[key] !== "boolean") errors.push(`chrome.${key} 必须是布尔值`);
   }
 }
 
@@ -470,6 +710,10 @@ function checkOverlays(
       if ((o.outSeconds as number) > maxSceneOut + 0.5) {
         errors.push(`overlays[${i}].outSeconds(${o.outSeconds}) 超出场景总长(${maxSceneOut})，文字会压到下一镜头上`);
       }
+    }
+    // 数据型图层的数组字段逐个查空
+    if (o && DATA_OVERLAY_KINDS.includes(o.kind as OverlayKind)) {
+      checkChartData(o, i, errors);
     }
   });
 }
@@ -559,6 +803,7 @@ export function validateStoryboard(input: unknown): ValidationResult<Storyboard>
   checkCaptions(sb.captions, errors);
   checkOutro(sb.outro, errors);
   validateLook(sb.look, errors);
+  checkChrome(sb.chrome, errors);
 
   return errors.length ? { ok: false, errors } : { ok: true, value: sb as Storyboard };
 }
@@ -611,6 +856,7 @@ export function validateClipStoryboard(input: unknown): ValidationResult<ClipSto
   checkCaptions(sb.captions, errors);
   checkOutro(sb.outro, errors);
   validateLook(sb.look, errors);
+  checkChrome(sb.chrome, errors);
 
   return errors.length ? { ok: false, errors } : { ok: true, value: sb as ClipStoryboard };
 }

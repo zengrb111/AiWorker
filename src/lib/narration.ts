@@ -313,3 +313,137 @@ export async function generateNarrationScript(
 
   return { title: finalTitle, fullText, segments: splitSentences(fullText) };
 }
+
+/* -------------------------------------------------------------------------- */
+/* 文章转视频：直读原文生成旁白                                                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 原文送给模型的字符预算。
+ *
+ * 为什么是 9000 而不是全部塞进去：
+ *   - 原文普遍 2~4 万字，全塞会让 prompt 极慢（且 reasoning 模型会烧掉大量预算做「思考」）；
+ *   - 新闻/评测类文章的**导语与结尾**才是可播的信息，中段常是参数表与冗余描述。
+ * 所以取「头 7000 + 尾 1500」，中间用显式省略号标记，让模型知道那里被截断了，
+ * 而不是误以为文章就这么短。
+ */
+const ARTICLE_TEXT_BUDGET = 9000;
+
+function clipArticleText(text: string, budget = ARTICLE_TEXT_BUDGET): string {
+  const clean = (text ?? "").replace(/\n{3,}/g, "\n\n").trim();
+  if (clean.length <= budget) return clean;
+  const head = clean.slice(0, Math.round(budget * 0.78));
+  const tail = clean.slice(-Math.round(budget * 0.22));
+  return `${head}\n\n……（中间约 ${clean.length - budget} 字已省略）……\n\n${tail}`;
+}
+
+export type ArticleNarrationInput = {
+  /** 文章正文原文（会被截断到预算内）。 */
+  articleText: string;
+  title: string;
+  summary: string;
+  keyPoints: string[];
+  /** 已核实的数据图表的人话描述，用于让旁白念到对应数字。 */
+  chartLines: string[];
+  targetSeconds: number;
+  /** 用户的额外创作要求（可空）。 */
+  requirement?: string;
+  userId?: string;
+};
+
+/**
+ * 直接读**文章原文**生成标题 + 旁白。
+ *
+ * ## 为什么必须有这个函数（而不是复用 generateNarrationScript）
+ *
+ * 原来的链路是三段接力：
+ *   文章 → analyze(LLM#1) → requirement 文本 → narration(LLM#2) → DSH 分镜(LLM#3)
+ * 旁白那一步只看得见 requirement 里的「标题 + 80 字摘要 + 若干要点」，
+ * 于是它写出来的东西本质上是**对摘要的再创作**，措辞容易飘、
+ * 细节会丢、还会把文章里明确说了的限定条件说满。这正是「对文章理解不精准」的来源。
+ *
+ * 现在把原文直接交给旁白那一步：它读的是一手材料，文章说了什么它就讲什么。
+ * 摘要与要点仍作为「结构提示」一并给出（帮它快速定位重点段落），但不再是唯一信息源。
+ *
+ * 失败返回 null，由上层退回 generateNarrationScript（行为与改造前一致，不会让出片失败）。
+ */
+export async function generateArticleNarration(
+  input: ArticleNarrationInput
+): Promise<NarrationScript | null> {
+  if (!input.userId) return null;
+
+  const safeTarget = Math.min(60, Math.max(8, Math.round(input.targetSeconds || 30)));
+  const targetChars = Math.round(safeTarget * 4.5);
+
+  const chartBlock = input.chartLines.filter(Boolean).length
+    ? [
+        "以下是文章中已核实的数据图表（这些数字都可以放心照着念，但不要复述图表标题）：",
+        ...input.chartLines.map((line, i) => `图${i + 1}：${line}`),
+      ].join("\n")
+    : "";
+
+  const prompt = [
+    "你是短视频文案专家。下面给你一篇**完整原文**，请直接读原文写出一条竖版短视频的「标题 + 口播旁白」。",
+    "",
+    `【文章标题】${input.title}`,
+    input.summary ? `【内容摘要】${input.summary}` : "",
+    input.keyPoints.length
+      ? `【文章要点】\n${input.keyPoints.map((p, i) => `${i + 1}. ${p}`).join("\n")}`
+      : "",
+    chartBlock,
+    "",
+    "【文章原文】",
+    clipArticleText(input.articleText),
+    "",
+    "写作要求：",
+    "1. **以原文为唯一依据**：只讲原文里真实出现的人名、数字、型号、价格、时间与结论。",
+    "   原文没写的数字绝对不许出现，也不许根据常识补全或推算。",
+    "2. 原文里的限定语（「约」「最高」「起」「部分」「截至」等）要跟着念出来，不要说成绝对值。",
+    "3. 挑最有信息量的 2~3 个点展开，不要面面俱到地复述全文；",
+    "   有数据的地方优先讲数据，因为画面上会同步出现图表。",
+    `4. 旁白口播总时长约 ${safeTarget} 秒（约 ${targetChars} 字）；每句 8~18 个字，句数不设固定条数。`,
+    "5. 句内用逗号断出语气停顿，句子短一点，念出来有呼吸感。",
+    "6. 像真人讲给朋友听，口语化；不要开场套话（「大家好」「欢迎收看」）、不要表情符号、",
+    "   不要括号说明、不要镜头提示、不要 markdown、不要任何解释。",
+    input.requirement?.trim() ? `\n【用户的额外要求】\n${input.requirement.trim()}` : "",
+    "",
+    '只输出 JSON：{"title":"视频标题","segments":["第一句","第二句",...]}',
+  ]
+    .filter((line) => line !== "")
+    .join("\n");
+
+  const raw = await chatOnce(prompt, input.userId);
+  if (!raw) return null;
+  const { title, segments } = parseScript(raw);
+  if (!segments.length) return null;
+
+  const punctuated = segments.map((s) => (/[。！？!?；;]$/.test(s) ? s : `${s}。`));
+  const finalTitle = (title || input.title || punctuated[0] || "文章解读").slice(0, 20);
+  let fullText = punctuated.join("");
+
+  // 字数控制与扩充：和 generateNarrationScript 同一套逻辑（目标 ±10%）。
+  // 这里不能省 —— 旁白长度直接决定 TTS 时长，也直接决定成片长度。
+  const lowChars = Math.round(targetChars * 0.9);
+  const highChars = Math.round(targetChars * 1.1);
+  if (countChars(fullText) > highChars) fullText = trimToMaxChars(fullText, highChars);
+
+  let expandRounds = 0;
+  while (countChars(fullText) < lowChars && expandRounds < 2) {
+    const expanded = await expandNarrationScript(
+      fullText,
+      `基于原文讲解「${input.title}」，保持事实与口语风格不变`,
+      targetChars,
+      input.userId
+    );
+    if (!expanded) break;
+    const sentences = splitSentences(expanded);
+    if (sentences.length < 2) break;
+    let candidate = sentences.join("");
+    if (countChars(candidate) > highChars) candidate = trimToMaxChars(candidate, highChars);
+    if (countChars(candidate) <= countChars(fullText)) break;
+    fullText = candidate;
+    expandRounds++;
+  }
+
+  return { title: finalTitle, fullText, segments: splitSentences(fullText) };
+}

@@ -29,10 +29,151 @@ const DEFAULT_TIMEOUT_MS = 180_000;
 /** Python 冷启动（含 SDK 插件加载）预算，计入总超时之外。 */
 const STARTUP_GRACE_MS = 30_000;
 
-export type DshStatus = { ok: true; python: string; model: string } | { ok: false; reason: string };
+/**
+ * 本项目核对过的 DSH SDK 版本。
+ *
+ * **这是一个「已知可用」的基线，不是「要求安装」的约束** ——
+ * 上游随时会发新版（截至 2026-10-17 上游已到 0.2.1-rc.2，而 PyPI 上的
+ * Python SDK 仍停在 0.1.5rc1），所以 requirements.txt 用的是 `>=0.1.0`。
+ *
+ * 那为什么不干脆总是跟最新版走？因为我们的受限 profile 是**按插件 id逐个
+ * disabled** 的（scripts/dsh-storyboard/profile/cordis.patch.yml）。
+ * 上游 0.2.x 改了默认 SDK profile 的身份与插件集合，id 一旦对不上，
+ * patch 会**静默不生效** —— 一个跑在服务端、能读写文件系统的 Agent
+ * 悄悄拿回 bash 权限，比出片失败严重得多，而且不会报任何错。
+ *
+ * 所以策略是：**允许版本漂移，但漂移必须被主动看见**。
+ * 版本一旦与本基线不同，就生成一条人话提醒写进方案诊断与前端提示，
+ * 让人去复核 patch，而不是等出片或出安全问题后才发现。
+ */
+const DSH_KNOWN_GOOD_SDK = "0.1.5rc1";
+
+export type DshStatus =
+  | {
+      ok: true;
+      python: string;
+      model: string;
+      /** deepseek-harness-sdk 版本；探测失败时为 undefined。 */
+      sdkVersion?: string;
+      /** deepseek-harness-runtime-bin 版本；探测失败时为 undefined。 */
+      runtimeVersion?: string;
+    }
+  | { ok: false; reason: string };
 
 /** DSH 可用性缓存：**按用户**缓存，避免每个用户重复探测，也避免 A 用户的结论污染 B 用户。 */
 const availability = new Map<string, DshStatus>();
+
+/**
+ * 读两个 DSH 包的安装版本。
+ *
+ * 刻意用 `importlib.metadata` 而不是 `deepseek_harness.__version__`：
+ * 后者在某些版本里并不存在，import 成功但取属性会抛 AttributeError，
+ * 而我们只想在排障时多一行版本号，不该因此让 DSH 探测失败。
+ */
+const VERSION_PROBE = [
+  "import importlib.metadata as m, json",
+  "def v(n):",
+  "    try:",
+  "        return m.version(n)",
+  "    except Exception:",
+  "        return None",
+  'print(json.dumps({"sdk": v("deepseek-harness-sdk"), "runtime": v("deepseek-harness-runtime-bin")}))',
+].join("\n");
+
+/**
+ * 版本探测的结果缓存。
+ *
+ * 这是**机器级**属性（同一个解释器装了什么版本），与用户无关，
+ * 所以不进上面的按用户缓存 —— 否则 N 个用户就要 spawn N 次 Python。
+ */
+let versionProbe: Promise<{ sdkVersion?: string; runtimeVersion?: string }> | null = null;
+
+async function probeVersions(python: string): Promise<{ sdkVersion?: string; runtimeVersion?: string }> {
+  if (!versionProbe) {
+    versionProbe = (async () => {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const run = promisify(execFile);
+      try {
+        const { stdout } = await run(python, ["-c", VERSION_PROBE], {
+          timeout: 20_000,
+          windowsHide: true,
+        });
+        const parsed = JSON.parse(String(stdout).trim()) as { sdk?: string | null; runtime?: string | null };
+        return {
+          ...(parsed.sdk ? { sdkVersion: parsed.sdk } : {}),
+          ...(parsed.runtime ? { runtimeVersion: parsed.runtime } : {}),
+        };
+      } catch {
+        // 探测失败**绝不影响可用性判断**：它只是给人看的版本号。
+        return {};
+      }
+    })();
+  }
+  return versionProbe;
+}
+
+/**
+ * 版本是否值得提醒。
+ *
+ * 只在两种情况下出声，版本一致时保持安静 —— 一个天天弹「SDK 版本正常」的
+ * 提示条，久了就没人看了，那才是真正的失效。
+ *
+ * 刻意做成「给版本号就算」的纯函数：判断逻辑不藏在探测里，
+ * 才能被单独验证（否则永远走不到分支，等于没写）。
+ */
+function describeVersion(versions: {
+  sdkVersion?: string;
+  runtimeVersion?: string;
+}): string | undefined {
+  const { sdkVersion, runtimeVersion } = versions;
+  const notes: string[] = [];
+
+  // ① SDK 与运行时二进制不同版本 —— 这正是之前 DSH Web 前端报
+  //    「Failed to load plugins」的根因（host 代码与自带前端包版本错配）。
+  //    放到出片链路上同样致命：插件清单对不上，受限 profile 直接失效。
+  if (sdkVersion && runtimeVersion && sdkVersion !== runtimeVersion) {
+    notes.push(
+      `DeepSeek SDK（${sdkVersion}）与运行时二进制（${runtimeVersion}）版本不一致，插件清单可能对不上，` +
+        `受限 profile 有可能静默失效。`,
+    );
+  }
+
+  // ② 与本项目核对过的基线不同
+  if (sdkVersion && sdkVersion !== DSH_KNOWN_GOOD_SDK) {
+    notes.push(
+      `DeepSeek 分镜 SDK 为 ${sdkVersion}，与本项目核对过的 ${DSH_KNOWN_GOOD_SDK} 不同；` +
+        `上游改动过默认 profile 的插件集合，请复核 scripts/dsh-storyboard/profile/cordis.patch.yml 是否仍然对得上。`,
+    );
+  }
+
+  return notes.length ? notes.join(" ") : undefined;
+}
+
+/**
+ * 把版本自检结果整理成可直接摊进 diagnostics 的两个字段。
+ *
+ * 单独抽出来是因为出片链路有**多条**入口会填诊断（generate / montage / remake，
+ * 加上各自的 resume），复制粘贴字段名迟早会漏一处 —— 漏一处就意味着那条链路
+ * 永远不会提示版本漂移，正是这个函数要防的事。
+ *
+ * DSH 不可用时返回空对象：那时该看的是 dshReason，不是版本。
+ */
+export function describeDshVersion(
+  status: DshStatus
+): { dshVersion?: string; dshVersionNote?: string } {
+  if (!status.ok) return {};
+  const versions = { sdkVersion: status.sdkVersion, runtimeVersion: status.runtimeVersion };
+  const parts = [
+    status.sdkVersion ? `SDK ${status.sdkVersion}` : null,
+    status.runtimeVersion ? `运行时 ${status.runtimeVersion}` : null,
+  ].filter(Boolean);
+  const note = describeVersion(versions);
+  return {
+    ...(parts.length ? { dshVersion: parts.join(" · ") } : {}),
+    ...(note ? { dshVersionNote: note } : {}),
+  };
+}
 
 /**
  * DSH_HOME 目录。允许在 .env.local 里写相对路径（如 `.dsh-home`），
@@ -100,7 +241,15 @@ export async function getDshStatus(userId?: string): Promise<DshStatus> {
 
   try {
     const python = await resolveDshPython();
-    const status: DshStatus = { ok: true, python, model: credential.model || readEnv("DSH_MODEL") || "(SDK 默认)" };
+    // 版本自检：读一下装了什么版本，与已知可用基线比对。
+// 探测失败不影响可用性 —— 它只是给人看的一行字。
+    const versions = await probeVersions(python);
+    const status: DshStatus = {
+      ok: true,
+      python,
+      model: credential.model || readEnv("DSH_MODEL") || "(SDK 默认)",
+      ...versions,
+    };
     availability.set(cacheKey, status);
     return status;
   } catch (err) {
@@ -113,6 +262,7 @@ export async function getDshStatus(userId?: string): Promise<DshStatus> {
 /** 复位可用性缓存（改了配置后可调用，主要给测试用）。 */
 export function resetDshStatusCache(): void {
   availability.clear();
+  versionProbe = null;
 }
 
 /**
@@ -317,6 +467,7 @@ export async function selfCheck(): Promise<{ ok: boolean; detail: string }> {
     "utf8",
   );
 
+  const version = describeDshVersion(status);
   return {
     ok: true,
     detail: [
@@ -324,6 +475,10 @@ export async function selfCheck(): Promise<{ ok: boolean; detail: string }> {
       `DSH_HOME：${dshHome}`,
       `profile：${join(dshHome, "profiles", "storyboard", "cordis.patch.yml")}`,
       `模型：${status.model}`,
+      // 版本自检输出：一致时说「与基线一致」，不一致时把提醒原文带出来。
+      `SDK：${status.sdkVersion ?? "未读到"}${status.runtimeVersion ? `（运行时 ${status.runtimeVersion}）` : ""}`,
+      `已知可用版本：${DSH_KNOWN_GOOD_SDK}`,
+      version.dshVersionNote ?? "版本自检：与已知可用版本一致。",
     ].join("\n"),
   };
 }

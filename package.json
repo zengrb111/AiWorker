@@ -17,6 +17,8 @@
     "remotion:compositions": "remotion compositions remotion/src/index.tsx",
     "remotion:studio": "remotion studio remotion/src/index.tsx",
     "remotion:browser": "remotion browser ensure"
+    ,"dsh:web": "npm --prefix tools/dsh-web run web"
+    ,"dsh:web:install": "npm --prefix tools/dsh-web install"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.11",

@@ -20,7 +20,7 @@ import { mkdirSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { readStringEnv } from "../env";
 import { probeDuration } from "../ffmpeg";
-import { getDshStatus, runDshText } from "../dsh";
+import { describeDshVersion, getDshStatus, runDshText } from "../dsh";
 import { generateNarrationScript } from "../narration";
 import {
   ModelConfigError,
@@ -52,6 +52,7 @@ import {
   type VerticalCompositionId,
 } from "./render";
 import { checkVideoFrames } from "./frame-check";
+import type { ArticlePlanExtension } from "../article/types";
 import {
   applyLook,
   normalizeBeats,
@@ -60,6 +61,7 @@ import {
   synthesizeBeats,
   toPlanSummary,
   type CaptionStyleKey,
+  type ChromeSpec,
   type ClipStoryboard,
   type LookConfig,
   type MaterialInsight,
@@ -68,6 +70,12 @@ import {
   type StoryboardPlanResult,
   type TimelineBeat,
 } from "./storyboard";
+import {
+  injectChartOverlays,
+  mergeChartOverlays,
+  summarizeChartKinds,
+  type InjectableChart,
+} from "./chart-overlays";
 
 /** 三条链路共用一套编排，靠 mode 区分素材形态与合成模板。 */
 export type PipelineMode = "generate" | "montage" | "remake";
@@ -202,8 +210,23 @@ export type VideoPlanDraft = {
     visionTotal: number;
     dshAvailable: boolean;
     dshReason?: string;
+    /**
+     * DSH SDK / 运行时二进制版本，形如「SDK 0.1.5rc1 · 运行时 0.1.5rc1」。
+     * 只在读得到时出现（读不到不影响出片）。
+     */
+    dshVersion?: string;
+    /**
+     * 版本自检的提醒：装到的版本与本项目核对过的基线不一致时才有内容，
+     * 提醒去复核受限 profile 的插件 id 是否还对得上。为空 = 版本一致。
+     */
+    dshVersionNote?: string;
     storyboardFallback: boolean;
     storyboardAttempts: number;
+    /**
+     * 用了兜底分镜的原因（DSH 不可用时看 dshReason）。
+     * 形如「分镜 JSON 不符合要求：scenes[2].images 最多 3 张」，供方案面板如实展示。
+     */
+    storyboardReason?: string;
     sceneCount: number;
     timelineBeats: number;
     /** 配音实际使用的引擎与是否发生降级。 */
@@ -214,6 +237,13 @@ export type VideoPlanDraft = {
   };
   /** 供前端直接渲染的方案摘要。 */
   summary: PlanSummary;
+  /**
+   * 「文章转视频」的来源与图表清单。
+   *
+   * 可选字段：generate / montage / remake 三条既有链路不会写它，
+   * JSON.stringify 落库与 JSON.parse resume 都照常工作。
+   */
+  article?: ArticlePlanExtension;
 };
 
 /** 传给 renderOverride 的上下文。 */
@@ -238,6 +268,8 @@ export type PipelineDiagnostics = {
   /** 分镜是否走了确定性兜底。 */
   storyboardFallback: boolean;
   storyboardAttempts: number;
+  /** 走兜底的原因（DSH 不可用看 dshReason，这里是 DSH 可用但分镜没通过校验）。 */
+  storyboardReason?: string;
   /** 画面段数（场景或片段），用于核对画面是否切得太碎。 */
   sceneCount: number;
   /** 时间轴锚点数（= 旁白句数）。 */
@@ -252,6 +284,9 @@ export type PipelineDiagnostics = {
   autoThemeReason?: string;
   dshAvailable: boolean;
   dshReason?: string;
+  /** 与 VideoPlanDiagnostics 同义，便于出片任务结果里也能看出 DSH 版本。 */
+  dshVersion?: string;
+  dshVersionNote?: string;
   /** 后期每一步的成败，便于事后定位是哪一环掉的。 */
   postSteps: { step: string; ok: boolean; detail?: string }[];
   elapsedMs: number;
@@ -297,6 +332,17 @@ export function parseTargetSeconds(requirement: string, fallback = 30): number {
   const parsed = match ? Number.parseInt(match[1], 10) : Number.NaN;
   const seconds = Number.isFinite(parsed) && parsed >= 8 ? parsed : fallback;
   return Math.min(60, seconds);
+}
+
+/**
+ * 把 planStoryboard 内部的错误明细压成一句可展示的中文。
+ *
+ * 只取前 3 条：校验器一次能报十几条，全塞进面板反而看不清主干问题。
+ */
+function formatStoryboardReason(errors: string[] | undefined): string | undefined {
+  if (!errors?.length) return undefined;
+  const head = errors.slice(0, 3).join("；");
+  return errors.length > 3 ? `${head}（共 ${errors.length} 条）` : head;
 }
 
 /**
@@ -488,6 +534,9 @@ export async function runVideoPlanStage(
     input.captions?.length ? input.captions : audio?.captions,
     totalSeconds,
   );
+  // prompt 用：这次会注入哪几类图表。必须提前算 —— 它要写进 prompt，
+  // 而注入本身发生在 DSH 返回之后（要拿 beats 与场景出点才能排落点）。
+  const chartHint = summarizeChartKinds(input.chartSpecs);
   const plan = await planStoryboardFor(
     input,
     materials,
@@ -497,14 +546,44 @@ export async function runVideoPlanStage(
     effectiveTheme,
     dsh.ok,
     notify,
+    chartHint,
   );
   reportPlan(plan, dsh.ok, notify);
 
-  const board = applyLook(plan.storyboard, {
+  const looked = applyLook(plan.storyboard, {
     captionStyle: input.look?.captionStyle,
     ...(input.look?.effects ? { effects: input.look.effects } : {}),
     ...(input.look?.motion ? { motion: input.look.motion } : {}),
   }) as Storyboard;
+
+  /*
+   * 图表注入：把文章分析产出的（已溯源的）结构化数据翻成 Remotion 原生图表图层。
+   *
+   * 放在 applyLook 之后而不是之前，是因为「撤掉打架的 DSH 图层」是一次结构性改写，
+   * 用户调整（Look）不该被它反向覆盖；而它产出的图层不受 Look 的 motion 影响，
+   * 所以顺序上无副作用。
+   *
+   * 放在 DSH 之后而不是之前：DSH 看不到图表数据，让它规划会瞎猜；
+   * 而图表的落点需要旁白时间轴（beats），那要等配音跑完才有 —— 此时两者都已就绪。
+   */
+  const sceneOutPoints = (looked.scenes ?? []).map((s) => s.outSeconds);
+  const injected = injectChartOverlays({
+    charts: input.chartSpecs ?? [],
+    beats,
+    sceneOutPoints,
+  });
+  let board = looked;
+  if (injected.overlays.length) {
+    board = {
+      ...looked,
+      overlays: mergeChartOverlays(looked.overlays, injected),
+    };
+    record.push(`注入图表 ${injected.overlays.length} 张（${injected.kindHint}）`);
+    notify(`已把 ${injected.overlays.length} 张数据图表做成动态图层（${injected.kindHint}）`);
+  }
+  if (input.storyChrome) {
+    board = { ...board, chrome: input.storyChrome };
+  }
 
   const sceneCount = "scenes" in board ? board.scenes.length : 0;
   const draft: VideoPlanDraft = {
@@ -529,8 +608,13 @@ export async function runVideoPlanStage(
       visionTotal,
       dshAvailable: dsh.ok,
       dshReason: dsh.ok ? undefined : dsh.reason,
+      ...describeDshVersion(dsh),
       storyboardFallback: plan.fallback,
       storyboardAttempts: plan.diagnostics.attempts,
+      // DSH 能调通、但返回的分镜没通过 JSON 解析或 schema 校验时，原因只存在于
+      // planStoryboard 的内部诊断里。不透出来的话，方案面板只能显示一句
+      // 「分镜不可用」，用户无从判断是模型没配好还是这一次的输出不合格。
+      storyboardReason: plan.fallback ? formatStoryboardReason(plan.diagnostics.firstAttemptError) : undefined,
       sceneCount,
       timelineBeats: beats.length,
       ttsEngine,
@@ -573,6 +657,20 @@ export type PlanStageInput = {
    * 其余仅作背景参考；不带标记时第一条视为主新闻。
    */
   newsItems?: Array<{ title?: string; snippet?: string; isPrimary?: boolean }>;
+  /**
+   * 文章分析产出的**结构化图表数据**（已过溯源闸门）。
+   *
+   * 给了就会：① 在分镜 prompt 里声明「图表由系统注入」；
+   * ② 在 DSH 出稿后按旁白时间轴把图表排进 overlays，并撤掉与之打架的文字图层。
+   *
+   * 不给（纯图片转视频链路）则两件事都不发生，行为与改造前完全一致。
+   */
+  chartSpecs?: InjectableChart[];
+  /**
+   * 常驻页面装饰（顶部彩条 / 页眉 / 页脚 / 进度线）。
+   * 由服务端用文章标题与来源生成，不交给模型。
+   */
+  storyChrome?: ChromeSpec;
   /** 配音工作目录；不给则用「<prefix>-work/<token>」。渲染阶段必须沿用同一个。 */
   workDir?: string;
   onProgress?: (text: string) => void;
@@ -663,12 +761,15 @@ export async function runVideoPipeline(input: PipelineInput): Promise<PipelineRe
       diagnostics.narrationSeconds = draft.audioSeconds;
       diagnostics.storyboardFallback = draft.diagnostics.storyboardFallback;
       diagnostics.storyboardAttempts = draft.diagnostics.storyboardAttempts;
+      diagnostics.storyboardReason = draft.diagnostics.storyboardReason;
       diagnostics.sceneCount = draft.diagnostics.sceneCount;
       diagnostics.timelineBeats = draft.beatCount;
       diagnostics.visionRecognized = draft.diagnostics.visionRecognized;
       diagnostics.visionTotal = draft.diagnostics.visionTotal;
       diagnostics.dshAvailable = draft.diagnostics.dshAvailable;
       diagnostics.dshReason = draft.diagnostics.dshReason;
+      diagnostics.dshVersion = draft.diagnostics.dshVersion;
+      diagnostics.dshVersionNote = draft.diagnostics.dshVersionNote;
       record("沿用已确认方案", true, `${draft.diagnostics.sceneCount} 个镜头 / 风格 ${draft.theme}`);
       notify(`已沿用你确认的方案（${draft.diagnostics.sceneCount} 个镜头），开始渲染…`);
     } else {
@@ -722,12 +823,15 @@ export async function runVideoPipeline(input: PipelineInput): Promise<PipelineRe
       diagnostics.narrationSeconds = draft.audioSeconds;
       diagnostics.storyboardFallback = draft.diagnostics.storyboardFallback;
       diagnostics.storyboardAttempts = draft.diagnostics.storyboardAttempts;
+      diagnostics.storyboardReason = draft.diagnostics.storyboardReason;
       diagnostics.sceneCount = draft.diagnostics.sceneCount;
       diagnostics.timelineBeats = draft.beatCount;
       diagnostics.visionRecognized = draft.diagnostics.visionRecognized;
       diagnostics.visionTotal = draft.diagnostics.visionTotal;
       diagnostics.dshAvailable = draft.diagnostics.dshAvailable;
       diagnostics.dshReason = draft.diagnostics.dshReason;
+      diagnostics.dshVersion = draft.diagnostics.dshVersion;
+      diagnostics.dshVersionNote = draft.diagnostics.dshVersionNote;
     }
 
     if (materials.length === 0) {
@@ -965,6 +1069,8 @@ async function planStoryboardFor(
   effectiveTheme: string | undefined,
   dshAvailable: boolean,
   notify: (text: string) => void,
+  /** 本次将被系统注入的图表类型提示（中文名）。空串 = 不注入，prompt 里不提。 */
+  chartKindHint?: string,
 ): Promise<StoryboardPlanResult> {
   const run = async (prompt: string): Promise<string | null> => {
     if (!dshAvailable) return null;
@@ -982,6 +1088,7 @@ async function planStoryboardFor(
         durationSeconds: totalSeconds,
         outroText: input.outroText,
         theme: effectiveTheme,
+        chartKindHint,
       },
       run,
     );

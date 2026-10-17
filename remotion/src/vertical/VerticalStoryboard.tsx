@@ -13,6 +13,7 @@ import { Vignette } from "../components/Vignette";
 import { AnimatedBackground, BackdropImage } from "../components/AnimatedBackground";
 import { OverlayLayer } from "../components/OverlayLayer";
 import { ThemeEffects } from "../components/ThemeEffects";
+import { StoryChrome } from "../components/StoryChrome";
 
 export type VerticalStoryboardProps = {
   storyboard: Storyboard;
@@ -108,6 +109,20 @@ export const VerticalStoryboard: React.FC<VerticalStoryboardProps> = ({ storyboa
 
       {/* 文字图层：压在画面之上，时间轴与场景解耦 */}
       <OverlayLayer overlays={layout.overlays} themeKey={storyboard.theme} />
+
+      {/*
+        常驻页面装饰：顶部彩条 / 页眉 / 页脚 / 进度线。
+        放在 OverlayLayer 之后 —— 它是「全片统一的外壳」，
+        必须在所有卡片与图表之上，否则会被半屏高的图表盖掉半条。
+      */}
+      <StoryChrome
+        chrome={storyboard.chrome}
+        accent={theme.primaryColor}
+        textColor={theme.textColor}
+        mutedColor={theme.mutedTextColor}
+        durationInFrames={layout.totalFrames}
+        captionMarginBottom={CAPTION_MARGIN_BOTTOM}
+      />
 
       {/* 主题视觉层：故障/酸性/拼贴/网格等质感。空 effects 时不渲染任何东西。 */}
       <ThemeEffects

@@ -783,6 +783,24 @@ export async function POST(request: Request, context: { params: { id: string } }
     });
   }
 
+  if (content === "文章转视频") {
+    const userMessage = await prisma.message.create({ data: { conversationId: conversation.id, role: "USER", content } });
+    const assistantMessage = await prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        role: "ASSISTANT",
+        content: "请在下方选择文章来源：粘贴文章链接、上传 docx / pdf / txt / md 文档，或直接粘贴正文。系统会先读懂文章、抽取其中的数据并逐条核对出处，再把数据画成图表，规划好解说脚本后请你确认，最后生成带解说与背景乐的竖屏短视频。"
+      }
+    });
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(sseEncode({ type: "final", message: { id: assistantMessage.id, role: "ASSISTANT", content: assistantMessage.content, createdAt: assistantMessage.createdAt.toISOString() }, userMessage }));
+        controller.close();
+      }
+    });
+    return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" } });
+  }
+
   if (content === "一键复刻爆款视频") {
     const userMessage = await prisma.message.create({ data: { conversationId: conversation.id, role: "USER", content } });
     const assistantMessage = await prisma.message.create({
