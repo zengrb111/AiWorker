@@ -1,0 +1,25 @@
+{
+  "//": "CLI 脚本专用类型配置。项目根 tsconfig 的 include 只覆盖 *.ts/*.tsx，不含 *.mts，因此 scripts/ 下的 CLI 需要这份独立配置才能被类型检查。用法：npx tsc -p scripts/tsconfig.cli.json",
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": [
+    "aiworker-video.mts",
+    "../src/lib/video/**/*.ts",
+    "../src/lib/model-credentials.ts",
+    "../src/lib/http.ts",
+    "../src/lib/env.ts",
+    "../src/lib/ffmpeg.ts",
+    "../src/lib/dsh.ts",
+    "../src/lib/narration.ts",
+    "../src/lib/tts.ts",
+    "../src/lib/vision.ts",
+    "../src/lib/ocr.ts",
+    "../src/lib/llm-client.ts"
+  ]
+}

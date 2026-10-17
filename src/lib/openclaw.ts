@@ -7,6 +7,35 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import QRCode from "qrcode";
 
+/**
+ * 调用网关跑一轮 agent 对话的请求体。
+ *
+ * sessionKey 是**用户隔离的唯一凭据**：OpenClaw 侧按它区分不同用户的
+ * 会话上下文与记忆，传错会把两个用户的消息混进同一个会话。
+ */
+export type OpenClawTaskRequest = {
+  message: string;
+  context?: string;
+  prompt?: string;
+  conversationId?: string;
+  userId?: string;
+  /**
+   * 指定会话（可选）。后台任务（如短视频渲染）应传入独立会话，
+   * 避免与用户实时对话抢同一个 agent:main:user-<id> 会话而排到队尾超时。
+   * 不传则按 userId 派生默认会话，行为与改造前一致。
+   */
+  sessionKey?: string;
+};
+
+export type OpenClawTaskResult = {
+  taskId?: string;
+  content: string;
+  title?: string;
+  coverImageUrl?: string;
+  inlineImages?: string[];
+  raw: unknown;
+};
+
 export type OpenClawQr = {
   ticketId: string;
   qrCodeUrl?: string;
@@ -938,6 +967,194 @@ async function requestGateway<T>(
 }
 
 // ---------------------------------------------------------------------------
+// Agent 对话（chat.startup / chat.send + 事件流）
+//
+// 协议（2026-10-17 从 git 历史恢复，与改造前逐字一致）：
+//   1. chat.startup { sessionKey }          → 初始化会话
+//   2. chat.send { sessionKey, message }    → 立即返回 runId
+//   3. 监听 `chat` 事件直到 state === "final" 且 runId 匹配，
+//      正文取 payload.message.content[].text
+// delta 事件持续累加：超时或 final 为空时也能退回已收到的部分内容，
+// 不会让用户白等一轮。
+// ---------------------------------------------------------------------------
+
+type ChatContentItem = { type: string; text: string };
+
+/**
+ * 按 userId 派生隔离会话 key。
+ *
+ * **这是多用户隔离的核心**：不传 userId 时会退到 `agent:main:main`，
+ * 那是所有用户共用的会话 —— 两个用户的消息会混进同一份上下文与记忆。
+ * 因此调用方必须传 userId（messages 路由已保证）。
+ */
+function deriveUserSessionKey(userId?: string | null): string {
+  if (userId && typeof userId === "string" && userId.trim()) {
+    const safe = userId.trim().replace(/[^a-zA-Z0-9_-]/g, "-");
+    return `agent:main:user-${safe}`;
+  }
+  return process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
+}
+
+/**
+ * 带重试的网关请求。
+ *
+ * 覆盖 4-5 分钟的慢启动窗口：端口已监听但 sidecar 未就绪时，
+ * chat.startup 会以「调用超时」形式失败，必须重试到网关真正 ready。
+ * 退避序列刻意拉长（15/30/45/60/60 秒）—— 网关重启期间端口会反复
+ * ECONNREFUSED，短间隔重试只会浪费时间。
+ */
+async function gatewayRequestWithRetry<T>(
+  conn: { request: <R>(method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<R> },
+  method: string,
+  params: Record<string, unknown>,
+  timeoutMs: number
+): Promise<T> {
+  const delays = [0, 15000, 30000, 45000, 60000, 60000];
+  let lastErr: unknown;
+  for (let i = 0; i < delays.length; i++) {
+    if (delays[i] > 0) await new Promise((r) => setTimeout(r, delays[i]));
+    try {
+      return await conn.request<T>(method, params, timeoutMs);
+    } catch (e) {
+      lastErr = e;
+      if (!isGatewayTransientError(e)) throw e;
+    }
+  }
+  throw new Error(friendlyGatewayError(lastErr, { wasRetried: true }));
+}
+
+/**
+ * 通过网关跑一轮 agent 对话。
+ *
+ * 连接策略：`connectGateway()` 失败且属瞬时错误（网关启动中/未运行）时，
+ * 按 300 秒预算每 10 秒重试一次。实测网关重启要 4-5 分钟才 ready
+ * （端口在 database-readiness 后还要等微信 sidecar 同步），固定试几次必然失败。
+ */
+async function requestGatewayChat(
+  message: string,
+  timeoutMs?: number,
+  onDelta?: (deltaText: string) => void,
+  sessionKeyOverride?: string
+): Promise<{ runId: string; content: string; raw: unknown }> {
+  const effectiveTimeout =
+    timeoutMs ?? Number(process.env.OPENCLAW_CHAT_TIMEOUT_MS ?? 120000);
+
+  let conn: Awaited<ReturnType<typeof connectGateway>> | null = null;
+  const connectBudgetMs = Number(process.env.OPENCLAW_CONNECT_BUDGET_MS ?? 300000);
+  const retryIntervalMs = 10000;
+  const connectStart = Date.now();
+  let connectErr: unknown;
+  for (;;) {
+    try {
+      conn = await connectGateway();
+      break;
+    } catch (e) {
+      connectErr = e;
+      if (!isGatewayTransientError(e)) break;
+      if (Date.now() - connectStart + retryIntervalMs >= connectBudgetMs) break;
+      await new Promise((r) => setTimeout(r, retryIntervalMs));
+    }
+  }
+  if (!conn) throw new Error(friendlyGatewayError(connectErr, { wasRetried: true }));
+
+  try {
+    const sessionKey = sessionKeyOverride ?? deriveUserSessionKey();
+
+    // Initialise the chat session.
+    await gatewayRequestWithRetry(conn, "chat.startup", { sessionKey }, 15000);
+
+    // Send the user message — the response returns immediately with a runId.
+    const sendResult = await gatewayRequestWithRetry<{ runId: string; status: string }>(
+      conn,
+      "chat.send",
+      {
+        sessionKey,
+        message,
+        deliver: false,
+        idempotencyKey: `cx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      },
+      30000
+    );
+
+    const runId = sendResult.runId;
+    if (!runId) {
+      throw new Error("OpenClaw chat.send 未返回 runId。");
+    }
+
+    // Wait for the assistant's final reply via the event stream.
+    // Track accumulated deltas so timeouts / empty finals can still
+    // return the partial streamed content instead of losing it.
+    let deltaAccum = "";
+    const content = await new Promise<string>((resolve, reject) => {
+      const fail = (message: string, code?: string) => {
+        const err = new Error(message) as Error & { partialContent?: string; code?: string };
+        if (deltaAccum.trim()) err.partialContent = deltaAccum;
+        if (code) err.code = code;
+        reject(err);
+      };
+      const timer = setTimeout(() => {
+        // 注意：本地等待超时**不会**中断网关侧的 run，任务仍在后台继续执行。
+        // 最常见的成因是上一条消息的任务还没跑完（长任务 / 工具调用链），
+        // 本条消息在网关侧排队，导致迟迟拿不到第一个 delta。
+        fail(
+          `等待 AI 回复超时（已等待 ${Math.round(effectiveTimeout / 1000)} 秒）。` +
+            "任务可能仍在后台继续执行 —— 若上一条任务尚未结束，本条消息会排队等待，" +
+            "可稍后在微信通道或本会话中查看结果。",
+          "TIMEOUT"
+        );
+      }, effectiveTimeout);
+
+      conn.onEvent((event, payload) => {
+        if (event !== "chat") return;
+        const p = payload as {
+          state?: string;
+          runId?: string;
+          deltaText?: string;
+          errorMessage?: string;
+          errorKind?: string;
+          message?: { content?: ChatContentItem[] };
+        };
+        if (p.state === "delta" && p.runId === runId && p.deltaText) {
+          deltaAccum += p.deltaText;
+          if (onDelta) onDelta(p.deltaText);
+          return;
+        }
+        // 网关侧的 run 失败（模型凭据失效、上游 5xx、工具链断裂等）。
+        // 必须立刻 reject —— 此前忽略这个状态，只能干等 120 秒本地超时，
+        // 用户看到的是「发消息没反应」，而网关其实 2 秒前就报过错。
+        // 协议见 openclaw dist/chat-send-handler：state:"error" 带
+        // errorMessage + errorKind（completion.kind === "failed" 时广播）。
+        if (p.state === "error" && p.runId === runId) {
+          clearTimeout(timer);
+          fail(p.errorMessage?.trim() || "OpenClaw 执行失败（未给出原因）。", "GATEWAY_ERROR");
+          return;
+        }
+        // 用户/系统主动中止（如 /stop）。已有部分输出就交付，不当作错误。
+        if (p.state === "aborted" && p.runId === runId) {
+          clearTimeout(timer);
+          resolve(deltaAccum);
+          return;
+        }
+        if (p.state === "final" && p.runId === runId) {
+          clearTimeout(timer);
+          const text = (p.message?.content || [])
+            .filter((c) => c.type === "text")
+            .map((c) => c.text)
+            .join("");
+          // Final event arrived but carried no text (agent aborted the run,
+          // tool-only turn, etc.) — fall back to what was streamed.
+          resolve(text.trim() ? text : deltaAccum);
+        }
+      });
+    });
+
+    return { runId, content, raw: sendResult };
+  } finally {
+    conn.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Gateway 故障诊断层
 //
 // 存在的理由：此前 `ws.on("error")` 只取 error.message，而 Node 的 ws 在部分
@@ -962,6 +1179,12 @@ export type GatewayFailureKind =
   | "challenge_timeout"
   /** 网关明确拒绝：签名不匹配、token 失效、权限不足。 */
   | "auth_failed"
+  /**
+   * 网关连上了、也鉴权了，但它调模型时凭据失效（HTTP 401 / Couldn't sign in）。
+   * 与 auth_failed 的区别：那是**连不上网关**，这是**网关自己调不动 AI**。
+   * 修复动作也完全不同（前者查设备凭据，后者重新登录模型）。
+   */
+  | "model_auth_failed"
   /** 调用超时。 */
   | "timeout"
   | "unknown";
@@ -1057,6 +1280,29 @@ export function classifyGatewayError(err: unknown): GatewayDiagnosis {
   const msg = err instanceof Error ? err.message : String(err);
   const endpoint = gatewayEndpointLabel();
   const detail = code ? `[${code}] ${msg || "(无错误描述)"}` : msg || "(无错误描述)";
+
+  // 0) 网关侧业务错误（run 失败）：网关 2 秒内就通过 state:"error" 回报了，
+  //    与「连不上网关」是两回事，必须放在最前面优先判定。
+  //    最常见的成因是模型凭据失效（Couldn't sign in to the AI service）。
+  if (code === "GATEWAY_ERROR") {
+    if (/sign in|unauthor|401|auth|credential|api key/i.test(msg)) {
+      return {
+        kind: "model_auth_failed",
+        userMessage: "OpenClaw 的模型凭据已失效，无法调用 AI 服务。",
+        detail,
+        transient: false,
+        hint:
+          "打开 OpenClaw 控制台（http://127.0.0.1:18789）→ Models 重新登录；" +
+          "或在平台「系统配置 → 默认模型分配」里重新保存主对话模型，保存时会自动同步到 OpenClaw。",
+      };
+    }
+    return {
+      kind: "unknown",
+      userMessage: msg || "OpenClaw 执行失败（未给出原因）。",
+      detail,
+      transient: false,
+    };
+  }
 
   // 1) 端口层面
   if (code === "ECONNREFUSED" || /ECONNREFUSED|socket hang up|ECONNRESET|ECONNABORTED/i.test(msg)) {
@@ -1260,6 +1506,9 @@ export function friendlyGatewayError(
     case "auth_failed":
       return `AI 网关拒绝了设备鉴权。${diagnosis.hint ?? ""}`.trim();
 
+    case "model_auth_failed":
+      return `${diagnosis.userMessage}${diagnosis.hint ? ` ${diagnosis.hint}` : ""}`.trim();
+
     case "timeout":
       return "调用 AI 网关超时，请稍后重试。";
 
@@ -1440,6 +1689,62 @@ export const openClawClient = {
    * 本平台多用户共用同一网关 cron 存储，调用方必须按 sessionKey
    * （agent:main:user-<id>）或名字前缀自行过滤后再使用，否则会把别人的任务泄给当前用户。
    */
+  /**
+   * 跑一轮 agent 对话（非流式）。
+   *
+   * 空返回自动重试一次：agent 冷启动或偶发空返回时，避免整轮对话白跑。
+   */
+  async sendTask(input: string | OpenClawTaskRequest): Promise<OpenClawTaskResult> {
+    const request: OpenClawTaskRequest = typeof input === "string" ? { message: input } : input;
+    const message = request.prompt ?? request.message;
+
+    // 显式指定的 sessionKey 优先（后台任务用独立会话，避免与实时对话抢同一会话）；
+    // 否则按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
+    const sessionKey = request.sessionKey || deriveUserSessionKey(request.userId);
+    let result = await requestGatewayChat(message, undefined, undefined, sessionKey);
+    if (!result.content?.trim()) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      result = await requestGatewayChat(message, undefined, undefined, sessionKey);
+    }
+
+    if (!result.content?.trim()) {
+      throw new Error("OpenClaw 未返回任务内容（已自动重试一次），请稍后重试。");
+    }
+
+    return {
+      taskId: result.runId,
+      content: result.content,
+      raw: result.raw
+    };
+  },
+
+  /** 流式版本：每个 delta 回调给前端做打字效果。 */
+  async sendTaskStream(
+    input: string | OpenClawTaskRequest,
+    onDelta: (deltaText: string) => void,
+    timeoutMs?: number
+  ): Promise<OpenClawTaskResult> {
+    const request: OpenClawTaskRequest = typeof input === "string" ? { message: input } : input;
+    const message = request.prompt ?? request.message;
+
+    const sessionKey = request.sessionKey || deriveUserSessionKey(request.userId);
+    let result = await requestGatewayChat(message, timeoutMs, onDelta, sessionKey);
+    if (!result.content?.trim()) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      result = await requestGatewayChat(message, timeoutMs, onDelta, sessionKey);
+    }
+
+    if (!result.content?.trim()) {
+      throw new Error("OpenClaw 未返回任务内容（已自动重试一次），请稍后重试。");
+    }
+
+    return {
+      taskId: result.runId,
+      content: result.content,
+      raw: result.raw
+    };
+  },
+
   async listCronJobs(): Promise<CronJobSummary[]> {
     const result = await requestGateway<{
       jobs?: Array<{

@@ -64,6 +64,20 @@ export function parseLookFromForm(form: FormData): LookConfig | undefined {
 }
 
 /**
+ * 从命令行 flag 解析外观覆盖（CLI 专用）。
+ *
+ * 与 `parseLookFromForm` 共用同一套校验规则，只是数据来源从 FormData 变成
+ * 单个 flag 值。抽成这个形式是为了让 CLI（scripts/aiworker-video.mts）不必
+ * 每次构造 FormData，同时保证「面板选的」与「OpenClaw 传的」行为一致。
+ *
+ * 调用方每次只设一个字段，多次调用时用展开合并：
+ *   args.look = { ...(args.look ?? {}), ...parseLookFromFlags(form) };
+ */
+export function parseLookFromFlags(form: FormData): LookConfig | undefined {
+  return parseLookFromForm(form);
+}
+
+/**
  * 解析请求里的新闻事实（标题 + 摘要）。
  *
  * 这段 JSON 是从「热点一键生成视频」的 prepare 阶段原样带过来的，

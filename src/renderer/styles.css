@@ -1809,6 +1809,12 @@ textarea:focus {
   border-top: 1px solid var(--line-soft);
   background: var(--panel);
   box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.05);
+  /* 上限：面板展开（如视频方案确认）时输入区可能被撑到很高，
+     超过视口就会把按钮和消息列表一起挤出屏幕（表现为"要缩放网页才看得到"）。
+     留出 120px 给消息列表，超出部分在输入区内部滚动。 */
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* Quick action bar (above textarea) */
@@ -1867,7 +1873,20 @@ textarea:focus {
 .viral-remake-panel input[type="url"] { width: 100%; height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; }
 .viral-remake-file { display: flex; justify-content: space-between; gap: 12px; align-items: center; color: var(--ink); font-size: 12px; }
 .viral-remake-file input { max-width: 56%; font-size: 12px; }
-.viral-remake-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.viral-remake-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  /* 关键：按钮必须始终可见。方案面板内容很长（新闻清单 + 镜头列表 + 旁白全文），
+     不吸底的话「确认并生成」会被推到面板外，用户只能缩放网页才能点到。 */
+  position: sticky;
+  bottom: -2px;
+  z-index: 2;
+  margin-top: 2px;
+  padding: 8px 0 2px;
+  background: linear-gradient(180deg, rgba(246, 249, 255, 0.82), #f6f9ff 42%);
+  backdrop-filter: blur(2px);
+}
 .viral-remake-actions button { min-height: 30px; padding: 0 12px; border-radius: 7px; font-size: 12px; }
 .viral-remake-actions button:last-child { background: var(--accent); color: #fff; }
 
@@ -2018,6 +2037,56 @@ textarea:focus {
   font-size: 11px;
   font-weight: 800;
 }
+
+/* 系统配置：OpenClaw 同步说明与失败提示 */
+.cfg-assign-hint-openclaw { color: var(--accent-dark); }
+.cfg-assign-hint-error {
+  padding: 5px 9px;
+  border-radius: 7px;
+  background: #fdeeee;
+  border: 1px solid #f3c2c2;
+  color: #b3322f;
+  font-weight: 600;
+}
+
+/* 视频 CLI 任务进度卡片（方案 C：OpenClaw spawn 的独立进程，进度靠轮询） */
+.video-task-progress {
+  display: grid;
+  gap: 7px;
+  padding: 11px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f7faff, #eef5ff);
+}
+.video-task-progress.terminal { border-color: #10b981; background: linear-gradient(180deg, #f2fdf8, #e8faf2); }
+.video-task-progress-head { display: flex; align-items: baseline; justify-content: space-between; }
+.video-task-progress-label { font-size: 12.5px; font-weight: 800; color: var(--text-main); }
+.video-task-progress.terminal .video-task-progress-label { color: #0a7d5a; }
+.video-task-progress-percent { font-size: 11.5px; font-weight: 800; color: var(--accent-dark); font-variant-numeric: tabular-nums; }
+.video-task-progress-bar { height: 5px; border-radius: 999px; background: rgba(43, 124, 255, 0.14); overflow: hidden; }
+.video-task-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #2b7cff, #5aa2ff);
+  transition: width 300ms ease;
+}
+.video-task-progress.terminal .video-task-progress-fill { background: linear-gradient(90deg, #10b981, #34d399); }
+.video-task-progress-message { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.6; }
+.video-task-progress-link { font-size: 12px; font-weight: 800; color: var(--accent-dark); text-decoration: none; }
+.video-task-progress-link:hover { text-decoration: underline; }
+.video-task-progress-dismiss {
+  justify-self: start;
+  padding: 3px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-sub);
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.video-task-progress-dismiss:hover { border-color: var(--accent); color: var(--accent-dark); }
 
 /* 文案依据的新闻事实 */
 .gen-video-news-list { display: grid; gap: 5px; max-height: 200px; overflow-y: auto; padding-right: 4px; }
