@@ -103,11 +103,12 @@ type MetricsData = {
   /** 已授权渠道集合：效果分析只展示这些渠道 */
   authorizedPlatforms?: string[];
   syncedAt?: string | null;
-  /** 时间窗口聚合：各渠道在 昨日 / 最近7天 / 最近30天 的流量矩阵 */
+  /** 时间窗口聚合：各渠道在 昨日 / 最近7天 / 最近30天 的流量矩阵；cumulative 为累计（最新快照原值） */
   windows?: {
     yesterday: Record<string, WindowVec & { name: string }>;
     last7: Record<string, WindowVec & { name: string }>;
     last30: Record<string, WindowVec & { name: string }>;
+    cumulative: Record<string, WindowVec & { name: string }>;
   };
   /** 粉丝维度（用户维度 tab）：新增/累计粉丝数 + 地域分布 */
   fanStats?: {

@@ -247,6 +247,7 @@ export async function GET(req: Request) {
     detailByWindow.cumulative[`${platform}:${latest.contentKey}`] = {
       views: latest.views,
       likes: latest.likes,
+      wechatLikes: 0, // 内容型平台不提供「在看/微信点赞」
       comments: latest.comments,
       shares: latest.shares,
       collects: latest.collects,
