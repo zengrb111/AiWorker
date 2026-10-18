@@ -32,7 +32,7 @@ export const PLATFORM_META: Record<string, { name: string; desc: string; cookieG
     name: "官网-AI员工",
     desc: "AI员工官网 AI最前沿频道（aiworker.aimemory.cafe），授权后可将资讯推送到该频道",
     cookieGuide:
-      "填写 https://aiworker.aimemory.cafe 与频道 API Key（x-api-key）。\n保存时会真实调用接口校验密钥：先 GET /api/frontier 确认站点可达，再 POST 一条临时资讯并立即 DELETE 校验密钥有效性。\n授权后，内容库详情页会出现「推送 AI最前沿」按钮；该频道是资讯列表（无封面/正文长文），推送内容为标题 + 摘要 + 标签 + 原文链接。",
+      "填写 https://aiworker.aimemory.cafe 与频道 API Key（x-api-key）。\n保存时会真实调用接口校验密钥：先 GET /api/frontier 确认站点可达，再 POST 一条临时资讯并立即 DELETE 校验密钥有效性。\n授权后，内容库详情页会出现「推送 AI最前沿」按钮；该频道为资讯列表，推送含标题 + 摘要 + 标签 + 原文链接，并把正文同步到详情页（article.html?id=xxx，正文为空时回落摘要）。",
     needsToken: true,
   },
   xhs: {
@@ -860,7 +860,8 @@ async function syncHealingSite(userId: string): Promise<{ ok: boolean; message: 
 
 /**
  * 官网-AI员工（aiworker，aiworker.aimemory.cafe AI最前沿）：同步「资讯列表」维度。
- * 公开读取 GET /api/frontier（无需鉴权），字段 { id, date, tag, title, summary, link }。
+ * 公开读取 GET /api/frontier（无需鉴权），字段 { id, date, tag, title, summary, content, link }；
+ * 单条详情 GET /api/frontier/{id}（详情页 article.html?id=xxx 展示 content，空则回落 summary）。
  * 该频道同样没有浏览统计，阅读量维度展示为「—」。
  */
 async function syncFrontierSite(userId: string): Promise<{ ok: boolean; message: string; items?: number }> {

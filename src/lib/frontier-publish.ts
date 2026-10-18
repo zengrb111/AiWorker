@@ -1,14 +1,16 @@
 import { prisma } from "@/lib/prisma";
 import { loadFrontierCredential } from "@/lib/platform-sync";
-import { buildSummary } from "@/lib/hgwx-publish";
+import { buildSummary, mdToPlainText } from "@/lib/hgwx-publish";
 
 /**
  * AI员工官网「AI最前沿」频道推送链路（aiworker.aimemory.cafe）。
  *
  * 官网对外接口（详见 https://aiworker.aimemory.cafe/frontier.html）：
- * - 读取：GET  {domain}/api/frontier（公开，无需鉴权）
+ * - 读取列表：GET  {domain}/api/frontier（公开，无需鉴权）
+ * - 读取单条：GET  {domain}/api/frontier/{id}（公开，详情页用）
  * - 新增：POST {domain}/api/frontier 头 x-api-key / Authorization: Bearer
- *         体 { date, tag, title, summary, link }
+ *         体 { date, tag, title, summary, content, link }
+ *         content 为详情正文：详情页 article.html?id=xxx 展示；为空时回落显示 summary。
  * - 删除：DELETE {domain}/api/frontier/{id}
  *
  * 凭据来自「平台授权管理」里当前登录用户配置的官网-AI员工授权（域名 + API Key），
@@ -17,9 +19,14 @@ import { buildSummary } from "@/lib/hgwx-publish";
 
 export const FRONTIER_CHANNEL = "AI最前沿";
 
-/** 频道页地址（作为发布记录的 remoteUrl） */
+/** 频道页地址（作为发布记录的 remoteUrl 兜底） */
 function channelUrl(domain: string): string {
   return `${domain.replace(/\/+$/, "")}/frontier.html`;
+}
+
+/** 单条详情页地址（官网 article.html?id=xxx） */
+function detailUrl(domain: string, id: string): string {
+  return `${domain.replace(/\/+$/, "")}/article.html?id=${encodeURIComponent(id)}`;
 }
 
 function todayStr(): string {
@@ -106,11 +113,15 @@ export async function publishContentToFrontier(
   }
 
   try {
+    const summary = buildSummary(item.body || "", 140);
+    // 详情页正文：Markdown → 空行分段纯文本；正文为空时回落 summary，保证详情页不空白。
+    const content = mdToPlainText(item.body || "") || summary;
     const payload = {
       date: options.date || todayStr(),
       tag: frontierTag(item.category, options.tag),
       title: item.title,
-      summary: buildSummary(item.body || "", 140),
+      summary,
+      content,
       link: options.link || ""
     };
 
@@ -135,7 +146,7 @@ export async function publishContentToFrontier(
         contentItemId: item.id,
         channel: FRONTIER_CHANNEL,
         remoteId,
-        remoteUrl: channelUrl(base),
+        remoteUrl: remoteId ? detailUrl(base, remoteId) : channelUrl(base),
         title: item.title,
         publisher,
         status: "SUCCESS",

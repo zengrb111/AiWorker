@@ -25,7 +25,7 @@ const PLATFORMS: Record<string, { name: string; desc: string; cookieGuide: strin
     name: "官网-AI员工",
     desc: "AI员工官网 AI最前沿频道（aiworker.aimemory.cafe），授权后可将资讯推送到该频道",
     cookieGuide:
-      "填写 https://aiworker.aimemory.cafe 与频道 API Key（x-api-key）。\n保存时会真实调用接口校验密钥：先 GET /api/frontier 确认站点可达，再 POST 一条临时资讯并立即 DELETE 校验密钥有效性。\n授权后，内容库详情页会出现「推送 AI最前沿」按钮；该频道是资讯列表（标题 + 摘要 + 标签 + 原文链接），无封面/正文长文。",
+      "填写 https://aiworker.aimemory.cafe 与频道 API Key（x-api-key）。\n保存时会真实调用接口校验密钥：先 GET /api/frontier 确认站点可达，再 POST 一条临时资讯并立即 DELETE 校验密钥有效性。\n授权后，内容库详情页会出现「推送 AI最前沿」按钮；该频道为资讯列表，推送含标题 + 摘要 + 标签 + 原文链接，并把正文同步到详情页（article.html?id=xxx，正文为空时回落摘要）。",
     badge: "未授权",
     needsToken: true,
   },
