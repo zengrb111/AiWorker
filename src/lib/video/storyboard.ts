@@ -18,8 +18,8 @@
 import {
   CAMERA_MOTIONS,
   CAPTION_STYLES,
-  OVERLAY_KINDS,
   PARTICLE_TYPES,
+  PLANNED_OVERLAY_KINDS,
   TRANSITION_KINDS,
   VISUAL_EFFECTS,
   VISUAL_EFFECT_LABELS,
@@ -31,6 +31,7 @@ import {
   type CaptionStyleKey,
   type ClipSpec,
   type ClipStoryboard,
+  type ChromeSpec,
   type LookConfig,
   type OverlaySpec,
   type SceneSpec,
@@ -45,6 +46,7 @@ export type {
   CaptionStyleKey,
   ClipSpec,
   ClipStoryboard,
+  ChromeSpec,
   LookConfig,
   OverlaySpec,
   SceneSpec,
@@ -107,6 +109,13 @@ export type StoryboardPlanInput = {
   outroText?: string;
   /** 期望主题。 */
   theme?: string;
+  /**
+   * 本次将被系统注入的图表类型提示（中文名，如「柱状图 / 环形图」）。
+   *
+   * 给了会让 prompt 多一段「图表由系统自动生成，别重复画」的声明。
+   * 不给（纯图片转视频链路）则完全不提，行为与改造前一致。
+   */
+  chartKindHint?: string;
 };
 
 /** 剪辑链路：让模型决定片段顺序、裁切点与转场。 */
@@ -332,6 +341,35 @@ function sharedRules(beats: TimelineBeat[]): string[] {
   ];
 }
 
+/**
+ * 图表职责声明。
+ *
+ * ## 为什么必须写进 prompt，而不是只在代码里把图表排除掉
+ *
+ * 服务端会把文章分析产出的图表翻译成 OverlaySpec 注入时间轴（chart-overlays.ts），
+ * 而 DSH 看不到那份数据 —— 它只看到「素材里有几张图」和一段旁白。
+ * 如果不告诉它，模型看到旁白里的数字会**理所当然地再画一遍**：
+ * 一个 stat_card 叠在系统注入的柱状图上，两块玻璃卡正面相撞。
+ *
+ * 给了 kind 提示还能省一次 DSH 的推理量：它不必猜「这组图要不要自己画」。
+ * 没有提示（纯图片转视频链路）时这段返回空数组，行为与改造前完全一致。
+ */
+function chartOwnershipRules(chartKindHint?: string): string[] {
+  if (!chartKindHint) return [];
+  return [
+    "",
+    "## 数据图表由系统自动生成（重要，别重复画）",
+    `本次会由程序把文章里已核实的图表数据注入成动态图层（${chartKindHint}）。`,
+    "因此：",
+    "1. **不要自己输出图表类图层**（柱状图 / 折线图 / 环形图 / 数字卡组 / 规格表 / 要点卡片），",
+    "   那些 kind 不在你的取值域里，输出了会被整份分镜判为非法。",
+    "2. 旁白念到某个具体数字时，用 `stat_reveal` 或 `stat_card` 压一个**大字**强调它即可，",
+    "   不要再造一个带坐标轴的图 —— 那会和系统注入的图表重复。",
+    "3. 你要避开的是：系统会把图表放在旁白讲到对应数字的那几句上。",
+    "   这几秒里**不要**再压 section_title / callout 之类会与之打架的图层，把画面让给图表。",
+  ];
+}
+
 /** 图片→视频链路的 prompt。 */
 export function buildStoryboardPrompt(input: StoryboardPlanInput): string {
   const theme = resolveTheme(input.theme);
@@ -377,7 +415,7 @@ export function buildStoryboardPrompt(input: StoryboardPlanInput): string {
     "字段取值域（超出取值域会被拒绝）：",
     `- animation：${CAMERA_MOTIONS.join(" / ")}`,
     `- particles：${PARTICLE_TYPES.join(" / ")}`,
-    `- overlays[].kind：${OVERLAY_KINDS.join(" / ")}`,
+    `- overlays[].kind：${PLANNED_OVERLAY_KINDS.join(" / ")}`,
     "- particleIntensity / backgroundOverlay：0~1 的小数",
     "- lightingFrom / lightingTo / particleColor / accentColor：#rrggbb 颜色值",
     "- 每个场景的 images 放 1~4 张，按顺序交叉淡化；图片不够就少放",
@@ -396,6 +434,7 @@ export function buildStoryboardPrompt(input: StoryboardPlanInput): string {
     "3. particles 不要全程开：只在情绪合适的 1~2 个场景用，其余留 none，让画面有呼吸。",
     "4. lightingFrom / lightingTo 每个场景都给一组，同一片子里相邻两组的色温或明度要拉开，",
     "   这是让画面「有光影层次」的关键，比加更多特效有效得多。",
+    ...chartOwnershipRules(input.chartKindHint),
     "- 每个图层的 outSeconds 取它所注解那句话的出点；position 取 top / center / bottom",
     "- 不要输出 captions 字段：字幕由配音时间戳在后期统一烧录，由你输出会和它重复叠加",
     `- outro.text 用「${input.outroText || "关注获取更多"}」`,
@@ -445,7 +484,7 @@ export function buildClipPrompt(input: ClipPlanInput): string {
     "",
     "字段取值域（超出取值域会被拒绝）：",
     `- transition：${TRANSITION_KINDS.join(" / ")}`,
-    `- overlays[].kind：${OVERLAY_KINDS.join(" / ")}`,
+    `- overlays[].kind：${PLANNED_OVERLAY_KINDS.join(" / ")}`,
     "- 视频片段可以用 trimStartSeconds 从中间开始取，图片忽略该字段",
     "- 素材不必全部用完，但至少用 2 个片段",
     "",

@@ -1,0 +1,6 @@
+# DSH Web 后台的运行产物，不要提交
+node_modules/
+*.log
+page.html
+.playwright-cli/
+*.png

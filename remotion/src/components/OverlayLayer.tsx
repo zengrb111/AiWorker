@@ -1,6 +1,6 @@
 import React from "react";
 import { AbsoluteFill, Sequence } from "remotion";
-import type { OverlaySpec } from "../vertical/schema";
+import { DATA_OVERLAY_KINDS, type OverlaySpec } from "../vertical/schema";
 import type { OverlaySpan } from "../vertical/layout";
 import { resolveTheme, type ThemeConfig } from "../theme";
 import { SectionTitle } from "./SectionTitle";
@@ -12,6 +12,12 @@ import { CalloutBox, type CalloutType } from "./CalloutBox";
 import { ComparisonCard } from "./ComparisonCard";
 import { ProgressBar } from "./ProgressBar";
 import { ProviderChip } from "./ProviderChip";
+import { BarChart } from "./BarChart";
+import { LineChart } from "./LineChart";
+import { DonutChart } from "./DonutChart";
+import { KpiGrid } from "./KpiGrid";
+import { SpecTable } from "./SpecTable";
+import { BulletList } from "./BulletList";
 
 /**
  * 竖版文字图层分发器。
@@ -175,6 +181,75 @@ function renderOverlay(overlay: OverlaySpec, theme: ThemeConfig): React.ReactNod
 }
 
 /**
+ * 数据型图层：柱/线/环/卡组/表格/要点卡片。
+ *
+ * 与规划型图层分开一个函数，因为它们的入参形状完全不同 ——
+ * 规划型只带单值字段（value/label/progress），数据型带数组字段
+ * （items/series/cards/rows/bullets）。合成一个函数会让每个 case 都写一堆
+ * `?? undefined` 的防御，反而看不出每类图层到底要什么。
+ *
+ * 这些 kind **不由模型输出**，由服务端把文章分析产出的图表翻译后注入
+ * （src/lib/video/chart-overlays.ts），所以数值天然过了溯源闸门。
+ */
+function renderDataOverlay(overlay: OverlaySpec, theme: ThemeConfig): React.ReactNode {
+  const accent = overlay.accentColor ?? theme.primaryColor;
+  const muted = theme.mutedTextColor;
+  const shell = {
+    title: overlay.text || overlay.label || "",
+    unit: overlay.unit,
+    note: overlay.note,
+    accent,
+    textColor: theme.textColor,
+    mutedColor: muted,
+    spring: theme.springConfig,
+  };
+
+  switch (overlay.kind) {
+    case "bar_chart":
+      return <BarChart {...shell} items={overlay.items ?? []} highlightIndex={overlay.highlightIndex} />;
+
+    case "line_chart":
+      return (
+        <LineChart
+          {...shell}
+          series={overlay.series ?? []}
+          colors={theme.chartColors}
+          highlightIndex={overlay.highlightIndex}
+        />
+      );
+
+    case "donut":
+      return (
+        <DonutChart
+          {...shell}
+          items={overlay.items ?? []}
+          colors={theme.chartColors}
+          highlightIndex={overlay.highlightIndex}
+        />
+      );
+
+    case "kpi_grid":
+      return <KpiGrid {...shell} subtitle={overlay.subtitle} cards={overlay.cards ?? []} />;
+
+    case "spec_table":
+      return (
+        <SpecTable
+          {...shell}
+          subtitle={overlay.subtitle}
+          columns={overlay.columns ?? []}
+          rows={overlay.rows ?? []}
+        />
+      );
+
+    case "bullet_list":
+      return <BulletList {...shell} subtitle={overlay.subtitle} bullets={overlay.bullets ?? []} />;
+
+    default:
+      return null;
+  }
+}
+
+/**
  * 把一组文字图层按帧区间渲染到画面之上。
  *
  * 每个图层包在 Sequence 里，因此图层时间轴与场景解耦 ——
@@ -187,7 +262,9 @@ export const OverlayLayer: React.FC<OverlayLayerProps> = ({ overlays, themeKey }
   return (
     <AbsoluteFill style={{ pointerEvents: "none" }}>
       {overlays.map((span, i) => {
-        const body = renderOverlay(span.overlay, theme);
+        const body = DATA_OVERLAY_KINDS.includes(span.overlay.kind)
+          ? renderDataOverlay(span.overlay, theme)
+          : renderOverlay(span.overlay, theme);
         if (body === null) return null;
         return (
           <Sequence

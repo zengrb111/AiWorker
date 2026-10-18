@@ -8,6 +8,17 @@ import { renderViaOpenClaw } from "@/lib/video/legacy-openclaw";
 import { mkdir, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 
+/**
+ * 一键生成视频 —— **出片阶段**（带 planToken 时跳过规划直接渲染）。
+ *
+ * 本路由同时服务三条入口的出片：
+ *   1. 「一键生成视频」面板 —— 规划走 gen-video/plan
+ *   2. 「文章转视频」面板   —— 规划走 gen-article-video/plan
+ *   3. 热点卡片直接出片     —— 不带 planToken，走旧的直出分支
+ *
+ * 三者的出片过程完全一致（素材已在规划阶段定好），所以只认 token 不认来源。
+ * 逻辑本身不因新增入口而改动。
+ */
 const maxUploadBytes = 30 * 1024 * 1024;
 const allowedImageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 

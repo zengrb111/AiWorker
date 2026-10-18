@@ -238,6 +238,18 @@ function readMessageText(data: unknown): string {
   return "";
 }
 
+/**
+ * 读 finish_reason，区分「上游没给正文」与「正文被输出上限截断」。
+ *
+ * 后者很容易被误判成模型坏了：reasoning 模型（DeepSeek reasoner / R1 系列）会把
+ * 输出预算的大量部分花在思考过程上，任务一复杂，预算可能在轮到正文之前就耗尽，
+ * 于是 content 长度为 0、finish_reason=length。此时调大 max_tokens 即可解决。
+ */
+function readFinishReason(data: unknown): string {
+  const json = data as { choices?: Array<{ finish_reason?: string | null }> };
+  return String(json.choices?.[0]?.finish_reason ?? "");
+}
+
 /** 非流式对话补全。 */
 export async function chatComplete(opts: ChatCompleteOptions): Promise<ChatCompleteResult> {
   const config = await resolveConfig(opts);
@@ -253,9 +265,13 @@ export async function chatComplete(opts: ChatCompleteOptions): Promise<ChatCompl
   const data = (await res.json().catch(() => null)) as unknown;
   const content = data ? readMessageText(data) : "";
   if (!content.trim()) {
+    const truncated = data ? readFinishReason(data) === "length" : false;
     throw new UpstreamModelError(
-      "unknown",
-      `「${config.label}」没有返回内容，请稍后重试或更换模型。`,
+      truncated ? "bad_request" : "unknown",
+      truncated
+        ? `「${config.label}」的输出被长度上限截断，没有产出正文` +
+          `（reasoning 模型会把大量预算用于思考）。请调大该模型的输出上限，或换用思考较少的模型。`
+        : `「${config.label}」没有返回内容，请稍后重试或更换模型。`,
       200,
       config.label
     );

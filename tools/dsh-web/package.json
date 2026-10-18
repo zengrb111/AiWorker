@@ -1,0 +1,13 @@
+{
+  "name": "aiworker-dsh-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "DSH Web 后台（人工排查用）。独立安装，与本仓库的 Next.js 依赖树完全隔离。",
+  "scripts": {
+    "web": "dsh web",
+    "web:no-open": "dsh web --no-open"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.2"
+  }
+}

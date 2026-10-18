@@ -1,0 +1,62 @@
+# DSH web 后台的 profile 覆盖层（patch list）
+#
+# ⚠️ 现状（2026-10-17 更新）：**推荐改用 tools/dsh-web 里的 npm 版 Web 后台**
+#    （`npm --prefix tools/dsh-web run web`），实测 0.2.1-rc.2 的前端完全正常，
+#    不需要这份 patch。本文件保留给「必须走 .venv 里那个内置 exe」的场合，
+#    以及作为下面这份缺陷排查记录的存档。
+#
+# 与分镜用的 scripts/dsh-storyboard/profile/cordis.patch.yml 是同一种机制，
+# 但目的相反：那个 patch 是把「能碰文件系统/起子进程/联网」的插件全关掉，
+# 换取分镜这个纯文本任务的安全边界；这里只关两个插件，用来绕开 SDK 的打包缺陷。
+#
+# 【为什么需要这个文件】
+# 当前安装的 deepseek-harness-sdk 0.1.5rc1，其 wheel 里内置的 Node runtime 是
+# **构建快照**（报错路径能看出硬编码成 CI 机器的 C:\snapshot\deepseek-harness\...）。
+# 该快照缺两个包：
+#   @deepseek-ai/dsh-session-title
+#   @deepseek-ai/dsh-session-title-first-prompt-llm
+# 而 web profile 会加载它们，于是启动直接失败：
+#   failed to apply loader entry include (cordis:include): failed to import loader entry
+#   session-title-llm ... Cannot find package '@deepseek-ai/dsh-session-title-llm'
+#
+# 分镜链路之所以没事，是因为它的 patch 早就把这两个 id 关掉了（见上面那个文件）。
+# 升级 SDK 也走不通：deepseek-harness-sdk 已不在公共 PyPI 上，pip index 查不到。
+#
+# 【补充：0.2.x 上游已经修好了】
+# 0.2.1-rc.2 的前端客户端模块集合里**已经没有 session-title / session-title-llm**
+# （实测 plugins 多包 bundle 共 57 个模块，不含这两个），而且此前 404 的
+#   /plugins/??@deepseek-ai/dsh-client-modules/client.js
+# 现在返回 200（46KB），「Failed to load plugins」不再出现。
+# 也就是说这两处缺陷都属于 0.1.5rc1 的 Windows 发布产物问题，
+# 不是配置能修的 —— 这也是为什么推荐直接用 npm 版 Web 后台。
+#
+# 【代价】
+# 会话不再自动生成标题（其它功能不受影响）。确认 SDK 修好后可以删掉本文件。
+#
+# 【注意：这份 patch 只能让服务启动到 200，Web UI 仍然打不开】
+# 修掉上面的缺包后，页面能返回 200，但前端报 "Failed to load plugins"：
+#   client-modules: HTML did not preload @deepseek-ai/dsh-client-modules/client.js
+# 排查结论（2026-10-17）：
+#   · 页面 HTML 里 globalThis.__DSH_BOOT__.entries 是空数组 —— 服务端没注入任何条目
+#   · /assets/index-*.js 能正常加载（200，516KB），但 client.js 各种路径都 404
+#   · 自带的包 @deepseek-ai/dsh-client-modules@0.1.5-rc.1 的 exports 是
+#       { ".": "./entry-0.js", "./client": "./entry-1.js", "./invariant": "./entry-2.js" }
+#     即正确 specifier 是「不带 .js 的 /client」，而运行时的 host 代码请求的是
+#     「带 .js 的 /client.js」，不匹配 exports → 404
+#   · Node runtime 与前端产物封在 deepseek-harness-sdk-runtime-win-x64.exe 里，
+#     本地无法补文件
+# 即 host 代码与自己携带的前端包版本错配，属于上游 Windows 发布产物缺陷。
+# 分镜链路不受影响：它走 sdk profile + 受限 patch，只用纯文本输出，不碰 web 前端。
+#
+# 生效方式：
+#   $env:DSH_HOME="<项目根>\.dsh-home"
+#   .\.dsh-venv\Scripts\dsh.exe web --patch scripts\dsh-web\cordis.patch.yml
+#
+# 格式：YAML 序列，每项 {id, disabled?}；id 必须与 `dsh --profile web --dump-config`
+# 输出里的 "- id:" 完全一致，否则静默失效。
+
+# 会话标题（依赖缺失的包）
+- id: session-title
+  disabled: true
+- id: session-title-llm
+  disabled: true

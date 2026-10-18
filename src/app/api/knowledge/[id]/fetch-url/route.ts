@@ -1,14 +1,11 @@
 import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
-import { extractHtmlMainText } from "@/lib/kb-extract";
+import { fetchWebPage } from "@/lib/fetch-web-page";
 import { chunkText, normalizeChunkOptions } from "@/lib/knowledge";
 import { recomputeKnowledgeBaseStatus } from "@/lib/kb-store";
 
 export const runtime = "nodejs";
-
-const MAX_BYTES = 30 * 1024 * 1024;
-const FETCH_TIMEOUT_MS = 20000;
 
 type FetchUrlBody = { url?: string };
 
@@ -26,50 +23,17 @@ export async function POST(request: Request, context: { params: { id: string } }
   const rawUrl = (body.url || "").trim();
   if (!rawUrl) return jsonError("请填写网页链接。");
 
-  let target: URL;
+  // 抓取与正文提取已抽到 fetchWebPage（文章转视频共用）。这里传 allowPrivateHosts
+  // 保持知识库的历史行为 —— 它本来就能抓内网知识页面。
+  let page;
   try {
-    target = new URL(rawUrl);
-  } catch {
-    return jsonError("链接格式不正确，请填写完整的 http(s) 链接。");
-  }
-  if (target.protocol !== "http:" && target.protocol !== "https:") {
-    return jsonError("仅支持 http / https 链接。");
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let html = "";
-  let status = 0;
-  try {
-    const res = await fetch(target.toString(), {
-      signal: controller.signal,
-      redirect: "follow",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
-      }
-    });
-    status = res.status;
-    if (!res.ok) return jsonError(`网页返回 HTTP ${res.status}，无法获取。`);
-    const contentType = (res.headers.get("content-type") || "").toLowerCase();
-    if (!contentType.includes("html") && !contentType.includes("xml")) {
-      return jsonError("该链接不是网页内容（需 text/html），请改用文件上传。");
-    }
-    const buffer = Buffer.from(await res.arrayBuffer());
-    if (buffer.byteLength > MAX_BYTES) return jsonError("网页内容过大（超过 30MB），已跳过。");
-    html = buffer.toString("utf8");
+    page = await fetchWebPage(rawUrl, { allowPrivateHosts: true });
   } catch (error) {
-    const aborted = error instanceof Error && error.name === "AbortError";
-    return jsonError(aborted ? "获取网页超时（20 秒）。" : `获取网页失败：${error instanceof Error ? error.message : "网络错误"}`);
-  } finally {
-    clearTimeout(timer);
+    return jsonError(error instanceof Error ? error.message : "获取网页失败。");
   }
 
-  const reading = extractHtmlMainText(html, target.hostname);
-  const title = reading.title || target.hostname;
-  const text = reading.text;
+  const title = page.title;
+  const text = page.text;
 
   const document = await prisma.kbDocument.create({
     data: {
@@ -78,7 +42,7 @@ export async function POST(request: Request, context: { params: { id: string } }
       mimeType: "text/html",
       kind: "url",
       sizeBytes: Buffer.byteLength(text, "utf8"),
-      storedPath: target.toString(),
+      storedPath: page.url,
       parseStatus: text ? "PARSED" : "EMPTY",
       parseNote: text ? `已获取网页正文（${text.length} 字）` : "未提取到正文内容",
       extractedText: text
