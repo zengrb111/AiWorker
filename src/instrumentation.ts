@@ -18,19 +18,26 @@ export async function register() {
   }
   const base = (process.env.AIWORKER_BASE_URL || "http://127.0.0.1:3000").replace(/\/+$/, "");
   const url = `${base}/api/scheduler/tick`;
+  // 每日自动采集（到点后每个有授权账号的用户跑一次全渠道同步）
+  const collectUrl = `${base}/api/collectors/tick`;
 
-  const tick = () => {
-    fetch(url, { method: "POST", headers: { Authorization: `Bearer ${token}` } })
+  const post = (target: string, label: string) => {
+    fetch(target, { method: "POST", headers: { Authorization: `Bearer ${token}` } })
       .then((res) => {
-        if (!res.ok) console.error(`[scheduler] tick 返回 ${res.status}`);
+        if (!res.ok) console.error(`[${label}] tick 返回 ${res.status}`);
       })
       .catch((error) => {
-        console.error("[scheduler] tick 失败：", error instanceof Error ? error.message : error);
+        console.error(`[${label}] tick 失败：`, error instanceof Error ? error.message : error);
       });
+  };
+
+  const tick = () => {
+    post(url, "scheduler");
+    post(collectUrl, "collectors");
   };
 
   const timer = setInterval(tick, TICK_INTERVAL_MS);
   if (typeof timer.unref === "function") timer.unref();
   setTimeout(tick, FIRST_DELAY_MS);
-  console.log(`[scheduler] 平台定时任务调度器已启动（每 ${TICK_INTERVAL_MS / 1000}s 触发一次 /api/scheduler/tick）`);
+  console.log(`[scheduler] 平台定时任务调度器已启动（每 ${TICK_INTERVAL_MS / 1000}s 触发一次 /api/scheduler/tick + /api/collectors/tick）`);
 }

@@ -22,6 +22,7 @@ model User {
   knowledgeBases KnowledgeBase[]
   platformAccounts       PlatformAccount[]
   platformSiteMetrics    PlatformSiteMetric[]
+  platformFanRegions     PlatformFanRegion[]
   platformContentMetrics PlatformContentMetric[]
   scheduledJobs          ScheduledJob[]
   modelProviders         UserModelProvider[]
@@ -311,7 +312,27 @@ model PlatformSiteMetric {
   shares     Int    @default(0) // 分享次数
   likes      Int    @default(0) // 点赞次数
   wows       Int    @default(0) // 在看次数
+  fansTotal  Int    @default(0) // 累计粉丝数快照（微信生态后台拉取；无数据时为 0）
+  // 平台自带的窗口总计（微信后台「昨日/近7天/近30天」是现成汇总，不是按天数据）。
+  // 形如 {"7":{"reads":177,"likes":7,"shares":4,"wows":1},"30":{...}}，供流量矩阵直接取用。
+  windowsJson String?
   @@unique([userId, platform, metricDate])
+}
+
+/// 粉丝按区域分布（省/直辖市维度，按天快照，按登录用户隔离）
+/// 微信生态（公众号/视频号）后台「用户属性」提供省份分布；其余平台不提供则为空。
+model PlatformFanRegion {
+  id         String   @id @default(cuid())
+  userId     String // 归属登录用户
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform   String   // wechat | channels
+  metricDate String   // yyyy-MM-dd，数据所属日
+  province   String   // 省 / 直辖市名称（如「广东」「北京」）
+  fans       Int      @default(0) // 该省份粉丝数
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  @@unique([userId, platform, metricDate, province])
+  @@index([platform, metricDate])
 }
 
 /// RAG 知识库

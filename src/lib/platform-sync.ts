@@ -64,7 +64,12 @@ export const PLATFORM_META: Record<string, { name: string; desc: string; cookieG
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
-async function fetchWithCookie(url: string, cookie: string, timeoutMs = 12000) {
+async function fetchWithCookie(
+  url: string,
+  cookie: string,
+  timeoutMs = 12000,
+  accept = "application/json"
+) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -73,7 +78,9 @@ async function fetchWithCookie(url: string, cookie: string, timeoutMs = 12000) {
       headers: {
         "User-Agent": UA,
         Cookie: cookie,
-        Accept: "application/json",
+        // 后台首页是 HTML 页面：若仍用 Accept: application/json，微信会返回
+        // `<pre>missing parameter</pre>` 这种非预期响应。
+        Accept: accept,
         // 小红书 galaxy 接口校验 Referer，缺失会返回 code:-1
         Referer: `https://${host}/`,
         Origin: `https://${host}`,
@@ -228,38 +235,37 @@ async function verifyBackendLoginState(
   cookie: string,
   label: string
 ): Promise<VerifyResult> {
+  // 重要：公众号/视频号后台是 SPA，登录后的「首页」静态 HTML 里**不含 token**
+  // （token 由前端 JS 登录流程生成并写进 URL）。实测「有效 Cookie」与「无效 Cookie」
+  // 返回的 HTML 完全一致，所以不能用静态响应判断登录态 —— 那会把有效 Cookie 误判为过期。
+  // 这里只做「Cookie 形态 + 响应硬失败」的轻校验；真正的有效性由采集器（headless Chrome
+  // 执行 JS 拿 token、拉数据）来验证，失败会写回账号状态。
+  const HTML_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
   const errors: string[] = [];
-  const LOGIN_HINTS = /(登录|login|扫码|安全验证|请先)/i;
   for (const c of candidates) {
     try {
-      const res = await fetchWithCookie(c.url, cookie);
-      if (res.status === 301 || res.status === 302 || res.status === 401 || res.status === 403) {
-        errors.push(`${new URL(c.url).host} 未授权（HTTP ${res.status}），Cookie 可能已过期`);
+      const host = new URL(c.url).host;
+      const res = await fetchWithCookie(c.url, cookie, 12000, HTML_ACCEPT);
+      if (res.status === 401 || res.status === 403) {
+        errors.push(`${host} 未授权（HTTP ${res.status}）`);
         continue;
       }
-      const text = await res.text();
-      let json: any = null;
-      try {
-        json = JSON.parse(text);
-      } catch {
-        /* HTML 响应，走下面对后台首页的判定 */
-      }
-      if (json && typeof json === "object") {
-        // 少数端点返回 JSON：code/base_resp.ret=0 视为登录态有效
-        const code = json?.base_resp?.ret ?? json?.code ?? json?.ret;
-        if (code === 0 || code === "0") {
-          const nick = json?.nickname || json?.nick_name || json?.user_name || json?.data?.nickname;
-          return { ok: true, displayName: String(nick || label), externalId: "" };
-        }
-        errors.push(`${new URL(c.url).host} 响应 code=${code ?? "未知"}`);
+      if (res.status >= 400) {
+        errors.push(`${host} 响应异常（HTTP ${res.status}）`);
         continue;
       }
+      // 302 到带 token 的地址 = 明确有效
+      const loc = res.headers.get("location") || "";
+      const abs = loc ? new URL(loc, c.url).toString() : "";
+      if (/[?&]token=\d+/.test(abs)) {
+        return { ok: true, displayName: label, externalId: "" };
+      }
+      const text = res.status === 200 ? await res.text() : "";
       const title = (/<title>([^<]*)<\/title>/i.exec(text)?.[1] || "").trim();
-      if (LOGIN_HINTS.test(title) || text.length < 200) {
-        errors.push(`${new URL(c.url).host} 返回登录页（${title || "响应过短"}），Cookie 可能已过期`);
-        continue;
-      }
-      return { ok: true, displayName: title.replace(/[-—_|].*$/, "").trim() || label, externalId: "" };
+      const nick =
+        /"nick_name"\s*:\s*"([^"]{1,40})"/.exec(text)?.[1] ||
+        /"nickname"\s*:\s*"([^"]{1,40})"/.exec(text)?.[1];
+      return { ok: true, displayName: nick || title.replace(/[-—_|].*$/, "").trim() || label, externalId: "" };
     } catch (e) {
       errors.push(`${new URL(c.url).host} 请求失败：${e instanceof Error ? e.message : String(e)}`);
     }
@@ -1188,6 +1194,62 @@ const WECHAT_COLLECT_LOCK = ".wechat-collect.lock";
  * 后台拉起公众号/视频号采集器（headless Chrome 走真实登录态取数）。
  * 与小红书采集器同一套思路：数据接口需要登录态/token，服务端直连拿不到。
  */
+/** 绑定成功后立刻触发一次采集器（异步），用真实浏览器校验登录态并回填数据 */
+export function kickWechatCollector(accountId: string): boolean {
+  return triggerWechatCollector(accountId);
+}
+
+/** 视频号采集器锁：10 分钟内不重复拉起 */
+const CHANNELS_COLLECT_LOCK = ".channels-collect.lock";
+
+export function kickChannelsCollector(accountId: string): boolean {
+  return triggerChannelsCollector(accountId);
+}
+
+/** 后台拉起视频号采集器（headless Chrome 进入数据中心 → 视频数据） */
+function triggerChannelsCollector(accountId: string): boolean {
+  const root = process.cwd();
+  const lockFile = path.join(root, CHANNELS_COLLECT_LOCK);
+  try {
+    const lockStat = fs.existsSync(lockFile) ? fs.statSync(lockFile) : null;
+    if (lockStat && Date.now() - lockStat.mtimeMs < 10 * 60 * 1000) return false;
+    fs.writeFileSync(lockFile, String(Date.now()), "utf8");
+    const logFile = path.join(root, ".channels-collect.log");
+    fs.appendFileSync(logFile, `\n===== ${new Date().toISOString()} account=${accountId} =====\n`, "utf8");
+    const logFd = fs.openSync(logFile, "a");
+    const child = spawn(process.execPath, [path.join(root, "scripts", "channels-collect.mjs")], {
+      cwd: root,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: {
+        ...process.env,
+        ACCOUNT_ID: accountId,
+        AIWORKER_API: process.env.AIWORKER_API || "http://127.0.0.1:3000",
+      },
+    });
+    fs.closeSync(logFd);
+    child.on("exit", (code) => {
+      try { fs.unlinkSync(lockFile); } catch { /* 已清理 */ }
+      if (code && code !== 0) {
+        try {
+          const tail = fs
+            .readFileSync(logFile, "utf8")
+            .trim()
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .slice(-2)
+            .join(" ");
+          void markAccountError(accountId, `视频号采集器失败（exit ${code}）：${tail.slice(-400)}`);
+        } catch { /* 忽略 */ }
+      }
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function triggerWechatCollector(accountId: string): boolean {
   const root = process.cwd();
   const lockFile = path.join(root, WECHAT_COLLECT_LOCK);
@@ -1195,10 +1257,14 @@ function triggerWechatCollector(accountId: string): boolean {
     const lockStat = fs.existsSync(lockFile) ? fs.statSync(lockFile) : null;
     if (lockStat && Date.now() - lockStat.mtimeMs < 10 * 60 * 1000) return false;
     fs.writeFileSync(lockFile, String(Date.now()), "utf8");
+    // 采集器输出落盘（原来 stdio:"ignore" → 失败完全无痕，无法排查）
+    const logFile = path.join(root, ".wechat-collect.log");
+    fs.appendFileSync(logFile, `\n===== ${new Date().toISOString()} account=${accountId} =====\n`, "utf8");
+    const logFd = fs.openSync(logFile, "a");
     const child = spawn(process.execPath, [path.join(root, "scripts", "wechat-collect.mjs")], {
       cwd: root,
       detached: true,
-      stdio: "ignore",
+      stdio: ["ignore", logFd, logFd],
       env: {
         ...process.env,
         ACCOUNT_ID: accountId,
@@ -1206,8 +1272,21 @@ function triggerWechatCollector(accountId: string): boolean {
         AIWORKER_API: process.env.AIWORKER_API || "http://127.0.0.1:3000",
       },
     });
-    child.on("exit", () => {
+    fs.closeSync(logFd);
+    child.on("exit", (code) => {
       try { fs.unlinkSync(lockFile); } catch { /* 已清理 */ }
+      if (code && code !== 0) {
+        try {
+          const tail = fs
+            .readFileSync(logFile, "utf8")
+            .trim()
+            .split(/\r?\n/)
+            .filter(Boolean)
+            .slice(-2)
+            .join(" ");
+          void markAccountError(accountId, `采集器执行失败（exit ${code}）：${tail.slice(-400)}`);
+        } catch { /* 忽略 */ }
+      }
     });
     child.unref();
     return true;
@@ -1248,22 +1327,29 @@ async function syncWechatBackendMetrics(
 
   for (const url of opts.homeUrls) {
     try {
-      const res = await fetchWithCookie(url, cookie);
-      if (res.status === 301 || res.status === 302 || res.status === 401 || res.status === 403) {
-        errors.push(`${new URL(url).host} 未授权（HTTP ${res.status}）`);
+      const res = await fetchWithCookie(
+        url,
+        cookie,
+        12000,
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      );
+      // 与授权校验一致：SPA 首页静态 HTML 不含 token，不能据此判失效。
+      // 只排除明确的 HTTP 失败；真正有效性由采集器验证（失败会写回账号状态）。
+      if (res.status === 401 || res.status === 403 || res.status >= 400) {
+        errors.push(`${new URL(url).host} 未授权（HTTP ${res.status}），Cookie 可能已过期`);
         continue;
       }
-      const text = await res.text();
-      const title = (/<title>([^<]*)<\/title>/i.exec(text)?.[1] || "").trim();
-      if (LOGIN_HINTS.test(title) || text.length < 200) {
-        errors.push(`${new URL(url).host} 返回登录页（${title || "响应过短"}）`);
-        continue;
+      if (res.status === 200) {
+        const text = await res.text();
+        const nickMatch =
+          /"nick_name"\s*:\s*"([^"]{1,40})"/.exec(text) ||
+          /"nickname"\s*:\s*"([^"]{1,40})"/.exec(text);
+        if (nickMatch) nick = nickMatch[1];
       }
-      const nickMatch = /"nick_name"\s*:\s*"([^"]{1,40})"/.exec(text) || /"nickname"\s*:\s*"([^"]{1,40})"/.exec(text);
-      if (nickMatch) nick = nickMatch[1];
 
-      // 登录态有效 → 触发浏览器采集器回填明细
-      const triggered = triggerWechatCollector(accountId);
+      // 登录态有效 → 触发对应平台的浏览器采集器回填数据
+      const triggered =
+        opts.platform === "channels" ? triggerChannelsCollector(accountId) : triggerWechatCollector(accountId);
       const synced = await prisma.platformContentMetric.count({ where: { platform: opts.platform, accountId } });
       const note = triggered
         ? "已触发浏览器采集器回填数据（约需 1-2 分钟，稍后刷新查看）"
@@ -1285,7 +1371,10 @@ async function syncWechatBackendMetrics(
   }
 
   await markAccountError(accountId, `凭据校验未通过：${errors.join("；")}`);
-  return { ok: false, message: `${opts.label}数据同步失败（详见账号状态）` };
+  return {
+    ok: false,
+    message: `${opts.label}登录态已失效，请在「平台授权管理」重新授权后重试`,
+  };
 }
 
 /** 公众号渠道 */

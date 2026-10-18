@@ -127,7 +127,13 @@ async function main() {
   const res = await fetch(`${API}/api/platform-metrics/ingest`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ platform: 'toutiao', notes }),
+    body: JSON.stringify({
+      platform: 'toutiao',
+      notes,
+      // 累计粉丝快照（user_info.total_fans_count），供「用户维度」全渠道统计
+      ...(Number.isFinite(Number(info.total_fans_count)) ? { fanTotal: Number(info.total_fans_count) } : {}),
+      ...(process.env.ACCOUNT_ID ? { accountId: process.env.ACCOUNT_ID } : {}),
+    }),
   });
   const out = await res.json().catch(() => null);
   console.log('入库结果 HTTP', res.status, JSON.stringify(out));

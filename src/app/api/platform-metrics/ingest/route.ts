@@ -11,7 +11,12 @@ export const dynamic = "force-dynamic";
  *
  * Body: { platform: "xhs" | "toutiao" | "wechat" | "channels", notes: [{ id, title, views,
  *         impressions, clicks, likes, comments, collects, shares, readers, wows,
- *         permissionCode, itemStatus }], fans?: number }
+ *         permissionCode, itemStatus }], fans?: number, fanTotal?: number,
+ *         summary?: { reads, shares, likes, wows },
+ *         regions?: [{ province: string, fans: number }] }
+ *
+ * fanTotal = 微信生态累计粉丝数快照（公众号/视频号后台「用户分析」可拉取）；
+ * regions  = 粉丝按省份分布（微信生态「用户属性/地域分布」可拉取）。两者缺失时静默跳过。
  *
  * 只统计「当前公开可见」的内容：
  *   - 小红书 permissionCode !== 0（如 1「仅自己可见」）→ 丢弃
@@ -34,8 +39,16 @@ export async function POST(req: Request) {
   const platform = String(body?.platform || "").trim();
   const notes: any[] = Array.isArray(body?.notes) ? body.notes : [];
   const bodies: any[] = Array.isArray(body?.bodies) ? body.bodies : [];
-  if (!ALLOWED_PLATFORMS.has(platform) || notes.length === 0) {
-    return NextResponse.json({ ok: false, message: "参数错误：需要 platform（xhs/toutiao/wechat/channels）和非空 notes" }, { status: 400 });
+  // 视频号等平台只有账号级汇总（无内容级数据），允许 notes 为空、只传 summary
+  const hasSummary =
+    !!body?.summary ||
+    Number.isFinite(Number(body?.fanTotal)) ||
+    Number.isFinite(Number(body?.fans));
+  if (!ALLOWED_PLATFORMS.has(platform) || (notes.length === 0 && !hasSummary)) {
+    return NextResponse.json(
+      { ok: false, message: "参数错误：需要 platform，且 notes 与 summary 至少提供一个" },
+      { status: 400 }
+    );
   }
 
   const accountId = String(body?.accountId || "").trim();
@@ -50,6 +63,13 @@ export async function POST(req: Request) {
   const metricDate = (() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  })();
+  // 账号级汇总（阅读/分享/点赞/在看、粉丝快照）的归属日。
+  // 微信「内容分析」的 data_range_type=1 对应的是**昨日**（今日数据未跑完），
+  // 采集器通过 metricDate 显式传昨天，避免把昨天的数据记到今天。
+  const summaryDate = (() => {
+    const v = String(body?.metricDate || "").trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : metricDate;
   })();
 
   let saved = 0;
@@ -133,24 +153,95 @@ export async function POST(req: Request) {
     }
   }
 
-  // 账号级指标：公众号 / 视频号的新增关注（涨粉）与互动汇总
+  // 账号级指标：公众号 / 视频号的新增关注（涨粉）、累计粉丝数快照与互动汇总
   // （这些平台后台只提供账号级汇总，不提供内容级明细，由采集器在 body.summary 里带过来）
   const fans = Number(body?.fans);
+  const fanTotal = Number(body?.fanTotal);
   const sm = body?.summary;
   const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : undefined);
-  const summaryPayload = {
+  const summaryPayload: Record<string, number> = {
     ...(Number.isFinite(fans) ? { fans } : {}),
+    ...(Number.isFinite(fanTotal) ? { fansTotal: fanTotal } : {}),
     ...(num(sm?.reads) !== undefined ? { reads: num(sm?.reads) } : {}),
     ...(num(sm?.shares) !== undefined ? { shares: num(sm?.shares) } : {}),
     ...(num(sm?.likes) !== undefined ? { likes: num(sm?.likes) } : {}),
     ...(num(sm?.wows) !== undefined ? { wows: num(sm?.wows) } : {}),
   };
-  if (Object.keys(summaryPayload).length > 0) {
+  // 平台自带的窗口总计（近7天/近30天）：微信后台给的是现成汇总，不是按天数据，
+  // 存成 windowsJson 供流量矩阵直接取用（否则近7天只能累加我们残缺的日行）。
+  const normWin = (o: any) => {
+    if (!o || typeof o !== "object") return null;
+    const out: Record<string, number> = {};
+    for (const k of ["reads", "likes", "shares", "wows", "comments"]) {
+      const n = Number(o[k]);
+      if (Number.isFinite(n)) out[k] = n;
+    }
+    return Object.keys(out).length ? out : null;
+  };
+  const w7 = normWin(body?.summary7);
+  const w30 = normWin(body?.summary30);
+  const winObj: Record<string, Record<string, number>> = {};
+  if (w7) winObj["7"] = w7;
+  if (w30) winObj["30"] = w30;
+  const windowsJson = Object.keys(winObj).length ? JSON.stringify(winObj) : null;
+
+  if (Object.keys(summaryPayload).length > 0 || windowsJson) {
+    const siteData: any = { ...summaryPayload };
+    if (windowsJson) siteData.windowsJson = windowsJson;
+    const upsertSite = (data: any) =>
+      prisma.platformSiteMetric.upsert({
+        where: { userId_platform_metricDate: { userId, platform, metricDate: summaryDate } },
+        update: data,
+        create: { userId, platform, metricDate: summaryDate, ...data },
+      });
+    try {
+      await upsertSite(siteData);
+    } catch {
+      // 旧 Prisma client 还不认识 windowsJson（未重新 generate）时降级
+      const { windowsJson: _drop, ...rest } = siteData;
+      await upsertSite(rest);
+    }
+  }
+
+  // 粉丝按区域分布（微信生态「用户属性/地域分布」）：批量 upsert 到 PlatformFanRegion
+  // 以本次抓到的省份集合为准覆盖当天快照（缺省省份视为 0，当次不写脏数据）。
+  let regionRows = 0;
+  const regions: any[] = Array.isArray(body?.regions) ? body.regions : [];
+  if (regions.length > 0) {
+    for (const r of regions) {
+      const province = String(r?.province || "").trim();
+      const rfans = Number(r?.fans);
+      if (!province || !Number.isFinite(rfans)) continue;
+      await prisma.platformFanRegion.upsert({
+        where: {
+          userId_platform_metricDate_province: { userId, platform, metricDate: summaryDate, province },
+        },
+        update: { fans: rfans },
+        create: { userId, platform, metricDate: summaryDate, province, fans: rfans },
+      });
+      regionRows++;
+    }
+  }
+
+  // 粉丝逐日增长（微信「用户增长」按天序列）：每天一行，供用户维度按时间窗口统计新增粉丝。
+  // fanDays: [{ date: "yyyy-MM-dd", newFans: number, cumulate?: number }]
+  let fanDayRows = 0;
+  const fanDays: any[] = Array.isArray(body?.fanDays) ? body.fanDays : [];
+  for (const d of fanDays) {
+    const date = String(d?.date || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    const newFans = Number(d?.newFans);
+    const cum = Number(d?.cumulate);
+    const payload: Record<string, number> = {};
+    if (Number.isFinite(newFans)) payload.fans = Math.max(0, newFans);
+    if (Number.isFinite(cum) && cum > 0) payload.fansTotal = cum;
+    if (Object.keys(payload).length === 0) continue;
     await prisma.platformSiteMetric.upsert({
-      where: { userId_platform_metricDate: { userId, platform, metricDate } },
-      update: summaryPayload,
-      create: { userId, platform, metricDate, ...summaryPayload },
+      where: { userId_platform_metricDate: { userId, platform, metricDate: date } },
+      update: payload,
+      create: { userId, platform, metricDate: date, ...payload },
     });
+    fanDayRows++;
   }
 
   const extra = [
@@ -158,6 +249,9 @@ export async function POST(req: Request) {
     skippedNotPublic > 0 ? `已排除 ${skippedNotPublic} 条非公开内容` : "",
     removed > 0 ? `清理 ${removed} 条不可见残留` : "",
     Number.isFinite(fans) ? `新增关注 ${fans}` : "",
+    Number.isFinite(fanTotal) ? `累计粉丝 ${fanTotal}` : "",
+    fanDayRows > 0 ? `粉丝逐日 ${fanDayRows} 天` : "",
+    regionRows > 0 ? `粉丝地域 ${regionRows} 省` : "",
     num(sm?.reads) !== undefined ? `阅读 ${num(sm?.reads)}` : "",
   ].filter(Boolean).join("；");
   await prisma.platformAccount.update({

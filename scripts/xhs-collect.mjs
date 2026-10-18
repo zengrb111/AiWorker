@@ -70,6 +70,8 @@ try {
   let nextId = 1;
   const pending = new Map();
   const postedResponses = [];
+  // 用户/账号类接口（粉丝数所在）——端点名不固定，按关键字拦截，best-effort
+  const userInfoResponses = [];
   const pageByUrl = (u) => {
     const m = /[?&]page=(\d+)/.exec(u);
     return m ? Number(m[1]) : 0;
@@ -80,6 +82,15 @@ try {
       const u = msg.params?.response?.url || '';
       if (u.includes('/api/galaxy/v2/creator/note/user/posted')) {
         postedResponses.push({ requestId: msg.params.requestId, page: pageByUrl(u) });
+      }
+      // 用户/账号信息接口（粉丝数）：端点名不固定，凡路径含 user/personal/profile/account 的 JSON 都收
+      if (
+        u.includes('/api/galaxy/') &&
+        !u.includes('/note/user/posted') &&
+        /(user|personal|profile|account)/i.test(u) &&
+        String(msg.params?.response?.mimeType || '').includes('json')
+      ) {
+        userInfoResponses.push(msg.params.requestId);
       }
     }
     if (msg.id && pending.has(msg.id)) {
@@ -107,6 +118,40 @@ try {
   }
   await send('Page.navigate', { url: 'https://creator.xiaohongshu.com/' });
   await sleep(9000);
+
+  // 从拦截到的用户类接口里找粉丝数（best-effort，失败不影响主流程）。
+  // 必须趁首页响应还在缓存里读取（点「笔记管理」后导航容易把 body 冲掉）。
+  const readRespBody = async (requestId) => {
+    const r = await send('Network.getResponseBody', { requestId }).catch(() => null);
+    if (!r) return '';
+    return r.base64Encoded ? Buffer.from(r.body || '', 'base64').toString('utf8') : (r.body || '');
+  };
+  const findFans = (obj) => {
+    const KEYS = new Set(['fans', 'fansCount', 'fans_count', 'fansNum', 'fans_num', 'followers', 'followersCount', 'followers_count', 'total_fans_count']);
+    let found = null;
+    const walk = (v, depth) => {
+      if (found != null || depth > 6 || !v || typeof v !== 'object') return;
+      if (Array.isArray(v)) { for (const x of v) walk(x, depth + 1); return; }
+      for (const [k, val] of Object.entries(v)) {
+        if (KEYS.has(k) && (typeof val === 'number' || /^\d+$/.test(String(val)))) { found = Number(val); return; }
+        walk(val, depth + 1);
+        if (found != null) return;
+      }
+    };
+    walk(obj, 0);
+    return found;
+  };
+  let fanTotal = null;
+  for (const rid of userInfoResponses) {
+    try {
+      const txt = await readRespBody(rid);
+      if (!txt) continue;
+      const got = findFans(JSON.parse(txt));
+      if (got != null && got > 0) { fanTotal = got; break; }
+    } catch { /* 忽略单个接口失败 */ }
+  }
+  console.log('[xhs-collect] 累计粉丝:', fanTotal ?? '未获取到');
+
   const clicked = await evaluate(`(()=>{ const l=[...document.querySelectorAll('a,li,span,div')].filter(e=>e.children.length<=1&&(e.textContent||'').trim()==='笔记管理'); if(l.length){l[0].click();return true;} return false; })()`);
   if (!clicked) throw new Error('未找到「笔记管理」入口（Cookie 可能已失效）');
   await sleep(9000);
@@ -192,7 +237,14 @@ try {
   const res = await fetch(`${API}/api/platform-metrics/ingest`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ platform: 'xhs', notes, bodies, accountId: process.env.ACCOUNT_ID || '' }),
+    body: JSON.stringify({
+      platform: 'xhs',
+      notes,
+      bodies,
+      accountId: process.env.ACCOUNT_ID || '',
+      // 累计粉丝快照（拦截 creator 用户接口 best-effort 获取），供「用户维度」全渠道统计
+      ...(fanTotal != null ? { fanTotal } : {}),
+    }),
   });
   const out = await res.json().catch(() => null);
   console.log('入库结果 HTTP', res.status, JSON.stringify(out));
