@@ -2944,7 +2944,9 @@ export default function PlatformClient() {
                           className={`message ${message.role === "USER" ? "user" : "assistant"}`}
                           // 出片结果是对话里最后要看到的东西：即便它作为消息先被持久化，
                           // 也用 order 把它排到回显/方案/进度之后（.message-list 是 grid）。
-                          style={messageVideoUrl && isLastAssistant ? { order: 999 } : undefined}
+                          // 但仅在「非生成中」生效——重新生成方案时，新的流式进度才是最新内容，
+                          // 必须按自然顺序落在最底，不能被旧视频的 order:999 压到它上面。
+                          style={messageVideoUrl && isLastAssistant && !sending ? { order: 999 } : undefined}
                         >
                           {message.role === "ASSISTANT" ? (
                             <>
