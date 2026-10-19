@@ -2942,11 +2942,14 @@ export default function PlatformClient() {
                           key={message.id}
                           id={`message-${message.id}`}
                           className={`message ${message.role === "USER" ? "user" : "assistant"}`}
-                          // 出片结果是对话里最后要看到的东西：即便它作为消息先被持久化，
-                          // 也用 order 把它排到回显/方案/进度之后（.message-list 是 grid）。
-                          // 但仅在「非生成中」生效——重新生成方案时，新的流式进度才是最新内容，
-                          // 必须按自然顺序落在最底，不能被旧视频的 order:999 压到它上面。
-                          style={messageVideoUrl && isLastAssistant && !sending ? { order: 999 } : undefined}
+                          // 出片结果是对话里最后要看到的东西：用 order 把它排到回显/方案/进度之后
+                          // （.message-list 是 grid）。仅在「无任何进行中的生成/规划」时生效——
+                          // 否则重新生成方案/出片时，进行中的流式进度气泡（order:1000）会被旧视频压到上方。
+                          style={
+                            messageVideoUrl && isLastAssistant && !sending && !genVideoPlanning && !articlePlanning
+                              ? { order: 999 }
+                              : undefined
+                          }
                         >
                           {message.role === "ASSISTANT" ? (
                             <>
@@ -3241,7 +3244,12 @@ export default function PlatformClient() {
                       </article>
                     )}
                     {(sending || genVideoPlanning || articlePlanning) && (isThinking || streamingContent) && (
-                      <article className="message assistant streaming">
+                      <article
+                        className="message assistant streaming"
+                        // 进行中的流式进度永远压在消息列表最底：高于已出片视频的 order:999，
+                        // 这样无论上次有没有视频，本次生成的进度都落在最下方。
+                        style={{ order: 1000 }}
+                      >
                         {isThinking && !streamingContent ? (
                           <span className="thinking-indicator">
                             <span className="thinking-dots">
