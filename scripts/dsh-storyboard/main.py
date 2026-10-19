@@ -50,6 +50,10 @@ def main() -> int:
         patch: str | None = request.get("patch") or None
         model: str | None = request.get("model") or None
         timeout_ms: int = int(request.get("timeout_ms") or 180_000)
+        # 可选：注入到 agent 子进程（tool-bash 等）的环境变量。
+        # 出片任务用它把 NODE_BIN / FFMPEG_BIN / FFPROBE_BIN / PATH 传进去，
+        # 让 DSH 的 bash 工具能直接调用 node 与 ffmpeg。
+        extra_env: dict = request.get("env") or {}
 
         if not prompt.strip():
             raise ValueError("prompt 为空")
@@ -60,6 +64,12 @@ def main() -> int:
 
         # 延迟 import：DSH_HOME 必须在进程环境里就位
         from deepseek_harness import DeepSeekHarness, DeepSeekHarnessConfig  # type: ignore
+
+        # agent 子进程的环境：在进程自身环境之上叠加 NO_COLOR 与调用方注入的变量。
+        # 必须**合并**而非**替换** —— 否则 tool-bash 会丢掉 PATH，连 `node` / `ffmpeg`
+        # 都找不到（分镜任务因 tool-bash 被禁用无所谓，出片任务放开 bash 后才暴露）。
+        harness_env: dict = {**os.environ, "NO_COLOR": "1"}
+        harness_env.update(extra_env)
 
         config = DeepSeekHarnessConfig(
             # 用官方 sdk 档 + patch 覆盖层，而不是在 $DSH_HOME 里维护自定义 profile：
@@ -76,7 +86,7 @@ def main() -> int:
             base_url=os.environ.get("DEEPSEEK_BASE_URL") or None,
             # 默认 deepseek-flash；分镜是短 JSON 输出，用 flash 足够且更快
             model=model or "deepseek-v4-flash",
-            env={"NO_COLOR": "1"},
+            env=harness_env,
             # 初始化只做插件加载，60s 足够；真正的执行预算是 request_timeout_seconds
             initialize_timeout_seconds=60.0,
             request_timeout_seconds=timeout_ms / 1000.0,

@@ -476,9 +476,31 @@ export default function SettingsPanel({ resetToken }: { resetToken: number }) {
         <div className="cfg-assign-list">
           {capabilities.map((row) => {
             const allowed = CAPABILITY_FORMAT[row.capability] ?? ["openai-completions"];
-            const candidates = items.filter((item) => allowed.includes(item.apiFormat));
+            const candidates = items.filter((item) => {
+              if (allowed.includes(item.apiFormat)) return true;
+              // 配音：DashScope 的通用 provider（openai-completions + dashscope 域名）也能跑
+              // 千问 TTS（qwen3-tts-flash），不该被 apiFormat 白名单挡住 —— 用户常只建一个
+              // DashScope provider 同时用于对话与配音，再单独建一个 tts 专用 provider 很反直觉。
+              if (
+                row.capability === "tts" &&
+                item.apiFormat === "openai-completions" &&
+                /dashscope\.aliyuncs\.com/i.test(item.baseUrl)
+              ) {
+                return true;
+              }
+              return false;
+            });
             const current = assignmentDraft[row.capability] ?? { providerRowId: "", model: "" };
             const provider = items.find((item) => item.id === current.providerRowId);
+            // 配音优先只列 TTS 模型（如 qwen3-tts-flash）；没有匹配再回退全部模型。
+            const allModels = provider?.models ?? [];
+            const ttsModels =
+              row.capability === "tts"
+                ? allModels.filter(
+                    (model) => /tts/i.test(model.id) || /tts|配音/i.test(model.name || ""),
+                  )
+                : [];
+            const modelChoices = ttsModels.length ? ttsModels : allModels;
             return (
               <div key={row.capability} className="cfg-assign-row">
                 <span className="cfg-assign-icon">{CAPABILITY_ICON[row.capability] ?? "CFG"}</span>
@@ -517,11 +539,11 @@ export default function SettingsPanel({ resetToken }: { resetToken: number }) {
                   <select
                     className="cfg-select"
                     value={current.model}
-                    disabled={!provider || provider.models.length === 0}
+                    disabled={!provider || modelChoices.length === 0}
                     onChange={(e) => changeAssignmentModel(row.capability, e.target.value)}
                   >
                     <option value="">选择模型</option>
-                    {(provider?.models ?? []).map((model) => (
+                    {modelChoices.map((model) => (
                       <option key={model.id} value={model.id}>
                         {model.name || model.id}
                       </option>

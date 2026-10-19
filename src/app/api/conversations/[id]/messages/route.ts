@@ -5,7 +5,8 @@ import { chatComplete, chatCompleteStream } from "@/lib/llm-client";
 import { openClawClient, friendlyGatewayError, classifyGatewayError } from "@/lib/openclaw";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { searchWeb } from "@/lib/web-search";
+import { searchWeb, type SearchHit } from "@/lib/web-search";
+import { fetchHotBoards } from "@/lib/hot-boards";
 import { snapshotUserConfig, resolveCapabilityConfig, type ResolvedModelConfig } from "@/lib/model-credentials";
 import { generateCoverImage, generateImageUrls, coverPlatformOf, type CoverPlatform } from "@/lib/image-gen";
 import { ocrImageText } from "@/lib/ocr";
@@ -34,6 +35,35 @@ type MessageBody = {
   content?: string;
   url?: string;
 };
+
+/**
+ * 拉取「今日全网热点」真实素材。
+ *
+ * 两条来源，优先级与 web-search 的既定策略一致：
+ * 1) 用户自己配置的搜索服务（Tavily / 博查）—— 真实联网检索「今日全网热点」；
+ * 2) 内置公开热榜（hot-boards.ts）—— 零 key、零 token，直接返回当日榜单前 N 条。
+ *
+ * 关键修复：不能走 `searchWeb` 的「内置热榜」兜底分支。该分支会拿 query
+ * 「今日全网热点」去逐条过滤热榜标题，而「今日全网热点」是通用短语、不在任何
+ * 标题里，于是过滤结果为空、回退成一个「标题=今日全网热点」的占位假条目 ——
+ * 模型拿不到真实素材，要么编造、要么报「无相关热点」，整条链路就废了。
+ * 所以这里在无用户搜索服务时，直接取整张榜单（它就是当日热点本身），不过滤。
+ */
+async function getTodayHotList(
+  userId: string,
+  searchConfig: ResolvedModelConfig | null | undefined
+): Promise<SearchHit[]> {
+  if (searchConfig) {
+    return searchWeb({ userId, query: "今日全网热点", topK: 12, config: searchConfig });
+  }
+  const boards = await fetchHotBoards(20);
+  return boards.map((board) => ({
+    title: board.title,
+    url: board.url,
+    snippet: board.snippet,
+    origin: board.origin
+  }));
+}
 
 type ConversationMessage = {
   role: string;
@@ -254,15 +284,23 @@ function buildCronBlock(jobs: UserScheduledJob[] | null, userId: string): string
   const base = (process.env.AIWORKER_BASE_URL || "http://127.0.0.1:3000").trim();
   const token = (process.env.SCHEDULE_API_TOKEN || process.env.CONTENT_INGEST_TOKEN || "").trim();
   if (token) {
+    // 令牌**绝不放进提示词原文**：模型复抄 48 位长随机串必然抄错（实测把 5e384587… 抄成
+    // 5e3845_bd87 → 接口 401，模型还误判"上下文给的是省略值"）。改为注入一条从平台配置
+    // 文件实时读取的 shell 命令，文件读取是逐字节的，没有复抄误差。
+    const envPath = `${process.cwd().replace(/\\/g, "/")}/.env.local`;
     lines.push(
-      "- 定时任务的创建/修改/删除/查询一律走**平台接口**（唯一入口，不要用 openclaw cron）：",
+      "- 定时任务的创建/修改/删除/查询/立即执行一律走**平台接口**（唯一入口，不要用 openclaw cron）：",
       `  POST ${base}/api/scheduled-jobs/agent`,
-      `  Header: Authorization: Bearer ${token} ； Content-Type: application/json`,
+      "  Header: Authorization: Bearer $TOKEN ； Content-Type: application/json",
+      "  **$TOKEN 必须先用下面这条命令从平台配置文件读取**（不要手抄任何长令牌——复抄必错、之前已造成 401；也不要从其它配置文件里找令牌）：",
+      `  TOKEN=$(grep -m1 '^SCHEDULE_API_TOKEN=' '${envPath}' | cut -d= -f2- | tr -d '\\r"'); [ -n "$TOKEN" ] || TOKEN=$(grep -m1 '^CONTENT_INGEST_TOKEN=' '${envPath}' | cut -d= -f2- | tr -d '\\r"')`,
       "  Body 示例：",
       `    {"action":"create","userId":"${userId}","name":"每日内容生成","cronExpr":"30 17 * * *","timezone":"Asia/Shanghai","prompt":"到点要执行的完整指令"}`,
       `    {"action":"update","userId":"${userId}","id":"<任务id>","cronExpr":"0 9 * * *"}`,
       `    {"action":"delete","userId":"${userId}","id":"<任务id>"}`,
+      `    {"action":"run","userId":"${userId}","id":"<任务id>"}   ← 立即执行一次；执行结果写回任务记录，用 action:list 查看 lastStatus/lastResult`,
       "  userId 必须固定为当前用户；cronExpr 为 5 段（分 时 日 月 周）；时区默认 Asia/Shanghai。",
+      "- 若接口返回 401，说明 $TOKEN 没取对：重新原样执行上面的 TOKEN=… 命令后再试，不要自己猜、拼或截断令牌。",
       "- **严禁**使用 `openclaw cron`（add / edit / rm / list 等）：网关侧已不再保存用户定时任务，只剩系统任务；用它既拿不到也可能看到不该看的东西。"
     );
   } else {
@@ -869,13 +907,9 @@ export async function POST(request: Request, context: { params: { id: string } }
           // 快照一次配置：同一次请求里搜索与对话用同一份用户配置，不会中途换模型/换密钥。
           const snapshot = await snapshotUserConfig(user.id);
 
-          // 第一步：真实联网搜索（失败即报错，绝不让模型在没有素材时编造今日热点）。
-          const hits = await searchWeb({
-            userId: user.id,
-            query: "今日全网热点",
-            topK: 12,
-            config: snapshot.search
-          });
+          // 第一步：真实联网热点（失败即报错，绝不让模型在没有素材时编造今日热点）。
+          // 优先用用户自己的搜索服务；未配置时直接取内置公开热榜（当日热点本身，不过滤）。
+          const hits = await getTodayHotList(user.id, snapshot.search);
           controller.enqueue(
             sseEncode({ type: "delta", text: `已联网获取 ${hits.length} 条当日热点，正在结合知识库中的产品知识逐条比对筛选…\n\n` })
           );
@@ -933,6 +967,92 @@ export async function POST(request: Request, context: { params: { id: string } }
     }
   });
 }
+
+  if (content === "今日全网热点" || content === "今日全网热点推荐") {
+    const userMessage = await prisma.message.create({
+      data: { conversationId: conversation.id, role: "USER", content }
+    });
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        let taskId: string | undefined;
+        const finishWith = async (
+          assistantContent: string,
+          taskStatus: "SUCCEEDED" | "FAILED",
+          taskError?: string,
+          id?: string
+        ) => {
+          const assistantMessage = await prisma.message.create({
+            data: { conversationId: conversation.id, role: "ASSISTANT", content: assistantContent }
+          });
+          if (taskId) {
+            await prisma.openClawTask.update({
+              where: { id: taskId },
+              data: { status: taskStatus, ...(taskError ? { error: taskError } : {}) }
+            });
+          }
+          controller.enqueue(
+            sseEncode({
+              type: "final",
+              message: {
+                id: assistantMessage.id,
+                role: "ASSISTANT",
+                content: assistantMessage.content,
+                createdAt: assistantMessage.createdAt.toISOString()
+              },
+              userMessage
+            })
+          );
+          controller.close();
+        };
+
+        try {
+          controller.enqueue(sseEncode({ type: "delta", text: "正在联网获取今日真实热点…" }));
+
+          const task = await prisma.openClawTask.create({
+            data: { userId: user.id, type: "conversation", prompt: "今日全网热点", status: "RUNNING" }
+          });
+          taskId = task.id;
+
+          // 快照一次配置：同一次请求里搜索与对话用同一份用户配置。
+          const snapshot = await snapshotUserConfig(user.id);
+          const hits = await getTodayHotList(user.id, snapshot.search);
+
+          if (hits.length === 0) {
+            await finishWith("今日全网热点获取失败，未返回任何热点。请稍后重试。", "FAILED", "热榜返回空");
+            return;
+          }
+
+          const lines: string[] = ["以下是今日全网热点：", ""];
+          hits.slice(0, 12).forEach((hit, index) => {
+            lines.push(`${index + 1}. ${hit.title}`);
+          });
+          lines.push("", "（以上来自实时公开热榜，仅供参考）");
+
+          await finishWith(lines.join("\n"), "SUCCEEDED", undefined, task.id);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "获取今日热点失败。";
+          if (taskId) {
+            await prisma.openClawTask.update({
+              where: { id: taskId },
+              data: { status: "FAILED", error: message }
+            }).catch(() => {});
+          }
+          controller.enqueue(sseEncode({ type: "error", error: message || "获取今日热点失败。" }));
+          controller.close();
+        }
+      }
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no"
+      }
+    });
+  }
 
   if (content === "一键仿写爆款") {
     const url = body.url?.trim() ?? "";

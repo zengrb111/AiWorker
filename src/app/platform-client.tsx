@@ -560,6 +560,8 @@ type GenVideoPlan = {
     dataGaps: string[];
     notices: string[];
   } | null;
+  /** 回显到对话流的方案文本（规划阶段已写入 assistant 消息，前端追加即时展示）。 */
+  planEcho: string;
 };
 
 /**
@@ -575,6 +577,9 @@ const DEFAULT_LOOK_EFFECTS = [
   { value: "collage", label: "撕纸拼贴" },
   { value: "swiss-grid", label: "瑞士网格" },
 ];
+
+/** 「一键生成视频」创作要求的默认提示词（打开弹窗即预填，重置后也回到这一句）。 */
+const DEFAULT_GEN_VIDEO_REQUIREMENT = "生成ai回忆录宣传片";
 const DEFAULT_LOOK_MOTIONS = [
   { value: "auto", label: "跟随分镜（AI 逐镜头挑选）" },
   { value: "ken-burns", label: "缓慢推进" },
@@ -645,11 +650,12 @@ export default function PlatformClient() {
   const [remakePanelOpen, setRemakePanelOpen] = useState(false);
   const [genVideoPanelOpen, setGenVideoPanelOpen] = useState(false);
   const [genVideoImages, setGenVideoImages] = useState<Array<{ file: File; url: string }>>([]);
-  const [genVideoRequirement, setGenVideoRequirement] = useState("");
+  const [genVideoRequirement, setGenVideoRequirement] = useState(DEFAULT_GEN_VIDEO_REQUIREMENT);
   const [referenceVideoUrl, setReferenceVideoUrl] = useState("");
   const [referenceVideoFile, setReferenceVideoFile] = useState<File | null>(null);
   const [genVideoPreviewUrl, setGenVideoPreviewUrl] = useState<string | null>(null);
-  const [genVideoTtsProvider, setGenVideoTtsProvider] = useState<"zhipu" | "qwen">("qwen");
+  /** 解说语音引擎：默认「免费合成音」(edge-tts)，免费优先；云端引擎按需切换。 */
+  const [genVideoTtsProvider, setGenVideoTtsProvider] = useState<"zhipu" | "qwen" | "edge">("edge");
   /**
    * 视频风格。空串 = 自动（由后端按素材色调推断）。
    *
@@ -669,6 +675,8 @@ export default function PlatformClient() {
    * ------------------------------------------------------------------- */
   /** 正在生成方案。 */
   const [genVideoPlanning, setGenVideoPlanning] = useState(false);
+  /** 规划阶段的实时进展（SSE 流式推到会话里，生成完/失败后清空）。 */
+  const [planProgressLines, setPlanProgressLines] = useState<string[]>([]);
   /** 已确认的方案（来自 /gen-video/plan）。null = 还没出方案。 */
   const [genVideoPlan, setGenVideoPlan] = useState<GenVideoPlan | null>(null);
   /** 效果调整：外挂特效层（最多 2 层，与主题自带取并集）。 */
@@ -690,7 +698,10 @@ export default function PlatformClient() {
    * 与「一键生成视频」共用方案面板与出片逻辑，差别只有素材来源：
    * 那边传图片，这边传一篇文章，由服务端画好数据图表再当素材用。
    * ------------------------------------------------------------------- */
-  const [articleVideoPanelOpen, setArticleVideoPanelOpen] = useState(false);
+  /** 合并后的一键生成视频：同一面板里用 Tab 二选一（参考图 / 参考文章）。 */
+  const [videoInputTab, setVideoInputTab] = useState<"image" | "article">("image");
+  /** 文章模式下可选的参考图（作为画面素材补充）。 */
+  const [articleRefImages, setArticleRefImages] = useState<Array<{ file: File; url: string }>>([]);
   /** 文章来源方式：url = 抓链接，document = 上传文档，paste = 粘贴正文。 */
   const [articleSourceType, setArticleSourceType] = useState<"url" | "document" | "paste">("url");
   const [articleUrl, setArticleUrl] = useState("");
@@ -730,6 +741,15 @@ export default function PlatformClient() {
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
   /** 聊天输入区（含展开的面板）容器，用于把实际高度同步给消息列表的留白。 */
   const chatInputBoxRef = useRef<HTMLFormElement | null>(null);
+  /** 点「生成方案」后，把本次提交的参考图 + 提示词回显到会话里（流式体验的一部分）。
+   *  绑定 conversationId：出片完成后回显会保留，切换会话时不能串到别的对话。 */
+  const [videoRequestEcho, setVideoRequestEcho] = useState<{
+    prompt: string;
+    images: string[];
+    conversationId: string;
+    /** 文章模式下才有：来源与是否允许联网补充。 */
+    article?: { sourceType: string; label: string; allowSearch: boolean };
+  } | null>(null);
   const isPinnedRef = useRef(true); // 用户是否在底部附近（用于自动滚动判断）
   const lastScrollHeightRef = useRef(0); // 上一次看到的内容总高度，用来区分「内容变长」和「用户主动上滑」
   const [activeTurnIndex, setActiveTurnIndex] = useState(-1);
@@ -1201,7 +1221,7 @@ export default function PlatformClient() {
   useEffect(() => {
     if (!messageListRef.current) return;
     if (isPinnedRef.current) scrollListToBottom();
-  }, [streamingContent, isThinking, sending, activeConversation?.messages.length]);
+  }, [streamingContent, isThinking, sending, activeConversation?.messages.length, planProgressLines.length]);
 
   async function ensureRegisterQr(force = false) {
     if (registerLoading) return;
@@ -1302,6 +1322,28 @@ export default function PlatformClient() {
     setActiveConversationId(data.conversation.id);
   }
 
+  /**
+   * 把一段文本作为 assistant 消息即时追加到当前会话的本地状态。
+   * 用于「规划阶段方案回显」：服务端已把方案写进对话流（持久化），
+   * 这里再在本地追加一条，让用户在聊天里立刻看到，不必等刷新。
+   */
+  function appendLocalAssistantMessage(content: string) {
+    const conversationId = activeConversation?.id;
+    if (!conversationId || !content.trim()) return;
+    const echoMessage: Message = {
+      id: `echo-${Date.now()}`,
+      role: "ASSISTANT",
+      content,
+      createdAt: new Date().toISOString(),
+    };
+    setConversations((prev) =>
+      prev.map((conv) =>
+        conv.id === conversationId ? { ...conv, messages: [...conv.messages, echoMessage] } : conv,
+      ),
+    );
+    pinMessageListToBottom();
+  }
+
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await sendChatContent(chatInput);
@@ -1309,6 +1351,17 @@ export default function PlatformClient() {
 
   async function sendChatContent(content: string, url?: string) {
     if (!content.trim() || sending) return;
+
+    // 「一键生成视频 / 文章转视频」收敛到同一个面板：只切换 Tab 并打开，不往会话里发消息。
+    const videoShortcut = content.trim();
+    if (videoShortcut === "一键生成视频" || videoShortcut === "文章转视频") {
+      // 新一轮生成：清掉上一轮保留的回显与方案，弹窗从干净状态开始。
+      setGenVideoPlan(null);
+      setVideoRequestEcho(null);
+      setVideoInputTab(videoShortcut === "文章转视频" ? "article" : "image");
+      setGenVideoPanelOpen(true);
+      return;
+    }
 
     if (hotTopicPrompts.includes(content.trim())) {
       setMontagePanelOpen(false);
@@ -1403,14 +1456,16 @@ export default function PlatformClient() {
               setMontagePanelOpen(true);
             }
             if (content === "一键生成视频") {
+              setVideoInputTab("image");
               setGenVideoPanelOpen(true);
             }
             if (content === "一键复刻爆款视频") {
               setRemakePanelOpen(true);
             }
-            // 在对话框里手动输入「文章转视频」同样能拉起面板。
+            // 「文章转视频」已合并进一键生成视频：输入这个词就打开面板的「参考文章」Tab。
             if (content === "文章转视频") {
-              setArticleVideoPanelOpen(true);
+              setVideoInputTab("article");
+              setGenVideoPanelOpen(true);
             }
             // 方案 C：OpenClaw 可能 spawn 了平台视频 CLI。它回传的 JSON 里带 token，
             // 检测到就启动进度轮询，让用户在看会话的地方看到出片进度。
@@ -1561,17 +1616,86 @@ export default function PlatformClient() {
     return JSON.stringify(ordered);
   }
 
-  async function planGenVideo() {
-    const files = genVideoImages.map((item) => item.file);
+  /**
+   * 消费「生成方案」的 SSE 流（gen-video/plan 与 gen-article-video/plan 共用）。
+   *
+   * 规划要 1~2 分钟（识图 + 风格 + 旁白 + 配音 + DSH 分镜）。服务端把每一步
+   * 作为 progress 事件推下来，这里实时追加到 planProgressLines，让会话里
+   * 能看到「正在做什么」，而不是盯着一个灰掉的按钮干等。
+   */
+  async function consumePlanStream(response: Response): Promise<GenVideoPlan> {
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("生成方案未返回进度流。");
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let result: GenVideoPlan | null = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() || "";
+      for (const block of events) {
+        const dataLine = block.split("\n").find((line) => line.startsWith("data: "));
+        if (!dataLine) continue;
+        let data: {
+          type?: string;
+          text?: string;
+          error?: string;
+          modelConfig?: ModelConfigErrorPayload | null;
+          data?: GenVideoPlan;
+        };
+        try {
+          data = JSON.parse(dataLine.slice(6));
+        } catch {
+          continue;
+        }
+        if (data.type === "progress" && typeof data.text === "string" && data.text.trim()) {
+          const line = data.text;
+          setPlanProgressLines((previous) => [...previous, line]);
+        } else if (data.type === "done" && data.data) {
+          result = data.data;
+        } else if (data.type === "error") {
+          if (data.modelConfig) {
+            throw new ModelConfigApiError(data.error || "生成方案失败。", {
+              kind: data.modelConfig.kind,
+              capability: data.modelConfig.capability,
+            });
+          }
+          throw new Error(data.error || "生成方案失败。");
+        }
+      }
+    }
+    if (!result) throw new Error("生成方案结束但未收到结果，请重试。");
+    return result;
+  }
+
+  async function planGenVideo(filesArg?: File[], requirementArg?: string) {
+    // 第一步仍是弹窗（上传图 + 写提示词），点「生成方案」后走这里进入流式体验。
+    const files = filesArg ?? genVideoImages.map((item) => item.file);
+    const requirement = (requirementArg ?? genVideoRequirement).trim();
     const conversationId = activeConversation?.id;
     if (!files.length || !conversationId || genVideoPlanning) return;
 
     setGenVideoPlanning(true);
+    setPlanProgressLines([]);
     setChatError("");
+    // 把本次提交的参考图 + 提示词回显到会话，并收起弹窗 —— 之后全程在会话里看进展与方案。
+    setVideoRequestEcho({
+      prompt: requirement,
+      // 用独立 objectURL（从 File 现建），不与 genVideoImages 共用：
+      // 出片完成时 clearGenVideoImages 会 revoke 原 URL，独立 URL 才能让回显图继续可见。
+      images: files.map((file) => URL.createObjectURL(file)),
+      conversationId,
+    });
+    setGenVideoPanelOpen(false);
+    // 兜底超时：规划正常 1~2 分钟；若 DSH / 模型服务异常挂住，6 分钟后强制中断，
+    // 保证「生成方案」按钮不会永久灰着。
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6 * 60 * 1000);
     try {
       const form = new FormData();
       for (const file of files) form.append("image", file);
-      const requirement = genVideoRequirement.trim();
       if (requirement) form.append("requirement", requirement);
       form.append("ttsProvider", genVideoTtsProvider);
       // 空串不传，后端收到即视为「自动选风格」
@@ -1585,39 +1709,49 @@ export default function PlatformClient() {
       const response = await fetch(`/api/conversations/${conversationId}/gen-video/plan`, {
         method: "POST",
         body: form,
+        signal: controller.signal,
       });
-      // 这里刻意用 text() + 手动 JSON.parse，而不是 response.json()：
-      // 后端 500 时 Next.js 返回的是 HTML 错误页，response.json() 会抛异常，
-      // 曾经的表现是统一显示「生成方案请求失败。」——用户完全看不到真因。
-      // 2026-10-16 实际踩过：dev server 未重启，Prisma Client 还是旧版，
-      // prisma.videoPlan 为 undefined → 500 → 页面只报「请求失败」。
-      const raw = await response.text();
-      let payload: ApiResponse<GenVideoPlan>;
-      try {
-        payload = JSON.parse(raw) as ApiResponse<GenVideoPlan>;
-      } catch {
-        const firstLine = raw.replace(/\s+/g, " ").trim().slice(0, 160);
-        throw new Error(
-          `生成方案接口返回了非 JSON 响应（HTTP ${response.status}），` +
-            `通常是服务端编译或运行报错，请查看 dev server 日志。` +
-            (firstLine ? ` 响应开头：${firstLine}` : ""),
-        );
+
+      // 早期校验错误（未登录 / 对话不存在 / 图片格式）仍是 JSON + 非 200；
+      // 真正开始规划后才是 SSE 流。这里先兜住非 200 的 JSON 错误。
+      if (!response.ok) {
+        const raw = await response.text();
+        let payload: ApiResponse<GenVideoPlan>;
+        try {
+          payload = JSON.parse(raw) as ApiResponse<GenVideoPlan>;
+        } catch {
+          const firstLine = raw.replace(/\s+/g, " ").trim().slice(0, 160);
+          throw new Error(
+            `生成方案接口返回了非 JSON 响应（HTTP ${response.status}），` +
+              `通常是服务端编译或运行报错，请查看 dev server 日志。` +
+              (firstLine ? ` 响应开头：${firstLine}` : ""),
+          );
+        }
+        if (!payload.ok) {
+          if (isModelConfigError(payload)) throw new ModelConfigApiError(payload.error, payload);
+          throw new Error(payload.error);
+        }
+        throw new Error(`生成方案请求失败（HTTP ${response.status}）。`);
       }
-      if (!payload.ok) {
-        // 缺配置 → 抛带结构的错误，让外层给「去系统配置」入口；
-        // 其余错误仍按普通错误展示。
-        if (isModelConfigError(payload)) throw new ModelConfigApiError(payload.error, payload);
-        throw new Error(payload.error);
-      }
-      setGenVideoPlan(payload.data);
-      // 方案已出，出片时走 planToken 由服务端复用已落盘的素材，这里无需再留 file 句柄
+
+      const plan = await consumePlanStream(response);
+      setGenVideoPlan(plan);
+      // 方案已出：会话内用方案卡片展示（不再追加文本回显，避免重复）；
+      // 服务端仍落了一条 assistant 消息，刷新后可见。
+      // 出片时走 planToken 由服务端复用已落盘的素材，这里无需再留 file 句柄
       clearGenVideoImages();
     } catch (error) {
-      if (!reportApiFailure("生成方案失败", error)) {
+      if (controller.signal.aborted) {
+        setChatError("生成方案超时（超过 6 分钟），请重试；若反复超时请检查 DSH 与模型服务是否正常。");
+      } else if (!reportApiFailure("生成方案失败", error)) {
         setChatError(error instanceof Error ? error.message : "生成方案失败，请稍后重试。");
       }
+      // 失败时把第一步弹窗重新打开（参考图/提示词都还在），方便用户调整后重试。
+      setGenVideoPanelOpen(true);
     } finally {
+      clearTimeout(timeoutId);
       setGenVideoPlanning(false);
+      setPlanProgressLines([]);
     }
   }
 
@@ -1648,9 +1782,10 @@ export default function PlatformClient() {
         } else if (data.type === "final") {
           setLastVideoUrl(data.videoUrl || null);
           clearGenVideoImages();
-          setGenVideoRequirement("");
-          // 方案已被消耗，下次出片必须重新出方案（配音文件也只对应这一条）
-          setGenVideoPlan(null);
+          setGenVideoRequirement(DEFAULT_GEN_VIDEO_REQUIREMENT);
+          // 方案卡片与参考图/提示词回显都保留：出片完成后仍能看到
+          // 「这条视频是按什么方案、哪些图、什么要求做的」。
+          // 下次点「一键生成视频」时会统一重置（见该入口的清空逻辑）。
           setGenVideoEffects([]);
           setGenVideoMotion("auto");
           setGenVideoCaptionStyle("classic");
@@ -1662,10 +1797,13 @@ export default function PlatformClient() {
           setArticleFile(null);
           setArticleText("");
           setArticleRequirement("");
-          setArticleVideoPanelOpen(false);
-          // 内容仍正常入库并刷新内容库列表，但不弹「已保存到内容库」提示条。
+          setArticleRefImages([]);
+          // 视频同样入库；把这条内容记下来，让视频消息显示「已保存到内容库 · 查看」入口
+          // （不弹全局提示条，只在该消息上给一个查看按钮）。
           if (data.contentSaved) {
-            await refreshContent();
+            const all = await refreshContent();
+            const saved = all.find((c) => c.id === data.contentSaved.id);
+            if (saved) setLastSavedContent(saved);
           }
           await refreshConversations();
         } else if (data.type === "error") {
@@ -1700,12 +1838,12 @@ export default function PlatformClient() {
     const conversationId = activeConversation?.id;
     if (!conversationId || sending) return;
 
+    // 出片期间保留参考图 / 提示词 / 方案卡片，让用户在等待时仍能看到这条片子的上下文。
     setSending(true);
     setIsThinking(true);
     setChatError("");
     setStreamingContent("");
     setGenVideoPanelOpen(false);
-    setArticleVideoPanelOpen(false);
     setGenVideoPreviewUrl(null);
     // 视频类功能不展示「已保存到内容库」提示条，先清掉可能残留的旧值。
     setLastSavedContent(null);
@@ -1714,6 +1852,8 @@ export default function PlatformClient() {
     try {
       const form = new FormData();
       form.append("planToken", planToken);
+      // TTS 现在在出片阶段才合成，必须把用户选的引擎带过来（否则会退回后端默认）。
+      form.append("ttsProvider", genVideoTtsProvider);
       const response = await fetch(`/api/conversations/${conversationId}/gen-video`, {
         method: "POST",
         body: form,
@@ -1758,7 +1898,26 @@ export default function PlatformClient() {
     }
 
     setArticlePlanning(true);
+    setPlanProgressLines([]);
     setChatError("");
+    // 回显本次提交：文章来源 +（可选）参考图 + 提示词，展示在会话里（与图片模式一致）。
+    const articleLabel =
+      articleSourceType === "url"
+        ? articleUrl.trim()
+        : articleSourceType === "document"
+          ? articleFile?.name ?? ""
+          : `粘贴正文（${articleText.trim().length} 字）`;
+    setVideoRequestEcho({
+      prompt: articleRequirement.trim(),
+      images: articleRefImages.map((item) => item.url),
+      conversationId,
+      article: { sourceType: articleSourceType, label: articleLabel, allowSearch: articleAllowSearch },
+    });
+    // 与参考图模式一致：点「生成方案」立刻收起面板，之后全程在会话里看回显 + 流式进展。
+    setGenVideoPanelOpen(false);
+    // 兜底超时：文章理解 + 配音 + 分镜正常 1~2 分钟，异常挂住时 6 分钟后强制中断。
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6 * 60 * 1000);
     try {
       const form = new FormData();
       form.append("sourceType", articleSourceType);
@@ -1774,37 +1933,52 @@ export default function PlatformClient() {
       form.append("lookMotion", genVideoMotion);
       form.append("captionStyle", genVideoCaptionStyle);
       if (articleAllowSearch) form.append("allowSearch", "1");
+      // 可选参考图：作为画面素材补充，与文章图表一起进入分镜
+      for (const item of articleRefImages) form.append("image", item.file);
 
       const response = await fetch(`/api/conversations/${conversationId}/gen-article-video/plan`, {
         method: "POST",
         body: form,
+        signal: controller.signal,
       });
-      // 与 planGenVideo 同款：手动 JSON.parse，让 500 的真因能被看到。
-      const raw = await response.text();
-      let payload: ApiResponse<GenVideoPlan>;
-      try {
-        payload = JSON.parse(raw) as ApiResponse<GenVideoPlan>;
-      } catch {
-        const firstLine = raw.replace(/\s+/g, " ").trim().slice(0, 160);
-        throw new Error(
-          `文章转视频方案接口返回了非 JSON 响应（HTTP ${response.status}），` +
-          `通常是服务端编译或运行报错，请查看 dev server 日志。` +
-          (firstLine ? ` 响应开头：${firstLine}` : "")
-        );
+      // 早期校验错误（未登录 / 对话不存在 / 文章来源无效）仍是 JSON + 非 200；
+      // 真正开始规划后才是 SSE 流。这里先兜住非 200 的 JSON 错误。
+      if (!response.ok) {
+        const raw = await response.text();
+        let payload: ApiResponse<GenVideoPlan>;
+        try {
+          payload = JSON.parse(raw) as ApiResponse<GenVideoPlan>;
+        } catch {
+          const firstLine = raw.replace(/\s+/g, " ").trim().slice(0, 160);
+          throw new Error(
+            `文章转视频方案接口返回了非 JSON 响应（HTTP ${response.status}），` +
+            `通常是服务端编译或运行报错，请查看 dev server 日志。` +
+            (firstLine ? ` 响应开头：${firstLine}` : "")
+          );
+        }
+        if (!payload.ok) {
+          if (isModelConfigError(payload)) throw new ModelConfigApiError(payload.error, payload);
+          throw new Error(payload.error);
+        }
+        throw new Error(`文章转视频方案请求失败（HTTP ${response.status}）。`);
       }
-      if (!payload.ok) {
-        if (isModelConfigError(payload)) throw new ModelConfigApiError(payload.error, payload);
-        throw new Error(payload.error);
-      }
-      // 方案与图表清单都在 genVideoPlan 里，方案面板与确认按钮因此可以完全复用。
-      setGenVideoPlan(payload.data);
-      setGenVideoPanelOpen(true);
+
+      const plan = await consumePlanStream(response);
+      // 方案已在会话内用方案卡片展示（setGenVideoPlan），这里收起面板即可。
+      setGenVideoPlan(plan);
+      setGenVideoPanelOpen(false);
     } catch (error) {
-      if (!reportApiFailure("文章转视频方案生成失败", error)) {
+      if (controller.signal.aborted) {
+        setChatError("生成方案超时（超过 6 分钟），请重试；若反复超时请检查 DSH 与模型服务是否正常。");
+      } else if (!reportApiFailure("文章转视频方案生成失败", error)) {
         setChatError(error instanceof Error ? error.message : "生成方案失败，请稍后重试。");
       }
+      // 失败时重新打开文章面板（输入都还在），方便调整后重试。
+      setGenVideoPanelOpen(true);
     } finally {
+      clearTimeout(timeoutId);
       setArticlePlanning(false);
+      setPlanProgressLines([]);
     }
   }
 
@@ -2739,6 +2913,9 @@ export default function PlatformClient() {
                           message.role === "ASSISTANT" &&
                           message.id === lastAssistantId &&
                           !isHotTopicsReply &&
+                          // 视频消息不做「去 AI 味」：它没有可改写的正文，
+                          // 只保留「已保存到内容库 · 查看」入口即可。
+                          !messageVideoUrl &&
                           isHumanizableArticle(message.content);
                         // 「一键去 AI 味」的产物：正文已回写内容库，给一个明确的查看入口
                         const isHumanizeResult = message.role === "ASSISTANT" && isHumanizeResultText(message.content);
@@ -2792,16 +2969,26 @@ export default function PlatformClient() {
                                 </div>
                               )}
                               {messageVideoUrl && (
-                                <div className="video-player-wrap">
-                                  <video controls src={messageVideoUrl} className="inline-video-player" />
-                                </div>
+                                <>
+                                  <div className="video-player-wrap">
+                                    <video controls src={messageVideoUrl} className="inline-video-player" />
+                                  </div>
+                                  <a
+                                    className="video-open-link"
+                                    href={messageVideoUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    打开视频 / 下载 →
+                                  </a>
+                                </>
                               )}
                             </>
                           ) : (
                             message.content
                           )}
                           {message.role === "ASSISTANT" && (isHumanizeResult || savedContentForMessage || showHumanize) && (
-                            <div className="message-actions">
+                            <div className={`message-actions${messageVideoUrl ? " message-actions-left" : ""}`}>
                               {isHumanizeResult ? (
                                 <button
                                   className="message-saved-link humanize-saved-link"
@@ -2834,6 +3021,204 @@ export default function PlatformClient() {
                       );
                       });
                     })()}
+                    {/* 对话内「一键生成视频」：先回显用户提交的参考图 + 提示词 */}
+                    {videoRequestEcho && videoRequestEcho.conversationId === activeConversation?.id && (
+                      <article className="message user video-request-echo">
+                        <div className="video-request-prompt">
+                          {videoRequestEcho.prompt || "（未填写创作要求，按素材自动生成）"}
+                        </div>
+                        {videoRequestEcho.article && (
+                          <div className="video-request-article">
+                            <span className="video-request-article-badge">参考文章</span>
+                            <span className="video-request-article-label">{videoRequestEcho.article.label}</span>
+                            {videoRequestEcho.article.allowSearch && (
+                              <span className="video-request-search-badge">允许联网补充（≤1 次）</span>
+                            )}
+                          </div>
+                        )}
+                        {videoRequestEcho.images.length > 0 && (
+                          <>
+                            <div className="video-request-images-label">
+                              {videoRequestEcho.article ? "参考图（可选）" : "参考图"}
+                            </div>
+                            <div className="video-request-images">
+                              {videoRequestEcho.images.map((src, index) => (
+                                <img
+                                  key={index}
+                                  src={src}
+                                  alt={`参考图 ${index + 1}`}
+                                  onClick={() => setGenVideoPreviewUrl(src)}
+                                />
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </article>
+                    )}
+                    {planProgressLines.length > 0 && (
+                      <article className="message assistant streaming plan-progress">
+                        <div className="plan-progress-head">
+                          <span className="thinking-indicator">
+                            <span className="thinking-dots">
+                              <span className="thinking-dot" />
+                              <span className="thinking-dot" />
+                              <span className="thinking-dot" />
+                            </span>
+                            正在生成视频方案…
+                          </span>
+                        </div>
+                        <ul className="plan-progress-list">
+                          {planProgressLines.map((line, index) => (
+                            <li
+                              key={index}
+                              className={index === planProgressLines.length - 1 ? "current" : ""}
+                            >
+                              {line}
+                            </li>
+                          ))}
+                        </ul>
+                      </article>
+                    )}
+                    {/* 对话内方案卡片：图片 / 文章两种输入都走这里（合并后统一展示） */}
+                    {genVideoPlan && !genVideoPanelOpen && (
+                      <article className="message assistant gen-video-plan-inline">
+                        <div className="gen-video-plan">
+                          <div className="gen-video-plan-head">
+                            <strong>AI 视频方案</strong>
+                            <span className="gen-video-plan-meta">
+                              {genVideoPlan.summary.scenes.length} 个镜头 · 约{" "}
+                              {genVideoPlan.summary.durationSeconds.toFixed(1)} 秒
+                              {genVideoPlan.audioSeconds > 0
+                                ? ` · 配音 ${genVideoPlan.audioSeconds.toFixed(1)} 秒`
+                                : " · 无配音"}
+                            </span>
+                          </div>
+                          {genVideoPlan.title && (
+                            <div className="gen-video-plan-row">
+                              <span className="gen-video-plan-key">标题</span>
+                              <span className="gen-video-plan-val">{genVideoPlan.title}</span>
+                            </div>
+                          )}
+                          <div className="gen-video-plan-row">
+                            <span className="gen-video-plan-key">建议风格</span>
+                            <span className="gen-video-plan-val">
+                              {genVideoPlan.summary.themeLabel}
+                              {genVideoPlan.themeReason && (
+                                <span className="gen-video-plan-note">{genVideoPlan.themeReason}</span>
+                              )}
+                            </span>
+                          </div>
+                          {genVideoPlan.article && (
+                            <div className="gen-video-plan-block">
+                              <div className="gen-video-plan-key">
+                                参考文章
+                                <span className="article-source-badge">
+                                  {genVideoPlan.article.sourceType === "url"
+                                    ? "链接"
+                                    : genVideoPlan.article.sourceType === "document"
+                                      ? "文档"
+                                      : "粘贴"}
+                                  · {genVideoPlan.article.sourceLabel}
+                                </span>
+                                {genVideoPlan.article.sourceUrl && (
+                                  <a
+                                    className="article-source-link"
+                                    href={genVideoPlan.article.sourceUrl}
+                                    target="_blank"
+                                    rel="noreferrer noopener"
+                                  >
+                                    查看原文
+                                  </a>
+                                )}
+                              </div>
+                              {genVideoPlan.article.summary && (
+                                <p className="article-plan-summary">{genVideoPlan.article.summary}</p>
+                              )}
+                              <span className="gen-video-engine-hint">
+                                共 {genVideoPlan.article.charts?.length ?? 0} 张数据图表作为画面素材；
+                                带数值的图表都经过原文核对，补充数据标注来源链接。
+                              </span>
+                            </div>
+                          )}
+                          <div className="gen-video-plan-block">
+                            <div className="gen-video-plan-key">镜头安排</div>
+                            <div className="gen-video-scene-list">
+                              {genVideoPlan.summary.scenes.map((scene, index) => (
+                                <div key={scene.id} className="gen-video-scene">
+                                  <span className="gen-video-scene-no">{index + 1}</span>
+                                  <span className="gen-video-scene-time">
+                                    {scene.startSeconds.toFixed(1)}–{scene.outSeconds.toFixed(1)}s
+                                  </span>
+                                  <span className="gen-video-scene-body">
+                                    {scene.imageIndexes.length > 0 && (
+                                      <span className="gen-video-scene-imgs">
+                                        图 {scene.imageIndexes.join("、")}
+                                      </span>
+                                    )}
+                                    <span className="gen-video-scene-motion">{scene.motion}</span>
+                                    {scene.overlays
+                                      .filter((overlay) => overlay.text)
+                                      .map((overlay, k) => (
+                                        <span key={k} className="gen-video-scene-overlay">
+                                          {overlay.text}
+                                        </span>
+                                      ))}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          {genVideoPlan.narration && (
+                            <details className="gen-video-plan-narration" open>
+                              <summary>旁白文案（{genVideoPlan.summary.beatCount} 句）</summary>
+                              <p>{genVideoPlan.narration}</p>
+                            </details>
+                          )}
+                          {genVideoPlan.summary.fallback && (
+                            <div className="gen-video-plan-warnings">
+                              <span className="gen-video-plan-warn">
+                                DeepSeek 分镜不可用，这份方案用的是固定节奏兜底（不影响出片）。
+                              </span>
+                            </div>
+                          )}
+                          <div className="viral-remake-actions">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setGenVideoPlan(null);
+                                setGenVideoEffects([]);
+                                setGenVideoPreviewUrl(null);
+                                setVideoRequestEcho(null);
+                                setGenVideoImages([]);
+                                setGenVideoRequirement(DEFAULT_GEN_VIDEO_REQUIREMENT);
+                              }}
+                            >
+                              取消
+                            </button>
+                            <button
+                              type="button"
+                              disabled={genVideoPlanning || sending}
+                              onClick={() => {
+                                // 回到第一步弹窗（参考图 / 提示词 / 效果都还在），改完再点「生成方案」。
+                                setGenVideoPlan(null);
+                                setGenVideoEffects([]);
+                                setVideoRequestEcho(null);
+                                setGenVideoPanelOpen(true);
+                              }}
+                            >
+                              重新规划
+                            </button>
+                            <button
+                              type="button"
+                              disabled={sending}
+                              onClick={() => void createGenVideo()}
+                            >
+                              {sending ? "生成中…" : "确认并生成"}
+                            </button>
+                          </div>
+                        </div>
+                      </article>
+                    )}
                     {sending && (isThinking || streamingContent) && (
                       <article className="message assistant streaming">
                         {isThinking && !streamingContent ? (
@@ -2955,9 +3340,32 @@ export default function PlatformClient() {
                         <div className="viral-remake-actions"><button type="button" onClick={() => setRemakePanelOpen(false)}>取消</button><button type="button" disabled={sending} onClick={() => void createViralRemake()}>开始制作</button></div>
                       </div>
                     )}
-                    {articleVideoPanelOpen && (
+                    {/* 合并后：同一面板顶部用 Tab 二选一（参考图 / 参考文章） */}
+                    {genVideoPanelOpen && (
+                      <div className="article-source-tabs" role="tablist" style={{ marginBottom: 8 }}>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={videoInputTab === "image"}
+                          className={videoInputTab === "image" ? "active" : ""}
+                          onClick={() => setVideoInputTab("image")}
+                        >
+                          参考图
+                        </button>
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={videoInputTab === "article"}
+                          className={videoInputTab === "article" ? "active" : ""}
+                          onClick={() => setVideoInputTab("article")}
+                        >
+                          参考文章
+                        </button>
+                      </div>
+                    )}
+                    {genVideoPanelOpen && videoInputTab === "article" && (
                       <div className="viral-remake-panel article-video-panel">
-                        <div className="viral-remake-title">文章转视频</div>
+                        <div className="viral-remake-title">参考文章</div>
                         <p>
                           提交一篇文章（链接 / 文档 / 正文）。系统会先读懂文章、抽取其中的数据并逐条核对出处，
                           再把数据画成柱状图、折线图、数字卡、时间线等画面，规划好解说脚本后请你确认，
@@ -3040,9 +3448,13 @@ export default function PlatformClient() {
                           <span className="gen-video-engine-label">解说语音引擎</span>
                           <select
                             value={genVideoTtsProvider}
-                            onChange={(event) => setGenVideoTtsProvider(event.target.value === "zhipu" ? "zhipu" : "qwen")}
+                            onChange={(event) => {
+                              const v = event.target.value;
+                              setGenVideoTtsProvider(v === "zhipu" ? "zhipu" : v === "edge" ? "edge" : "qwen");
+                            }}
                           >
-                            <option value="qwen">千问 TTS（默认）</option>
+                            <option value="edge">免费合成音（免费）</option>
+                            <option value="qwen">千问 TTS</option>
                             <option value="zhipu">智谱 GLM-TTS（中文自然）</option>
                           </select>
                         </label>
@@ -3075,6 +3487,48 @@ export default function PlatformClient() {
                           />
                           数据不够时联网补充（全文最多搜索一次，补充的数据会标注来源链接）
                         </label>
+
+                        {/* 可选参考图：文章模式也能补充画面素材（位于提示词上方） */}
+                        <label className="viral-remake-file">
+                          参考图（可选，作为画面素材补充）
+                          <input
+                            type="file"
+                            multiple
+                            accept="image/jpeg,image/png,image/webp"
+                            onChange={(event) => {
+                              const picked = Array.from(event.target.files ?? []).map((file) => ({
+                                file,
+                                url: URL.createObjectURL(file),
+                              }));
+                              setArticleRefImages((previous) => [...previous, ...picked]);
+                              event.target.value = "";
+                            }}
+                          />
+                        </label>
+                        {articleRefImages.length > 0 && (
+                          <div className="gen-video-thumbs">
+                            {articleRefImages.map((item, index) => (
+                              <div className="gen-video-thumb" key={item.url}>
+                                <img
+                                  src={item.url}
+                                  alt={item.file.name}
+                                  title={item.file.name}
+                                  onClick={() => setGenVideoPreviewUrl(item.url)}
+                                />
+                                <button
+                                  type="button"
+                                  className="gen-video-thumb-remove"
+                                  onClick={() =>
+                                    setArticleRefImages((previous) => previous.filter((_, i) => i !== index))
+                                  }
+                                  aria-label="移除这张参考图"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
 
                         <label className="viral-remake-file" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
                           额外创作要求（可选）
@@ -3174,7 +3628,7 @@ export default function PlatformClient() {
                         )}
 
                         <div className="viral-remake-actions">
-                          <button type="button" onClick={() => setArticleVideoPanelOpen(false)} disabled={articlePlanning}>
+                          <button type="button" onClick={() => setGenVideoPanelOpen(false)} disabled={articlePlanning}>
                             取消
                           </button>
                           <button type="button" disabled={articlePlanning || sending} onClick={() => void planArticleVideo()}>
@@ -3189,9 +3643,9 @@ export default function PlatformClient() {
                         <span>正在围绕「{videoPreparingTopic}」收集信息、整理短视频创作要求并挑选关联配图，请稍候…</span>
                       </div>
                     )}
-                    {genVideoPanelOpen && (
+                    {genVideoPanelOpen && videoInputTab === "image" && (
                       <div className="viral-remake-panel">
-                        <div className="viral-remake-title">一键生成视频</div>
+                        <div className="viral-remake-title">一键生成视频（参考图）</div>
                         <p>上传多张参考图，并在下方统一填写整体创作要求。点击开始生成后，系统会自动配文、合成女声配音与字幕，并调用 Remotion 视频技能渲染画面，全程在当前会话中实时展示。</p>
                         <label className="viral-remake-file">上传参考图（可多选）<input type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={(event) => setGenVideoImages((previous) => [...previous, ...Array.from(event.target.files ?? []).map((file) => ({ file, url: URL.createObjectURL(file) }))])} /></label>
                         <div className="gen-video-thumbs">
@@ -3206,14 +3660,23 @@ export default function PlatformClient() {
                         <label className="viral-remake-file" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>整体创作要求（多行）<textarea value={genVideoRequirement} onChange={(event) => setGenVideoRequirement(event.target.value)} placeholder={"例如：竖版 1080×1920，时长 30 秒左右，轻松治愈口播风\n第一张图做开场封面，配文案「爸，我又想你了」\n第二张图做正文，强调一个温暖细节\n结尾引导关注 + 品牌落版"} style={{ minHeight: 88, resize: "vertical", border: "1px solid var(--line)", borderRadius: 7, padding: "8px 10px", fontSize: 12, fontFamily: "inherit", lineHeight: 1.6 }} /></label>
                         <label className="gen-video-engine">
                           <span className="gen-video-engine-label">解说语音引擎</span>
-                          <select value={genVideoTtsProvider} onChange={(event) => setGenVideoTtsProvider(event.target.value === "zhipu" ? "zhipu" : "qwen")}>
-                            <option value="qwen">千问 TTS（默认，英文更好）</option>
+                          <select
+                            value={genVideoTtsProvider}
+                            onChange={(event) => {
+                              const v = event.target.value;
+                              setGenVideoTtsProvider(v === "zhipu" ? "zhipu" : v === "edge" ? "edge" : "qwen");
+                            }}
+                          >
+                            <option value="edge">免费合成音（免费）</option>
+                            <option value="qwen">千问 TTS（英文更好）</option>
                             <option value="zhipu">智谱 GLM-TTS（中文自然）</option>
                           </select>
                           <span className="gen-video-engine-hint">
-                            {genVideoTtsProvider === "zhipu"
-                              ? "中文解说用智谱更自然；若智谱不可用会自动切到千问。"
-                              : "默认千问；若千问不可用会自动切回智谱，保证不断音。"}
+                            {genVideoTtsProvider === "edge"
+                              ? "免费合成音（edge-tts）：不消耗任何云端额度；若不可用自动回退本机语音。"
+                              : genVideoTtsProvider === "zhipu"
+                                ? "中文解说用智谱更自然；若智谱不可用会自动切到千问。"
+                                : "千问 TTS；若不可用会自动切回智谱，保证不断音。"}
                           </span>
                         </label>
                         <label className="gen-video-engine">
@@ -3530,7 +3993,7 @@ export default function PlatformClient() {
                             </div>
 
                             {genVideoPlan.narration && (
-                              <details className="gen-video-plan-narration">
+                              <details className="gen-video-plan-narration" open>
                                 <summary>旁白文案（{genVideoPlan.summary.beatCount} 句）</summary>
                                 <p>{genVideoPlan.narration}</p>
                               </details>
@@ -3602,8 +4065,6 @@ export default function PlatformClient() {
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键生成视频")}>一键生成视频</button>
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键剪视频")}>一键剪视频</button>
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键复刻爆款视频")}>一键复刻爆款视频</button>
-                      {/* 文章转视频：直接开面板，不走 SSE 往返（与「一键仿写爆款」同理） */}
-                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => setArticleVideoPanelOpen(true)}>文章转视频</button>
                     </div>
                     <div className="chat-input-wrap">
                       <textarea

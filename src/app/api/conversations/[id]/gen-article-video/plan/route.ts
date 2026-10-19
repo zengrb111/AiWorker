@@ -39,9 +39,19 @@ import {
 import { FetchPageError } from "@/lib/fetch-web-page";
 import { buildArticleVideoAssets } from "@/lib/article";
 import { ARTICLE_CHART_KIND_LABELS } from "@/lib/article/types";
-import { extname } from "node:path";
+import { echoPlanToConversation } from "@/lib/video/plan-echo";
+import { mkdir, writeFile } from "node:fs/promises";
+import { extname, join } from "node:path";
 
 export const runtime = "nodejs";
+
+/** SSE 事件编码：`data: {...}\n\n`，与项目其他流式路由保持一致。 */
+function sseEncode(data: unknown): Uint8Array {
+  return new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+/** 规划阶段心跳间隔：文章理解 / 配音 / DSH 分镜可能几十秒没有新事件，靠 ping 保活。 */
+const PLAN_HEARTBEAT_MS = 15_000;
 
 type SourceType = "url" | "document" | "paste";
 
@@ -169,97 +179,164 @@ export async function POST(request: Request, context: { params: { id: string } }
   const theme = String(form.get("theme") ?? "").trim() || undefined;
   const look = parseLookFromForm(form);
   const allowSearch = String(form.get("allowSearch") ?? "") === "1";
-  const targetSeconds = parseTargetSeconds(extraRequirement, 30);
+  // 文章转视频默认 10 秒（与一键生成视频一致）；创作要求里写了时长以要求为准。
+  const targetSeconds = parseTargetSeconds(extraRequirement, 10);
 
   // token 同时是素材目录与配音目录的标识；渲染阶段必须复用同一个 token 才能找到配音。
   const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
-  // ---- 3. 文章 → 图表素材 + 创作要求 ----
-  let assets;
-  try {
-    assets = await buildArticleVideoAssets({
-      userId: user.id,
-      token,
-      article,
-      targetSeconds,
-      requirement: extraRequirement,
-      themeKey: theme,
-      allowSearch,
-      config: chatConfig,
-      searchConfig,
-      onProgress: (text) => console.log(`[gen-article-video-plan ${token}] ${text}`),
-    });
-  } catch (error) {
-    if (error instanceof ModelConfigError) {
-      return jsonError(error.message, 400, { kind: error.kind, capability: error.capability });
-    }
-    return jsonError(
-      `文章分析失败：${error instanceof Error ? error.message : "未知错误"}`,
-      500
-    );
-  }
-
-  console.log(
-    `[gen-article-video-plan ${token}] 图表 ${assets.extension.charts.length} 张` +
-      `（已溯源 ${assets.extension.charts.filter((c) => c.verified).length}，` +
-      `降级 ${assets.extension.charts.filter((c) => c.downgraded).length}）· ` +
-      `素材 ${assets.materials.length} 个 · 联网 ${assets.extension.searchUsed ? "已用" : "未用"}`
+  // ---- 可选参考图：与文章图表一起作为画面素材 ----
+  // 文章模式除了数据图表，也允许用户额外附几张参考图（氛围 / 封面 / 人物等）。
+  // 存到同源 uploads 目录，渲染阶段直接作为 materials 读取。
+  const refFiles = (form.getAll("image") || []).filter(
+    (entry): entry is File => entry instanceof File && entry.size > 0
   );
-
-  // ---- 4. 交给既有管线做风格推断 / 旁白 / 配音 / 分镜 ----
-  const stage = await runVideoPlanStage({
-    mode: "generate",
-    token,
-    newsItems: assets.newsItems,
-    materials: assets.materials,
-    requirement: assets.requirement,
-    targetSeconds,
-    userId: user.id,
-    // 基于原文写的解说词（assets 内部已处理失败退回），给了管线就不会再走
-    // generateNarrationScript 那条「只看二手摘要」的路径。
-    ...(assets.narrationText ? { narrationText: assets.narrationText } : {}),
-    ...(assets.videoTitle ? { title: assets.videoTitle } : {}),
-    ttsProvider,
-    theme,
-    look,
-    // 文章图表的结构化数据：管线会把它翻成 Remotion 原生动态图表图层。
-    chartSpecs: assets.chartSpecs,
-    // 常驻页面装饰：顶部彩条 + 文章标题页眉 + 来源页脚 + 进度线。
-    storyChrome: buildStoryChrome({
-      title: assets.extension.title,
-      sourceLabel: assets.extension.sourceUrl ?? assets.extension.sourceLabel,
-    }),
-    workDir: assets.workDir,
-    onProgress: (text) => console.log(`[gen-article-video-plan ${token}] ${text}`),
-  });
-
-  if (!stage.ok) {
-    // 缺模型配置必须把结构化分类传出去：前端据此弹「去系统配置」入口。
-    // 约定 HTTP 400 + body 带 { kind, capability }，与前端 isModelConfigError 对齐。
-    if (stage.modelConfig) {
-      return jsonError(stage.error, 400, {
-        kind: stage.modelConfig.kind,
-        capability: stage.modelConfig.capability,
-      });
+  const refImagePaths: string[] = [];
+  if (refFiles.length) {
+    const refDir = join(process.cwd(), "public", "uploads", "gen-article-refs", token);
+    await mkdir(refDir, { recursive: true });
+    let saved = 0;
+    for (const file of refFiles) {
+      const extension = extname(file.name).toLowerCase();
+      if (![".jpg", ".jpeg", ".png", ".webp"].includes(extension)) continue;
+      if (file.size > 30 * 1024 * 1024) continue;
+      const target = join(refDir, `ref-${saved}${extension}`);
+      await writeFile(target, Buffer.from(await file.arrayBuffer()));
+      refImagePaths.push(target);
+      saved++;
     }
-    return jsonError(stage.error, 500);
   }
 
-  // ---- 5. 落库：文章扩展与规划结果存在同一份 draftJson 里 ----
-  const draft: VideoPlanDraft = { ...stage.draft, article: assets.extension };
-  await prisma.videoPlan.create({
-    data: {
-      token,
-      userId: user.id,
-      conversationId: conversation.id,
-      status: "PLANNED",
-      requirement: extraRequirement || assets.requirement.slice(0, 200),
-      draftJson: JSON.stringify(draft),
-      materialsJson: JSON.stringify(assets.materials),
+  // ---- 3~5. 文章理解 → 图表 → 配音 → 分镜：全部放进 SSE 流里，边跑边推进展 ----
+  // 规划要 1~2 分钟，改成流式后用户能在会话里看到「正在做什么」，而不是盯着灰按钮干等。
+  const stream = new ReadableStream({
+    async start(controller) {
+      let closed = false;
+      const send = (event: unknown) => {
+        if (closed) return;
+        try {
+          controller.enqueue(sseEncode(event));
+        } catch {
+          closed = true;
+        }
+      };
+      const heartbeat = setInterval(() => send({ type: "ping" }), PLAN_HEARTBEAT_MS);
+      try {
+        // 首条进度：让会话里立刻出现「正在生成」，避免读文章阶段空等。
+        send({ type: "progress", text: "已收到文章，正在理解内容、抽取数据并生成图表…" });
+        // ---- 3. 文章 → 图表素材 + 创作要求 ----
+        const assets = await buildArticleVideoAssets({
+          userId: user.id,
+          token,
+          article,
+          targetSeconds,
+          requirement: extraRequirement,
+          themeKey: theme,
+          allowSearch,
+          config: chatConfig,
+          searchConfig,
+          onProgress: (text) => send({ type: "progress", text }),
+        });
+
+        console.log(
+          `[gen-article-video-plan ${token}] 图表 ${assets.extension.charts.length} 张` +
+            `（已溯源 ${assets.extension.charts.filter((c) => c.verified).length}，` +
+            `降级 ${assets.extension.charts.filter((c) => c.downgraded).length}）· ` +
+            `素材 ${assets.materials.length} 个 · 联网 ${assets.extension.searchUsed ? "已用" : "未用"}`
+        );
+
+        // ---- 4. 交给既有管线做风格推断 / 旁白 / 配音 / 分镜 ----
+        const stage = await runVideoPlanStage({
+          mode: "generate",
+          token,
+          newsItems: assets.newsItems,
+          // 图表 PNG + 可选参考图，一起作为画面素材
+          materials: [...assets.materials, ...refImagePaths],
+          requirement: assets.requirement,
+          targetSeconds,
+          userId: user.id,
+          // 基于原文写的解说词（assets 内部已处理失败退回），给了管线就不会再走
+          // generateNarrationScript 那条「只看二手摘要」的路径。
+          ...(assets.narrationText ? { narrationText: assets.narrationText } : {}),
+          ...(assets.videoTitle ? { title: assets.videoTitle } : {}),
+          ttsProvider,
+          theme,
+          look,
+          // 文章图表的结构化数据：管线会把它翻成 Remotion 原生动态图表图层。
+          chartSpecs: assets.chartSpecs,
+          // 常驻页面装饰：顶部彩条 + 文章标题页眉 + 来源页脚 + 进度线。
+          storyChrome: buildStoryChrome({
+            title: assets.extension.title,
+            sourceLabel: assets.extension.sourceUrl ?? assets.extension.sourceLabel,
+          }),
+          workDir: assets.workDir,
+          onProgress: (text) => send({ type: "progress", text }),
+        });
+
+        if (!stage.ok) {
+          send({
+            type: "error",
+            error: stage.error,
+            modelConfig: stage.modelConfig
+              ? { kind: stage.modelConfig.kind, capability: stage.modelConfig.capability }
+              : null,
+          });
+          return;
+        }
+
+        // ---- 5. 落库：文章扩展与规划结果存在同一份 draftJson 里 ----
+        const draft: VideoPlanDraft = { ...stage.draft, article: assets.extension };
+        await prisma.videoPlan.create({
+          data: {
+            token,
+            userId: user.id,
+            conversationId: conversation.id,
+            status: "PLANNED",
+            requirement: extraRequirement || assets.requirement.slice(0, 200),
+            draftJson: JSON.stringify(draft),
+            materialsJson: JSON.stringify([...assets.materials, ...refImagePaths]),
+          },
+        });
+
+        // 把方案回显进对话流（落一条 assistant 消息），并随 done 事件把文本给前端即时展示。
+        const planEcho = await echoPlanToConversation(conversation.id, draft);
+
+        send({ type: "done", data: { ...toPlanResponse(draft, token), planEcho } });
+      } catch (error) {
+        if (error instanceof ModelConfigError) {
+          send({
+            type: "error",
+            error: error.message,
+            modelConfig: { kind: error.kind, capability: error.capability },
+          });
+        } else if (error instanceof FetchPageError || error instanceof ArticleSourceError) {
+          send({ type: "error", error: error.message });
+        } else {
+          send({
+            type: "error",
+            error: `文章分析失败：${error instanceof Error ? error.message : "未知错误"}`,
+          });
+        }
+      } finally {
+        clearInterval(heartbeat);
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          // 已关闭
+        }
+      }
     },
   });
 
-  return jsonOk(toPlanResponse(draft, token));
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
 
 /** 取回已保存的方案（刷新页面 / 关掉面板后继续生成）。 */

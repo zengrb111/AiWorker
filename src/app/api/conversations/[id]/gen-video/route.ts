@@ -59,12 +59,9 @@ function formatProgressMessage(
   title?: string
 ): string {
   const lines = ["## 一键生成视频", "", ...progress.map((item) => `- ${item}`)];
-  // 输入回显：放在进度之后、标题之前。这个函数每次从头重建整段，
-  // 所以 progress 持续增长也不会打乱各区块的相对顺序。
-  if (input.referenceImages.length) {
-    lines.push("", "### 参考图", "");
-    input.referenceImages.forEach((url, i) => lines.push(`![参考图 ${i + 1}](${url})`));
-  }
+  // 参考图不再写进这条进度消息：会话里已经有一条「参考图 + 提示词」回显
+  // （前端 .video-request-echo 的缩略图网格），风格与生成刚开始时一致。
+  // 这里再放一套 Markdown 大图会变成两种风格并存，故只保留进度与成片。
   if (input.requirement) {
     // 走引用块：保留原样换行，且 renderMarkdown 会对文本做 HTML 转义。
     lines.push("", "### 创作要求", "", ...input.requirement.split(/\r?\n/).map((l) => `> ${l}`));
@@ -161,10 +158,22 @@ export async function POST(request: Request, context: { params: { id: string } }
   let progressWrite = Promise.resolve();
   const stream = new ReadableStream({
     async start(controller) {
+      // 客户端断开 / 流已关闭后，controller.enqueue/close 会抛
+      // "Invalid state: Controller is already closed"。出片是重任务，渲染期间
+      // 用户关页面、切网络都会让连接先断，这个错误不该把整条出片判成失败。
+      // 统一走 safeEnqueue：断开后只是不再往下推事件，服务端仍把片渲染完并入库。
+      let streamClosed = false;
+      const safeEnqueue = (event: unknown) => {
+        if (streamClosed) return;
+        try {
+          controller.enqueue(sseEncode(event));
+        } catch {
+          streamClosed = true;
+        }
+      };
+
       // 心跳：渲染期间没有任何事件下发，靠定时 ping 让连接保持存活
-      const heartbeat = setInterval(() => {
-        controller.enqueue(sseEncode({ type: "ping", at: Date.now() }));
-      }, HEARTBEAT_MS);
+      const heartbeat = setInterval(() => safeEnqueue({ type: "ping", at: Date.now() }), HEARTBEAT_MS);
 
       const sendProgress = (text: string) => {
         if (!text.trim()) return;
@@ -174,7 +183,7 @@ export async function POST(request: Request, context: { params: { id: string } }
             .update({ where: { id: progressMessage.id }, data: { content: formatProgressMessage(inputContext, progress) } })
             .then(() => undefined)
         );
-        controller.enqueue(sseEncode({ type: "delta", text: `${text}\n` }));
+        safeEnqueue({ type: "delta", text: `${text}\n` });
       };
       try {
         // 出片全流程收敛到编排层：旁白 → 配音 → 分镜(DeepSeek/兜底) → Remotion 渲染
@@ -184,8 +193,9 @@ export async function POST(request: Request, context: { params: { id: string } }
           token,
           materials: savedImagePaths,
           requirement,
-          // 视频时长由旁白 TTS 时长决定；这里给的是「配文阶段」的目标时长
-          targetSeconds: parseTargetSeconds(requirement),
+          // 视频时长由旁白 TTS 时长决定；这里给的是「配文阶段」的目标时长。
+          // 一键生成视频默认 10 秒（与规划接口保持一致），创作要求里写了时长以要求为准。
+          targetSeconds: parseTargetSeconds(requirement, 10),
           // 新闻事实：从 prepare 阶段原样带过来，让旁白基于真实新闻内容写稿
           newsItems: savedPlan ? undefined : parseNewsItems(form),
           ttsProvider,
@@ -228,11 +238,16 @@ export async function POST(request: Request, context: { params: { id: string } }
 
         // ---- 落库 ----
         await progressWrite;
+        // 出片完成后，这条消息只留「视频链接 + 预览」：不再重复堆进度步骤与输入回显
+        // （参考图 / 提示词已在会话里单独回显，不需要在结果里再抄一遍）。
+        const finalContent = finalUrl
+          ? ["## 视频已生成", videoTitle ? `**${videoTitle}**` : "", `视频成片：${finalUrl}`]
+              .filter(Boolean)
+              .join("\n\n")
+          : formatProgressMessage(inputContext, progress, undefined, undefined, narrationText || undefined, videoTitle || undefined);
         const finalMessage = await prisma.message.update({
           where: { id: progressMessage.id },
-          data: {
-            content: formatProgressMessage(inputContext, progress, finalUrl ?? undefined, undefined, narrationText || undefined, videoTitle || undefined),
-          },
+          data: { content: finalContent },
         });
         let saved: { id: string; title: string; category: string; videoUrl: string; coverImageUrl?: string } | undefined;
         if (finalUrl) {
@@ -278,16 +293,14 @@ export async function POST(request: Request, context: { params: { id: string } }
             }),
           },
         });
-        controller.enqueue(
-          sseEncode({
-            type: "final",
-            videoUrl: finalUrl,
-            title: videoTitle || null,
-            coverUrl,
-            narration: narrationText || null,
-            contentSaved: saved,
-          })
-        );
+        safeEnqueue({
+          type: "final",
+          videoUrl: finalUrl,
+          title: videoTitle || null,
+          coverUrl,
+          narration: narrationText || null,
+          contentSaved: saved,
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : "视频生成失败。";
         await progressWrite.catch(() => undefined);
@@ -298,20 +311,23 @@ export async function POST(request: Request, context: { params: { id: string } }
           })
           .catch(() => undefined);
         await prisma.openClawTask.update({ where: { id: task.id }, data: { status: "FAILED", error: message } });
-        controller.enqueue(
-          sseEncode({
-            type: "error",
-            error: message,
-            // 缺模型配置时带上 kind/capability，前端才能弹「去系统配置」入口
-            modelConfig: (error as { modelConfig?: { kind: string; capability: string | null } })
-              ?.modelConfig,
-          }),
-        );
+        safeEnqueue({
+          type: "error",
+          error: message,
+          // 缺模型配置时带上 kind/capability，前端才能弹「去系统配置」入口
+          modelConfig: (error as { modelConfig?: { kind: string; capability: string | null } })
+            ?.modelConfig,
+        });
 
       } finally {
         // 必须清掉心跳：流 close 之后继续 enqueue 会抛错
         clearInterval(heartbeat);
-        controller.close();
+        streamClosed = true;
+        try {
+          controller.close();
+        } catch {
+          // 客户端已断开，流已被关闭
+        }
       }
     },
   });

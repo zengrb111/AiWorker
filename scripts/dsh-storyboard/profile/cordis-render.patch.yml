@@ -1,0 +1,109 @@
+# DSH 渲染受限 profile 覆盖层（patch list）
+#
+# 这是「出片」专用 profile：在分镜的受限 profile 基础上**放开 bash / pwsh / jobs / fs**，
+# 让 DSH 能在沙箱里调用 Remotion CLI 与 ffmpeg 完成「渲染 + 后期」一条龙，
+# 然后把成片直接写回本项目的 public/videos 目录。
+#
+# 与 cordis.patch.yml（分镜用）的**唯一区别**就是下面这些条目被删掉了 `disabled: true`：
+#   tool-bash / tool-pwsh / tool-jobs / tool-fs / tool-fs-search / attachment-local / spill-local
+# 其余（subagent / web / skill / telemetry / user-questions 等）保持与分镜 profile 完全一致地禁用。
+#
+# 为什么渲染需要放开这些：
+#   - tool-bash / tool-pwsh / tool-jobs：要跑 `node render-video.mjs`，而该脚本内部还要再 spawn
+#     Remotion CLI 与 ffmpeg，全是子进程。
+#   - tool-fs / tool-fs-search / attachment-local / spill-local：脚本要把素材复制进
+#     remotion/public/generated、把成片写进 public/videos、把封面写进 public/uploads/covers。
+#
+# 安全边界（刻意保留的禁用）：
+#   - 不放开 subagent / web / skill：渲染是确定性脚本任务，不需要联网、不需要派生子代理、
+#     不需要加载技能；这些入口一旦放开，模型就可能「发挥」，风险远大于收益。
+#   - 不放开 telemetry / session-log / user-questions：与分镜保持一致，减少噪音与交互阻塞。
+#
+# 生效方式：src/lib/dsh.ts 通过 HarnessConfig(patches=[本文件]) 传给 DSH 运行时，
+# 等价于命令行 dsh --profile sdk --patch <本文件>。
+#
+# 格式：YAML 序列，每项是插件覆盖 {id, disabled?, config?}；
+# id 必须与 --dump-config 输出里的 "- id:" 完全一致，否则不生效（且不报错，静默失效）。
+
+# ---- 会派生子代理的：渲染不需要，保持禁用 ----
+- id: subagent
+  disabled: true
+- id: subagent-spawn-in-process
+  disabled: true
+- id: subagent-fork-in-process
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: workflow-worker-thread
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: goal
+  disabled: true
+- id: goal-round-driver
+  disabled: true
+- id: command-goal
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: plan-mode
+  disabled: true
+- id: command-feedback
+  disabled: true
+
+# ---- 外联与遥测：渲染是纯本地确定性任务，不需要联网 ----
+# 注意：真正提供工具的是 tool-web，而 web / web-search-deepseek / web-fetch-http
+# 只是它的 provider 与配置层。只关 web 不关 tool-web 是无效的（已实测）。
+- id: web
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: web-search-deepseek
+  disabled: true
+- id: web-fetch-http
+  disabled: true
+- id: session-log-deepseek
+  disabled: true
+- id: session-telemetry-otel
+  disabled: true
+- id: plugin-package-inventory-deepseek
+  disabled: true
+- id: session-title
+  disabled: true
+- id: session-title-llm
+  disabled: true
+
+# ---- 技能：渲染不需要加载任何技能 ----
+- id: skill
+  disabled: true
+- id: skill-filesystem
+  disabled: true
+- id: tool-skill
+  disabled: true
+
+# ---- 收尾 ----
+# 只关没有插件依赖的部分。**不能**关下面这些，它们提供的是 service 而非能力。
+# 这条依赖链是实测踩出来的（每关一个，profile 就少激活一层并直接启动失败）：
+#     subprocess → bash-sandbox / pwsh-sandbox → shell → permission-presets
+#     commands  → command-compact
+#     approval  → permission-presets
+# 关掉任何一个，profile 启动即报
+# "N entries did not activate ... pending (waiting for service: subprocess|shell)"。
+#     session-persistence-jsonl → 提供 sessionPersistence service（session-checkpoint-policy 依赖它）
+# 留着它们是安全的：真正把命令执行暴露给模型的入口
+# tool-bash / tool-pwsh / tool-jobs 已放开（这是渲染的需要），但 subagent / web / skill
+# 等「模型自主发挥」的入口已全部禁用，模型只能老老实实按 prompt 跑渲染脚本。
+# 会话落盘在 $DSH_HOME/sessions（已 gitignore）。因此每次调用的 session id 必须唯一，
+# 否则会报 "session already exists" —— src/lib/dsh.ts 会给 id 追加随机后缀来保证这点。
+- id: user-questions
+  disabled: true

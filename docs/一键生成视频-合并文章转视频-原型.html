@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>一键生成视频 · 合并文章转视频 · 改造方案与原型</title>
+<style>
+  :root {
+    --accent: #2b7cff;
+    --accent-soft: #eaf2ff;
+    --ink: #1f2937;
+    --muted: #6b7280;
+    --line: #e5eaf1;
+    --bg: #eef2f8;
+    --panel: #ffffff;
+    --soft: #f8fafc;
+    --ok: #16a34a;
+    --warn: #b45309;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.6;
+    padding: 28px 20px 80px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  .page-title { font-size: 22px; font-weight: 800; margin: 0 0 6px; }
+  .page-sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+
+  /* ---- 方案要点 ---- */
+  .plan-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+    margin-bottom: 24px;
+  }
+  .plan-card h2 { font-size: 15px; margin: 0 0 12px; }
+  .plan-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; }
+  .plan-item { display: flex; gap: 10px; font-size: 13px; }
+  .plan-dot { flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 800; display: grid; place-items: center; }
+  .plan-item b { font-weight: 700; }
+  .plan-item span { color: var(--muted); }
+
+  /* ---- 应用框架 ---- */
+  .app {
+    display: grid;
+    grid-template-columns: 168px minmax(0, 1fr);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    overflow: hidden;
+    height: 760px;
+    box-shadow: 0 18px 50px rgba(31, 41, 55, 0.12);
+  }
+  .side { background: #0f172a; color: #cbd5e1; padding: 16px 12px; font-size: 13px; }
+  .brand { display: flex; align-items: center; gap: 9px; margin-bottom: 22px; }
+  .brand-logo { width: 30px; height: 30px; border-radius: 9px; background: linear-gradient(135deg, #3b82f6, #6366f1); display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 13px; }
+  .brand-name { color: #fff; font-weight: 700; }
+  .brand-sub { font-size: 11px; color: #64748b; }
+  .nav-item { padding: 8px 10px; border-radius: 8px; margin-bottom: 2px; color: #94a3b8; cursor: default; }
+  .nav-item.active { background: rgba(59, 130, 246, 0.18); color: #fff; }
+
+  .main { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+  .conv-title { font-weight: 700; font-size: 14px; }
+  .conv-time { color: var(--muted); font-size: 12px; }
+  .pill { font-size: 11px; color: var(--accent); background: var(--accent-soft); padding: 4px 9px; border-radius: 999px; font-weight: 700; }
+
+  .messages { overflow: auto; padding: 18px 20px 8px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 86%; border-radius: 12px; padding: 11px 14px; font-size: 13.5px; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-left-radius: 4px; }
+  .msg.assistant { align-self: flex-start; background: var(--soft); border: 1px solid var(--line); }
+  .msg .label { font-size: 12px; font-weight: 700; opacity: 0.85; margin-bottom: 6px; }
+  .thumb-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .thumb { width: 66px; height: 66px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.5); }
+  .t1 { background: linear-gradient(135deg,#f9a8d4,#818cf8); }
+  .t2 { background: linear-gradient(135deg,#67e8f9,#3b82f6); }
+  .t3 { background: linear-gradient(135deg,#fcd34d,#f97316); }
+  .src-badge { display: inline-block; margin-top: 6px; font-size: 12px; background: rgba(255,255,255,0.18); border-radius: 999px; padding: 2px 9px; }
+  .search-badge { display: inline-block; margin-left: 6px; font-size: 11px; background: rgba(255,255,255,0.22); border-radius: 999px; padding: 2px 8px; }
+
+  .progress-head { display: flex; align-items: center; gap: 8px; color: var(--muted); font-weight: 600; font-size: 13px; }
+  .dots { display: inline-flex; gap: 4px; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s infinite; }
+  .dot:nth-child(2) { animation-delay: .2s; }
+  .dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes pulse { 0%,100%{opacity:.25;transform:scale(.85)} 50%{opacity:1;transform:scale(1)} }
+  .progress-list { list-style: none; margin: 8px 0 0; padding: 0 0 0 12px; border-left: 2px solid var(--line); font-size: 12.5px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+  .progress-list li.current { color: var(--accent); font-weight: 600; }
+
+  .plan-box { border: 1px solid var(--accent); background: linear-gradient(180deg,#f7faff,#eef5ff); border-radius: 12px; padding: 12px 14px; }
+  .plan-box h4 { margin: 0 0 8px; font-size: 14px; }
+  .plan-meta { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .scene { display: flex; gap: 10px; font-size: 12.5px; padding: 5px 0; border-top: 1px dashed var(--line); }
+  .scene-no { color: var(--accent); font-weight: 800; }
+  .scene-time { color: var(--muted); width: 74px; flex: none; }
+  .plan-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+  .plan-actions button { border: 1px solid var(--line); background: #fff; color: var(--ink); border-radius: 7px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+  .plan-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  /* ---- 合并后的输入面板 ---- */
+  .composer { border-top: 1px solid var(--line); background: var(--panel); padding: 12px 20px 16px; }
+  .panel { border: 1px solid #bfd4ff; background: #f6f9ff; border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+  .panel-title { color: var(--accent); font-weight: 800; font-size: 13px; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; }
+  .panel-title .hint { color: var(--muted); font-weight: 500; font-size: 11px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; background: #e9effa; padding: 4px; border-radius: 9px; width: fit-content; }
+  .tab { border: none; background: transparent; color: var(--muted); font-weight: 600; font-size: 12.5px; padding: 6px 16px; border-radius: 7px; cursor: pointer; }
+  .tab.active { background: #fff; color: var(--accent); box-shadow: 0 1px 4px rgba(43,124,255,.16); }
+  .pane { display: none; }
+  .pane.active { display: block; animation: fade .18s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+  .dropzone { border: 1.5px dashed #b9cdf3; border-radius: 10px; background: #fff; padding: 18px; text-align: center; color: var(--muted); font-size: 12.5px; cursor: pointer; }
+  .dropzone b { color: var(--accent); }
+  .thumbs { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .thumbs .thumb { width: 66px; height: 66px; border-color: var(--line); }
+
+  .seg { display: flex; gap: 6px; margin-bottom: 10px; }
+  .seg-btn { border: 1px solid var(--line); background: #fff; color: var(--muted); border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+  .seg-btn.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); font-weight: 700; }
+  .field { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font-size: 12.5px; font-family: inherit; background: #fff; color: var(--ink); margin-bottom: 8px; }
+  .check { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; cursor: pointer; }
+  .check input { margin-top: 2px; accent-color: var(--accent); }
+  .check small { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  .opt-title { font-size: 12px; font-weight: 700; color: var(--muted); margin: 12px 0 6px; }
+  .dropzone.small { padding: 12px; }
+
+  .req { width: 100%; min-height: 56px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font-size: 12.5px; font-family: inherit; color: var(--ink); font-weight: 400; background: #fff; margin: 6px 0 8px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
+  .row select { border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; font-size: 12px; background: #fff; color: var(--ink); }
+  .actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+  .actions .primary { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 9px 20px; font-size: 13px; font-weight: 700; cursor: pointer; }
+  .actions .primary:disabled { opacity: .6; cursor: not-allowed; }
+
+  .inputbar { display: flex; gap: 10px; align-items: flex-end; }
+  .inputbar .fake-input { flex: 1; border: 1px solid var(--line); border-radius: 10px; background: #fff; padding: 10px 12px; color: var(--muted); font-size: 13px; }
+  .inputbar .send { background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 10px 18px; font-weight: 700; font-size: 13px; cursor: default; }
+
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px); background: #111827; color: #fff; font-size: 13px; padding: 9px 16px; border-radius: 999px; opacity: 0; transition: .25s; pointer-events: none; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  @media (max-width: 720px) {
+    .app { grid-template-columns: 1fr; height: auto; }
+    .side { display: none; }
+    .plan-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 class="page-title">一键生成视频 · 合并「文章转视频」</h1>
+  <p class="page-sub">参考图 / 参考文章二选一即可出方案；其余流程统一走一键生成视频。下面是改造要点与可交互原型（点 Tab 切换、点「生成方案」看效果）。</p>
+
+  <div class="plan-card">
+    <h2>改造方案要点</h2>
+    <div class="plan-grid">
+      <div class="plan-item"><span class="plan-dot">1</span><div><b>入口统一</b><br><span>只保留「一键生成视频」，面板内用 Tab 二选一：参考图 / 参考文章。</span></div></div>
+      <div class="plan-item"><span class="plan-dot">2</span><div><b>主输入二选一 + 文章可附图</b><br><span>参考图 / 参考文章 互斥作为主输入；文章模式下可额外附加「可选参考图」作为画面素材补充。</span></div></div>
+      <div class="plan-item"><span class="plan-dot">3</span><div><b>保留联网补充</b><br><span>文章模式下保留「数据不够时联网补充（全文最多搜索一次，补充数据标注来源链接）」。</span></div></div>
+      <div class="plan-item"><span class="plan-dot">4</span><div><b>流程统一</b><br><span>理解素材 → 风格 → 旁白 → 配音 → DSH 分镜 → 确认方案 → 出片，两类输入完全同一条链路。</span></div></div>
+      <div class="plan-item"><span class="plan-dot">5</span><div><b>后端收敛</b><br><span><code>/gen-video/plan</code> 增加 <code>inputType</code>(images|article)；文章分支复用 <code>buildArticleVideoAssets</code>，两者都汇入 <code>runVideoPlanStage</code>，产出同一份 VideoPlan。</span></div></div>
+      <div class="plan-item"><span class="plan-dot">6</span><div><b>渲染不变</b><br><span><code>/gen-video</code> 带 planToken 直接渲染；<code>/gen-article-video/plan</code> 下线或保留为别名。</span></div></div>
+    </div>
+  </div>
+
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <div class="brand-logo">AI</div>
+        <div><div class="brand-name">创星云</div><div class="brand-sub">AI 数字员工平台</div></div>
+      </div>
+      <div class="nav-item active">对话</div>
+      <div class="nav-item">内容库</div>
+      <div class="nav-item">发布管理</div>
+      <div class="nav-item">效果分析</div>
+      <div class="nav-item">知识库</div>
+      <div class="nav-item">平台授权管理</div>
+    </aside>
+
+    <div class="main">
+      <div class="topbar">
+        <div>
+          <div class="conv-title">调度迁移验证</div>
+          <div class="conv-time">10/19 16:36</div>
+        </div>
+        <span class="pill">原型演示</span>
+      </div>
+
+      <div class="messages" id="messages">
+        <div class="msg assistant">点下方「生成方案」试试：切换「参考图 / 参考文章」两个 Tab，看提交后在会话里如何流式出进展与方案。</div>
+      </div>
+
+      <div class="composer">
+        <div class="panel">
+          <div class="panel-title">一键生成视频 <span class="hint">参考图 / 参考文章 二选一</span></div>
+
+          <div class="tabs">
+            <button class="tab active" data-tab="image">参考图</button>
+            <button class="tab" data-tab="article">参考文章</button>
+          </div>
+
+          <div class="pane active" id="pane-image">
+            <div class="dropzone" id="dropzone"><b>点击上传</b> 或拖拽参考图到这里（可多选 JPG / PNG / WebP）</div>
+            <div class="thumbs">
+              <div class="thumb t1" title="参考图 1"></div>
+              <div class="thumb t2" title="参考图 2"></div>
+              <div class="thumb t3" title="参考图 3"></div>
+            </div>
+          </div>
+
+          <div class="pane" id="pane-article">
+            <div class="seg">
+              <button class="seg-btn active" data-src="url">链接</button>
+              <button class="seg-btn" data-src="doc">上传文档</button>
+              <button class="seg-btn" data-src="paste">粘贴正文</button>
+            </div>
+            <input class="field" id="article-url" placeholder="粘贴文章链接，如 https://mp.weixin.qq.com/s/..." />
+            <label class="check">
+              <input type="checkbox" id="allow-search" checked />
+              <span>
+                数据不够时联网补充
+                <small>全文最多搜索一次；补充的数据会在画面上标注来源链接，对不上的数字不上图。</small>
+              </span>
+            </label>
+
+            <div class="opt-title">参考图（可选，会作为画面素材补充）</div>
+            <div class="dropzone small" id="dropzone-article"><b>点击上传</b> 或拖拽参考图到这里（可选）</div>
+            <div class="thumbs">
+              <div class="thumb t2" title="可选参考图 1"></div>
+              <div class="thumb t3" title="可选参考图 2"></div>
+            </div>
+          </div>
+
+          <textarea class="req" id="req">生成ai回忆录宣传片</textarea>
+
+          <div class="row">
+            <label>视频风格
+              <select><option>自动（按素材推断）</option><option>温暖治愈</option><option>冷调夜色</option><option>胶片复古</option></select>
+            </label>
+            <label>画面运镜
+              <select><option>跟随分镜</option><option>缓慢推进</option><option>视差景深</option></select>
+            </label>
+            <label>字幕样式
+              <select><option>经典白字</option><option>醒目黄字</option><option>半透明底框</option><option>极简细描边</option></select>
+            </label>
+          </div>
+
+          <div class="actions">
+            <button class="primary" id="generate">生成方案</button>
+          </div>
+        </div>
+
+        <div class="inputbar">
+          <div class="fake-input">你可以直接发送你的问题即可（Enter 发送，Shift+Enter 换行）</div>
+          <button class="send">发送</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  // ---- Tab 切换 ----
+  const tabs = document.querySelectorAll(".tab");
+  const panes = { image: document.getElementById("pane-image"), article: document.getElementById("pane-article") };
+  let mode = "image";
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      tabs.forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+      mode = tab.dataset.tab;
+      panes.image.classList.toggle("active", mode === "image");
+      panes.article.classList.toggle("active", mode === "article");
+    });
+  });
+
+  // ---- 文章来源分段 ----
+  const segBtns = document.querySelectorAll(".seg-btn");
+  segBtns.forEach((b) => {
+    b.addEventListener("click", () => {
+      segBtns.forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+    });
+  });
+
+  const dropzone = document.getElementById("dropzone");
+  dropzone.addEventListener("click", () => toast("原型演示：此处打开图片选择器"));
+  document.getElementById("dropzone-article").addEventListener("click", () => toast("原型演示：此处打开「可选参考图」选择器"));
+
+  // ---- 生成方案演示 ----
+  const messagesEl = document.getElementById("messages");
+  const generateBtn = document.getElementById("generate");
+  let busy = false;
+
+  function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+  function toast(text) {
+    const el = document.getElementById("toast");
+    el.textContent = text;
+    el.classList.add("show");
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove("show"), 2200);
+  }
+
+  function appendUserEcho() {
+    const prompt = document.getElementById("req").value.trim();
+    const wrap = document.createElement("div");
+    wrap.className = "msg user";
+    let inner = `<div>${prompt || "（未填写创作要求，按素材自动生成）"}</div>`;
+    if (mode === "image") {
+      inner += `<div class="label" style="margin-top:10px">参考图</div>
+        <div class="thumb-row"><div class="thumb t1"></div><div class="thumb t2"></div><div class="thumb t3"></div></div>`;
+    } else {
+      const src = document.querySelector(".seg-btn.active").textContent;
+      const allow = document.getElementById("allow-search").checked;
+      inner += `<div class="label" style="margin-top:10px">参考文章</div>
+        <div>${document.getElementById("article-url").value || "https://mp.weixin.qq.com/s/xxxxx"}</div>
+        <span class="src-badge">来源：${src}</span>${allow ? '<span class="search-badge">允许联网补充（≤1 次）</span>' : ""}
+        <div class="label" style="margin-top:10px">参考图（可选）</div>
+        <div class="thumb-row"><div class="thumb t2"></div><div class="thumb t3"></div></div>`;
+    }
+    wrap.innerHTML = inner;
+    messagesEl.appendChild(wrap);
+    scrollBottom();
+  }
+
+  function appendProgressCard() {
+    const lines = mode === "image"
+      ? ["已收到参考图，正在识别素材、推断风格…", "已根据素材色调自动选择风格「温暖治愈」", "已生成标题与旁白（4 句）", "正在合成配音…", "分镜规划完成（4 段）"]
+      : ["已收到文章，正在理解内容、抽取数据…", "已生成 4 张图表（数字均已原文核对）", "已生成标题与旁白（5 句）", "正在合成配音…", "分镜规划完成（5 段）"];
+    const card = document.createElement("div");
+    card.className = "msg assistant";
+    card.innerHTML = `<div class="progress-head"><span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>正在生成视频方案…</div>
+      <ul class="progress-list"></ul>`;
+    messagesEl.appendChild(card);
+    scrollBottom();
+    const list = card.querySelector(".progress-list");
+    lines.forEach((text, i) => {
+      setTimeout(() => {
+        const li = document.createElement("li");
+        li.textContent = text;
+        list.querySelectorAll("li").forEach((x) => x.classList.remove("current"));
+        li.classList.add("current");
+        list.appendChild(li);
+        scrollBottom();
+        if (i === lines.length - 1) {
+          setTimeout(() => {
+            card.remove();
+            appendPlanCard();
+          }, 700);
+        }
+      }, 650 * (i + 1));
+    });
+  }
+
+  function appendPlanCard() {
+    const card = document.createElement("div");
+    card.className = "msg assistant";
+    const scenes = mode === "image"
+      ? [["0.0–3.0s", "图 1 · 推近"], ["3.0–6.0s", "图 2 · 缓慢推进"], ["6.0–8.5s", "图 3 · 视差"], ["8.5–10.0s", "图 1 · 静止 · 片尾"]]
+      : [["0.0–2.5s", "图表 1 · 推近"], ["2.5–5.0s", "图表 2 · 左移"], ["5.0–7.5s", "图表 3 · 推近"], ["7.5–9.5s", "图表 4 · 静止"], ["9.5–12.0s", "原文配图 · 片尾"]];
+    card.innerHTML = `<div class="plan-box">
+      <h4>AI 视频方案 <span class="plan-meta">· ${scenes.length} 个镜头 · 约 ${mode === "image" ? "10.0" : "12.0"} 秒</span></h4>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:6px">建议风格：温暖治愈（按素材色调推断）</div>
+      ${scenes.map((s, i) => `<div class="scene"><span class="scene-no">${i + 1}</span><span class="scene-time">${s[0]}</span><span>${s[1]}</span></div>`).join("")}
+      <div class="plan-actions">
+        <button>取消</button><button>重新规划</button><button class="primary">确认并生成</button>
+      </div>
+    </div>`;
+    messagesEl.appendChild(card);
+    scrollBottom();
+  }
+
+  generateBtn.addEventListener("click", () => {
+    if (busy) return;
+    if (mode === "article" && !document.getElementById("article-url").value.trim()) {
+      // 允许空链接演示，但给个提示
+      toast("原型演示：文章链接为空，将使用示例链接");
+    }
+    busy = true;
+    generateBtn.disabled = true;
+    generateBtn.textContent = "正在生成方案…";
+    appendUserEcho();
+    appendProgressCard();
+    setTimeout(() => {
+      busy = false;
+      generateBtn.disabled = false;
+      generateBtn.textContent = "生成方案";
+    }, 650 * 6 + 800);
+  });
+</script>
+</body>
+</html>

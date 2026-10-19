@@ -16,11 +16,11 @@
  * 由 VIDEO_RENDER_ENGINE 开关决定走哪边（resolveRenderEngine），出问题可秒级回退。
  */
 
-import { mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { readStringEnv } from "../env";
 import { probeDuration } from "../ffmpeg";
-import { describeDshVersion, getDshStatus, runDshText } from "../dsh";
+import { describeDshVersion, getDshStatus, runDshRender, runDshText } from "../dsh";
 import { generateNarrationScript } from "../narration";
 import {
   ModelConfigError,
@@ -160,6 +160,16 @@ export type PipelineInput = {
    * 缺省（undefined）时成片观感与改造前完全一致。
    */
   look?: LookConfig;
+  /**
+   * 渲染 + 后期是否交给 DSH（放开沙箱）完成。
+   *
+   * 默认 true：平台把渲染清单交给 DSH，由它在沙箱里调用 Remotion + ffmpeg
+   * 完成「渲染 + 后期」一条龙，再把成片写回 public/videos。DSH 不可用时
+   * （未配置「分镜规划」模型服务）自动回退本地「renderVertical + video-stitch」。
+   * 显式传 false 可强制走本地渲染（排障用）。旧引擎（renderOverride）优先级更高，
+   * 一旦提供了 renderOverride，本开关无意义。
+   */
+  renderViaDsh?: boolean;
   /**
    * 已确认的规划阶段产物（来自 `runVideoPlanStage`）。
    *
@@ -326,12 +336,17 @@ export function pickBgm(): string | undefined {
   }
 }
 
-/** 从创作要求里读「N 秒」；未写或不合理时用默认值，并封顶 60 秒（兼顾渲染耗时）。 */
-export function parseTargetSeconds(requirement: string, fallback = 30): number {
+/**
+ * 从创作要求里读「N 秒」。
+ *
+ * 约定：未写或不合理（<8s）时用默认值（10s）；**上限 30 秒** —— 短视频拉太长
+ * 会明显拖慢渲染、也影响完播，超过 30s 一律按 30s 处理。
+ */
+export function parseTargetSeconds(requirement: string, fallback = 10): number {
   const match = requirement.match(/(\d{1,3})\s*秒/);
   const parsed = match ? Number.parseInt(match[1], 10) : Number.NaN;
   const seconds = Number.isFinite(parsed) && parsed >= 8 ? parsed : fallback;
-  return Math.min(60, seconds);
+  return Math.min(30, seconds);
 }
 
 /**
@@ -494,44 +509,17 @@ export async function runVideoPlanStage(
     if (narrationText) notify(`已生成标题「${videoTitle}」与旁白（${script!.segments.length} 句）`);
   }
 
-  // ---- 3. 配音 ----
-  const ttsProvider = resolveTtsProvider(input.ttsProvider, DEFAULT_TTS_PROVIDER);
-  let audio: { audioPath: string; durationSeconds: number; captions: WordCaption[] } | null = null;
-  let ttsEngine: string | undefined;
-  let ttsFallbackReason: string | undefined;
-  // 剪辑 / 复刻链路已有 ASR 字幕与原声，不需要再合成一份配音
-  const needVoice = Boolean(narrationText) && input.mode === "generate";
-  if (needVoice) {
-    notify(`正在用${TTS_ENGINE_LABELS[ttsProvider]}合成配音…`);
-    try {
-      const tts = await synthesizeNarration(narrationText, workDir, undefined, ttsProvider, {
-        userId: input.userId,
-      });
-      audio = { audioPath: tts.audioPath, durationSeconds: tts.durationSeconds, captions: tts.captions };
-      ttsEngine = tts.engine ?? ttsProvider;
-      ttsFallbackReason = tts.fallbackReason;
-      if (tts.engine && tts.engine !== ttsProvider) {
-        // 引擎与用户选择不一致 = 发生了降级回退。
-        // 必须带上真实原因：早先只说「引擎不可用」，用户无从判断是缺 key、限流还是参数错。
-        const reason = tts.fallbackReason ? `。原因：${tts.fallbackReason.slice(0, 160)}` : "";
-        notify(
-          `所选引擎不可用，已自动切换到${TTS_ENGINE_LABELS[tts.engine]}合成配音（约 ${tts.durationSeconds.toFixed(1)} 秒）${reason}`,
-        );
-      } else {
-        notify(`配音合成完成（约 ${tts.durationSeconds.toFixed(1)} 秒）`);
-      }
-    } catch (error) {
-      // 配音失败不阻断：无配音版本也能出方案
-      const message = (error as Error).message;
-      notify(`配音合成失败，将生成无配音版本：${message}`);
-    }
-  }
+  // ---- 3. 配音：规划阶段不做 TTS ----
+  // 出方案要快，配音挪到出片阶段再合成（见 runVideoPipeline 的「出片前补配音」）。
+  // 这里用旁白字数估算时间轴骨架，分镜按估算时长排版；真实配音时长以出片时为准，
+  // 后期的 pad / apad 会消化长度差，字幕仍以真实配音的时间戳为准。
+  const estimatedFromText = narrationText ? narrationText.replace(/\s+/g, "").length / 4.5 : 0;
 
   // ---- 4. 分镜：DSH 出稿，失败自动兜底 ----
-  const totalSeconds = Math.max(6, audio?.durationSeconds ?? input.targetSeconds);
+  const totalSeconds = Math.max(6, Math.round(estimatedFromText || input.targetSeconds));
   const dsh = await getDshStatus(input.userId);
   const beats = buildBeats(
-    input.captions?.length ? input.captions : audio?.captions,
+    input.captions?.length ? input.captions : undefined,
     totalSeconds,
   );
   // prompt 用：这次会注入哪几类图表。必须提前算 —— 它要写进 prompt，
@@ -597,8 +585,9 @@ export async function runVideoPlanStage(
     })).filter((n) => n.title.trim()),
     narration: narrationText,
     title: videoTitle,
-    audioPath: audio?.audioPath ?? null,
-    audioSeconds: audio?.durationSeconds ?? 0,
+    // 规划阶段不做 TTS：音频在出片阶段合成，这里只给「估算时长」供方案展示。
+    audioPath: null,
+    audioSeconds: totalSeconds,
     theme: board.theme,
     themeReason,
     captionStyle: input.look?.captionStyle ?? "classic",
@@ -617,8 +606,6 @@ export async function runVideoPlanStage(
       storyboardReason: plan.fallback ? formatStoryboardReason(plan.diagnostics.firstAttemptError) : undefined,
       sceneCount,
       timelineBeats: beats.length,
-      ttsEngine,
-      ttsFallbackReason,
       elapsedMs: Date.now() - started,
     },
     summary: toPlanSummary(
@@ -845,144 +832,283 @@ export async function runVideoPipeline(input: PipelineInput): Promise<PipelineRe
       });
     }
 
-    // ---- 5. 渲染画面（Remotion，或由调用方替换成旧引擎） ----
-    const rawAbs = join(videosDir, `${prefix}-${input.token}.mp4`);
-    const render = input.renderOverride
-      ? await input.renderOverride({
-          token: input.token,
-          materials,
-          requirement: input.requirement,
-          narrationText,
-          outputPath: rawAbs,
-          targetSeconds: totalSeconds,
-          imageCount: materials.length,
+    // ---- 4.5 出片前补配音 ----
+    // 规划阶段不做 TTS（参考图 / 参考文章两个模式都一样）：这里用规划产物里的旁白文本
+    // 在出片时合成，字幕与混音都基于真实配音时长。老方案若已带 audioPath，直接复用、不重复合成。
+    if (input.mode === "generate" && !audio && narrationText) {
+      const ttsProvider = resolveTtsProvider(input.ttsProvider, DEFAULT_TTS_PROVIDER);
+      notify(`正在用${TTS_ENGINE_LABELS[ttsProvider]}合成配音…`);
+      try {
+        const tts = await synthesizeNarration(narrationText, workDir, undefined, ttsProvider, {
           userId: input.userId,
-          notify,
-        })
-      : await renderVertical({
+        });
+        audio = {
+          audioPath: tts.audioPath,
+          durationSeconds: tts.durationSeconds,
+          captions: tts.captions,
+        };
+        record("配音合成", true, `约 ${tts.durationSeconds.toFixed(1)} 秒`);
+        notify(`配音合成完成（约 ${tts.durationSeconds.toFixed(1)} 秒）`);
+      } catch (error) {
+        record("配音合成", false, (error as Error).message);
+        notify(`配音合成失败，将生成无配音版本：${(error as Error).message}`);
+      }
+    }
+
+    // ---- 5. 渲染画面 ----
+    // 默认交给 DSH（放开沙箱）完成「Remotion 渲染 + 后期」一条龙；失败自动回退本地渲染。
+    const rawAbs = join(videosDir, `${prefix}-${input.token}.mp4`);
+    const coverAbs = join(coverDir, `${prefix}-${input.token}.jpg`);
+    let currentAbs = rawAbs;
+    let cover: { ok: boolean; outputPath?: string; reason?: string } = { ok: false };
+    let engineUsed = input.renderOverride ? "openclaw" : `dsh-remotion/${spec.composition}`;
+
+    const dshRenderStatus = await getDshStatus(input.userId);
+    let usedDshRender =
+      input.renderOverride === undefined && input.renderViaDsh !== false && dshRenderStatus.ok;
+
+    if (usedDshRender) {
+      try {
+        const progressPath = join(workDir, "render-progress.log");
+        const manifest = {
+          projectRoot: process.cwd(),
           compositionId: spec.composition,
-          storyboard: plan!.storyboard,
           token: input.token,
-          materials,
-          outputPath: rawAbs,
+          prefix,
+          storyboard: plan!.storyboard,
+          materials: materials.map((m) => m.absolutePath),
+          outputVideoAbs: rawAbs,
+          outputCoverAbs: coverAbs,
+          audioPath: audio?.audioPath ?? null,
+          captions: input.captions?.length ? input.captions : audio?.captions ?? null,
+          titleText: videoTitle || narrationText.slice(0, 14),
+          titleSeconds: input.titleSeconds ?? 3,
+          bgmPath: input.bgmPath ?? null,
+          captionStyle: (input.resume?.captionStyle ?? input.look?.captionStyle ?? "classic") as CaptionStyleKey,
+          skipFrameCheck: !!input.skipFrameCheck,
+          ffmpegBin: readStringEnv("FFMPEG_BIN") || "ffmpeg",
+          ffprobeBin: readStringEnv("FFPROBE_BIN") || "ffprobe",
+          browserExe: readStringEnv("REMOTION_BROWSER_EXECUTABLE") || undefined,
+          /** 脚本把每一步进度追加到这里，平台在出片期间轮询并流式推给会话。 */
+          progressPath,
+        };
+        const manifestPath = join(workDir, "render-manifest.json");
+        const resultPath = join(workDir, "render-result.json");
+        writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+
+        const renderScript = join(process.cwd(), "scripts", "dsh-storyboard", "render-video.mjs");
+        const nodeBin = process.execPath;
+        const prompt =
+          `请使用你的命令执行工具（Windows 上通常是 pwsh，其他平台是 bash），原样运行下面的渲染命令，` +
+          `不要修改路径、不要拆行、不要添加任何额外步骤。\n\n` +
+          `命令（按你实际使用的 shell 选择其一）：\n` +
+          `- pwsh：  & "${nodeBin}" "${renderScript}" --input "${manifestPath}" --output "${resultPath}"\n` +
+          `- bash：  "${nodeBin}" "${renderScript}" --input "${manifestPath}" --output "${resultPath}"\n\n` +
+          `说明：\n` +
+          `- --input 是渲染清单 JSON（含素材路径、分镜、配音、字幕、标题等）；\n` +
+          `- --output 是渲染结果 JSON 的写入路径；\n` +
+          `- node 与 ffmpeg 已在环境变量 NODE_BIN / FFMPEG_BIN / FFPROBE_BIN / PATH 中注入，可直接使用；\n` +
+          `- 渲染脚本会把最终视频写到清单里指定的 public/videos 目录，并把结果写入 --output 文件。\n\n` +
+          `命令退出后，请读取 "${resultPath}" 文件，把其中的 JSON 内容原样返回给我（不要改写）。` +
+          `若脚本报告 ok:false，也请原样返回并附上 error 字段文字。` +
+          `除运行上述命令外，不要创建或修改任何项目文件，也不要执行其他命令。`;
+
+        // 清掉上一轮的进度残留，避免重复推送。
+        try {
+          writeFileSync(progressPath, "", "utf8");
+        } catch {
+          // 忽略
+        }
+
+        notify(`已交给 DSH（DeepSeek），正在调用 Remotion 渲染并做后期…`);
+        // DSH 渲染是黑盒、可能持续数分钟。脚本会把每一步（渲染 / 自检 / 混音 /
+        // 字幕 / 片头 / 封面）写进 progressPath，这里轮询它并把新增行流式推给会话，
+        // 让用户看到真实进展而不是干等。
+        let seenProgress = 0;
+        const flushDshProgress = () => {
+          try {
+            if (!existsSync(progressPath)) return;
+            const raw = readFileSync(progressPath, "utf8");
+            // 只消费「完整行」：脚本 appendFileSync 时若正好读到半行，丢掉半行等下一轮，
+            // 否则半行会被当成一条进展推出去、且下一轮已越过它。
+            const complete = raw.endsWith("\n") ? raw : raw.slice(0, raw.lastIndexOf("\n") + 1);
+            const lines = complete.split(/\r?\n/).filter((line) => line.trim());
+            for (; seenProgress < lines.length; seenProgress++) notify(lines[seenProgress]);
+          } catch {
+            // 读进度失败不影响出片
+          }
+        };
+        const progressPoller = setInterval(flushDshProgress, 2000);
+        try {
+          await runDshRender(prompt, { userId: input.userId, sessionId: `render-${input.token}` });
+        } finally {
+          clearInterval(progressPoller);
+          flushDshProgress(); // 冲掉最后几行
+        }
+
+        if (existsSync(resultPath)) {
+          const result = JSON.parse(readFileSync(resultPath, "utf8"));
+          // 成片存在即可采用；封面缺失不阻断（避免为了一张封面把整条片子重渲一遍）。
+          if (result.ok && existsSync(rawAbs)) {
+            currentAbs = rawAbs;
+            const hasCover = existsSync(coverAbs);
+            cover = hasCover ? { ok: true, outputPath: coverAbs } : { ok: false, reason: "封面缺失" };
+            engineUsed = `dsh-remotion/${spec.composition}`;
+            const fc = result.diagnostics?.frameCheck;
+            record("DSH 渲染+后期", true, fc ? `黑屏自检：${fc.detail}` : "完成");
+            notify("DSH 已完成渲染与后期，成片已回传平台");
+          } else {
+            throw new Error(result.error || "DSH 渲染未产出成片文件");
+          }
+        } else {
+          throw new Error("DSH 渲染未产出结果文件");
+        }
+      } catch (err) {
+        const message = (err as Error).message;
+        record("DSH 渲染", false, message);
+        notify(`DSH 渲染失败，回退本地渲染：${message}`);
+        usedDshRender = false;
+      }
+    }
+
+    if (!usedDshRender) {
+      // ---- 5（本地兜底）. Remotion 渲染或由旧引擎替换 ----
+      const render = input.renderOverride
+        ? await input.renderOverride({
+            token: input.token,
+            materials,
+            requirement: input.requirement,
+            narrationText,
+            outputPath: rawAbs,
+            targetSeconds: totalSeconds,
+            imageCount: materials.length,
+            userId: input.userId,
+            notify,
+          })
+        : await renderVertical({
+            compositionId: spec.composition,
+            storyboard: plan!.storyboard,
+            token: input.token,
+            materials,
+            outputPath: rawAbs,
+            onProgress: notify,
+          });
+      record(input.renderOverride ? "画面渲染（旧引擎）" : "Remotion 渲染", render.ok, render.detail);
+      if (!render.ok) {
+        return finish({
+          ok: false,
+          error: `画面渲染失败：${render.detail}`,
+          title: videoTitle,
+          narration: narrationText,
+          engineUsed: input.renderOverride ? "openclaw" : `dsh-remotion/${spec.composition}`,
+        });
+      }
+
+      // ---- 5.5 画面自检：渲染退出码为 0 不等于每帧都有内容 ----
+      // 这里检出的黑屏「曾经真的发生过」：Sequence 漏 from 会让 4/5 的成片纯黑，
+      // 而渲染是成功的。检查只告警不阻断 —— 宁可让用户拿到一条有瑕疵的片子，
+      // 也不要因为自检不通过就丢掉整条出片结果。
+      if (!input.skipFrameCheck) {
+        const check = await checkVideoFrames(rawAbs);
+        record("画面黑屏自检", check.ok, check.detail);
+        if (!check.ok) {
+          notify(`⚠ 画面自检未通过：${check.detail}`);
+        } else {
+          notify("画面自检通过（无异常黑屏）");
+        }
+      }
+
+      // ---- 6. 后期：延长 → 混音 → 字幕 → 片头 → 封面 ----
+      currentAbs = rawAbs;
+
+      // P0 之后画面长度由「排版末端」决定，正常情况下就等于口播长度。
+      // 这里的延长只剩兜底意义（AI 少给了一个镜头、或渲染层钳位），但一旦发生就必须补，
+      // 否则就是用户报的「口播没说完视频已经停了」。
+      if (audio && audio.durationSeconds > 0) {
+        const rendered = await probeDuration(currentAbs);
+        const gap = audio.durationSeconds - rendered;
+        if (Number.isFinite(gap) && gap > 0.3) {
+          const paddedAbs = join(videosDir, `${prefix}-${input.token}-pad.mp4`);
+          const pad = await padVideoToDuration(currentAbs, paddedAbs, gap, notify);
+          record("画面延长", pad.ok, pad.ok ? `+${gap.toFixed(1)}s` : pad.reason);
+          if (pad.ok) {
+            currentAbs = paddedAbs;
+            notify(`画面比口播短 ${gap.toFixed(1)} 秒，已补齐末帧`);
+          }
+        }
+      }
+
+      if (audio) {
+        const muxedAbs = join(videosDir, `${prefix}-${input.token}-voice.mp4`);
+        const mux = await muxNarration(currentAbs, audio.audioPath, muxedAbs, {
+          bgmPath: input.bgmPath,
           onProgress: notify,
         });
-    record(input.renderOverride ? "画面渲染（旧引擎）" : "Remotion 渲染", render.ok, render.detail);
-    if (!render.ok) {
-      return finish({
-        ok: false,
-        error: `画面渲染失败：${render.detail}`,
-        title: videoTitle,
-        narration: narrationText,
-        engineUsed: input.renderOverride ? "openclaw" : `dsh-remotion/${spec.composition}`,
-    });
-    }
+        record("配音混音", mux.ok, mux.ok ? undefined : mux.reason);
+        if (mux.ok) {
+          currentAbs = muxedAbs;
+          notify(input.bgmPath ? "配音与背景音乐已合成进视频" : "配音已合成进视频");
 
-    // ---- 5.5 画面自检：渲染退出码为 0 不等于每帧都有内容 ----
-    // 这里检出的黑屏「曾经真的发生过」：Sequence 漏 from 会让 4/5 的成片纯黑，
-    // 而渲染是成功的。检查只告警不阻断 —— 宁可让用户拿到一条有瑕疵的片子，
-    // 也不要因为自检不通过就丢掉整条出片结果。
-    if (!input.skipFrameCheck) {
-      const check = await checkVideoFrames(rawAbs);
-      record("画面黑屏自检", check.ok, check.detail);
-      if (!check.ok) {
-        notify(`⚠ 画面自检未通过：${check.detail}`);
-      } else {
-        notify("画面自检通过（无异常黑屏）");
-      }
-    }
-
-    // ---- 6. 后期：延长 → 混音 → 字幕 → 片头 → 封面 ----
-    let currentAbs = rawAbs;
-
-    // P0 之后画面长度由「排版末端」决定，正常情况下就等于口播长度。
-    // 这里的延长只剩兜底意义（AI 少给了一个镜头、或渲染层钳位），但一旦发生就必须补，
-    // 否则就是用户报的「口播没说完视频已经停了」。
-    if (audio && audio.durationSeconds > 0) {
-      const rendered = await probeDuration(currentAbs);
-      const gap = audio.durationSeconds - rendered;
-      if (Number.isFinite(gap) && gap > 0.3) {
-        const paddedAbs = join(videosDir, `${prefix}-${input.token}-pad.mp4`);
-        const pad = await padVideoToDuration(currentAbs, paddedAbs, gap, notify);
-        record("画面延长", pad.ok, pad.ok ? `+${gap.toFixed(1)}s` : pad.reason);
-        if (pad.ok) {
-          currentAbs = paddedAbs;
-          notify(`画面比口播短 ${gap.toFixed(1)} 秒，已补齐末帧`);
-        }
-      }
-    }
-
-    if (audio) {
-      const muxedAbs = join(videosDir, `${prefix}-${input.token}-voice.mp4`);
-      const mux = await muxNarration(currentAbs, audio.audioPath, muxedAbs, {
-        bgmPath: input.bgmPath,
-        onProgress: notify,
-      });
-      record("配音混音", mux.ok, mux.ok ? undefined : mux.reason);
-      if (mux.ok) {
-        currentAbs = muxedAbs;
-        notify(input.bgmPath ? "配音与背景音乐已合成进视频" : "配音已合成进视频");
-
-        // 硬断言：成片不得短于口播。短了就是「口播被掐断」，必须当场暴露而不是等用户发现。
-        const finalDur = await probeDuration(currentAbs);
-        const lost = audio.durationSeconds - finalDur;
-        if (Number.isFinite(lost) && lost > 0.5) {
-          record("成片时长校验", false, `成片 ${finalDur.toFixed(2)}s 短于口播 ${audio.durationSeconds.toFixed(2)}s，末句被截断 ${lost.toFixed(2)}s`);
-          notify(`⚠ 成片比口播短 ${lost.toFixed(2)} 秒，末句可能不完整`);
+          // 硬断言：成片不得短于口播。短了就是「口播被掐断」，必须当场暴露而不是等用户发现。
+          const finalDur = await probeDuration(currentAbs);
+          const lost = audio.durationSeconds - finalDur;
+          if (Number.isFinite(lost) && lost > 0.5) {
+            record("成片时长校验", false, `成片 ${finalDur.toFixed(2)}s 短于口播 ${audio.durationSeconds.toFixed(2)}s，末句被截断 ${lost.toFixed(2)}s`);
+            notify(`⚠ 成片比口播短 ${lost.toFixed(2)} 秒，末句可能不完整`);
+          } else {
+            record("成片时长校验", true, `成片 ${finalDur.toFixed(2)}s / 口播 ${audio.durationSeconds.toFixed(2)}s`);
+          }
         } else {
-          record("成片时长校验", true, `成片 ${finalDur.toFixed(2)}s / 口播 ${audio.durationSeconds.toFixed(2)}s`);
+          notify(`配音合入失败，保留原声版：${mux.reason}`);
         }
-      } else {
-        notify(`配音合入失败，保留原声版：${mux.reason}`);
       }
-    }
 
-    // 字幕来源二选一：剪辑链路的 ASR 字幕优先，避免同一句话出现两层字幕
-    const captions = input.captions?.length ? input.captions : audio?.captions;
-    // 字幕样式：resume 分支用方案里确认过的（规划阶段已写进 storyboard.look），
-    // 否则用本次请求带的 look；都没有就是 classic（与改造前一致）。
-    const captionStyle =
-      (input.resume?.captionStyle ?? input.look?.captionStyle ?? "classic") as CaptionStyleKey;
-    if (captions?.length) {
-      const subAbs = join(videosDir, `${prefix}-${input.token}-sub.mp4`);
-      const srtPath = join(workDir, "captions.srt");
-      const srt = buildSrtFromCaptions(captions, srtPath);
-      if (srt.ok) {
-        const burn = await burnSubtitles(currentAbs, srtPath, subAbs, notify, captionStyle);
-        record("字幕烧录", burn.ok, burn.ok ? `${srt.cueCount} 句` : burn.reason);
-        if (burn.ok) {
-          currentAbs = subAbs;
-          notify(`字幕已烧录（${srt.cueCount} 句）`);
+      // 字幕来源二选一：剪辑链路的 ASR 字幕优先，避免同一句话出现两层字幕
+      const captions = input.captions?.length ? input.captions : audio?.captions;
+      // 字幕样式：resume 分支用方案里确认过的（规划阶段已写进 storyboard.look），
+      // 否则用本次请求带的 look；都没有就是 classic（与改造前一致）。
+      const captionStyle =
+        (input.resume?.captionStyle ?? input.look?.captionStyle ?? "classic") as CaptionStyleKey;
+      if (captions?.length) {
+        const subAbs = join(videosDir, `${prefix}-${input.token}-sub.mp4`);
+        const srtPath = join(workDir, "captions.srt");
+        const srt = buildSrtFromCaptions(captions, srtPath);
+        if (srt.ok) {
+          const burn = await burnSubtitles(currentAbs, srtPath, subAbs, notify, captionStyle);
+          record("字幕烧录", burn.ok, burn.ok ? `${srt.cueCount} 句` : burn.reason);
+          if (burn.ok) {
+            currentAbs = subAbs;
+            notify(`字幕已烧录（${srt.cueCount} 句）`);
+          } else {
+            notify(`字幕烧录失败，保留无字幕版：${burn.reason}`);
+          }
         } else {
-          notify(`字幕烧录失败，保留无字幕版：${burn.reason}`);
+          record("字幕烧录", false, "字幕数据为空");
+          notify("字幕数据为空，跳过字幕烧录。");
         }
-      } else {
-        record("字幕烧录", false, "字幕数据为空");
-        notify("字幕数据为空，跳过字幕烧录。");
       }
-    }
 
-    const titleText = videoTitle || narrationText.slice(0, 14);
-    if (titleText) {
-      const titleSeconds = input.titleSeconds ?? 3;
-      const titleAbs = join(videosDir, `${prefix}-${input.token}-title.mp4`);
-      const overlay = await addTitleOverlay(currentAbs, titleText, titleAbs, {
-        durationSec: titleSeconds,
-        onProgress: notify,
-      });
-      record("片头标题", overlay.ok, overlay.ok ? undefined : overlay.reason);
-      if (overlay.ok) {
-        currentAbs = titleAbs;
-        notify(`已添加片头标题（前 ${titleSeconds} 秒展示）`);
-      } else {
-        notify(`片头标题添加失败：${overlay.reason}`);
+      const titleText = videoTitle || narrationText.slice(0, 14);
+      if (titleText) {
+        const titleSeconds = input.titleSeconds ?? 3;
+        const titleAbs = join(videosDir, `${prefix}-${input.token}-title.mp4`);
+        const overlay = await addTitleOverlay(currentAbs, titleText, titleAbs, {
+          durationSec: titleSeconds,
+          onProgress: notify,
+        });
+        record("片头标题", overlay.ok, overlay.ok ? undefined : overlay.reason);
+        if (overlay.ok) {
+          currentAbs = titleAbs;
+          notify(`已添加片头标题（前 ${titleSeconds} 秒展示）`);
+        } else {
+          notify(`片头标题添加失败：${overlay.reason}`);
+        }
       }
-    }
 
-    const duration = await probeDuration(currentAbs);
-    const coverAbs = join(coverDir, `${prefix}-${input.token}.jpg`);
-    const cover = await extractCoverFrame(currentAbs, coverAbs, Math.max(1, Math.min(4, duration * 0.35)));
-    record("封面截取", cover.ok, cover.ok ? undefined : cover.reason);
+      const duration = await probeDuration(currentAbs);
+      cover = await extractCoverFrame(currentAbs, coverAbs, Math.max(1, Math.min(4, duration * 0.35)));
+      record("封面截取", cover.ok, cover.ok ? undefined : cover.reason);
+    }
 
     return finish({
       ok: true,
@@ -990,7 +1116,7 @@ export async function runVideoPipeline(input: PipelineInput): Promise<PipelineRe
       coverUrl: cover.ok ? `/uploads/covers/${prefix}-${input.token}.jpg` : undefined,
       title: videoTitle,
       narration: narrationText,
-      engineUsed: input.renderOverride ? "openclaw" : `dsh-remotion/${spec.composition}`,
+      engineUsed,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "视频生成失败。";

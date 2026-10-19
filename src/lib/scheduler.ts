@@ -3,11 +3,11 @@
  *
  * 背景：OpenClaw 网关的 cron 存储是**全平台共享**的，任何 session 里的 agent 都能
  * `openclaw cron list` 看到别人的任务（已造成过跨用户泄露事故）。因此把用户级调度
- * 收到平台侧：任务存在本库，到点由本调度器用**该用户自己配置的模型与密钥**执行 prompt。
+ * 收到平台侧：任务存在本库，到点由本调度器在**该用户的专属会话**里执行 prompt。
  * 网关侧不再保存任何用户任务数据 → 外部通道（微信等）即使被诱导去查，也查不到。
  */
 import { prisma } from "@/lib/prisma";
-import { chatComplete } from "@/lib/llm-client";
+import { openClawClient, deliverWechatMessage } from "@/lib/openclaw";
 
 /** 调度轮询间隔。 */
 const TICK_MS = 30_000;
@@ -154,6 +154,41 @@ export type SchedulerRunResult = {
   error?: string;
 };
 
+/**
+ * 解析该用户的微信投递目标（to=收件人 wechatNo，accountRef=机器人 wechatOpenId 原始值）。
+ * 只取该用户**自己** status=BOUND 的最新绑定；未绑定或历史脏数据返回 null（宁可不投，绝不投错人）。
+ * accountRef 传原始值，由 deliverWechatMessage 内部做规范化与 userId 反查，避免这里重复实现。
+ */
+async function resolveWechatTarget(userId: string): Promise<{ to: string; accountRef: string } | null> {
+  const binding = await prisma.wechatBinding
+    .findFirst({ where: { userId, status: "BOUND" }, orderBy: { boundAt: "desc" } })
+    .catch(() => null);
+  if (!binding) return null;
+  const to = (binding.wechatNo || "").trim();
+  const accountRef = (binding.wechatOpenId || "").trim();
+  if (!to.endsWith("@im.wechat") || !accountRef.endsWith("@im.bot")) return null;
+  return { to, accountRef };
+}
+
+/**
+ * 把定时任务的结果通过微信推给该用户本人。
+ *
+ * 走**确定性投递**（平台直接持机器人 token 调 `ilink/bot/sendmessage`），
+ * 不再依赖 agent 在回合里自觉调 `--announce` 工具——那一路实测三次均未真正发出。
+ * 目标（to / accountRef）来自用户自己的绑定记录，绝不投错人；未绑定不会调到这里。
+ */
+async function deliverJobResultToWechat(
+  jobName: string,
+  target: { to: string; accountRef: string },
+  text: string
+): Promise<void> {
+  const content = (text || "").trim() || `定时任务「${jobName}」已执行（无文本结果）。`;
+  const result = await deliverWechatMessage(target.accountRef, target.to, content);
+  console.log(
+    `[scheduler] 微信通知已投递：任务=${jobName} to=${target.to} messageId=${result.messageId ?? "?"}`
+  );
+}
+
 /** 立即执行一个任务（手动触发与定时触发共用）。 */
 export async function runScheduledJob(jobId: string): Promise<SchedulerRunResult> {
   const job = await prisma.scheduledJob.findUnique({ where: { id: jobId } });
@@ -165,7 +200,16 @@ export async function runScheduledJob(jobId: string): Promise<SchedulerRunResult
     .update({ where: { id: jobId }, data: { lastStatus: "RUNNING", lastError: null } })
     .catch(() => undefined);
   try {
-    const result = await chatComplete({ userId: job.userId, capability: "chat", prompt: job.prompt });
+    const target = await resolveWechatTarget(job.userId).catch(() => null);
+
+    const result = await openClawClient.sendTask({
+      message: job.prompt,
+      userId: job.userId,
+      // 定时任务常是多步长流程（抓热点/生成/入库），120s 默认超时必掐断；放宽到 10 分钟。
+      timeoutMs: Number(process.env.SCHEDULE_TASK_TIMEOUT_MS ?? 600_000),
+      // 空文本自动重跑 = 整个任务再执行一遍（重复入库/发布），对有副作用的任务绝不允许。
+      retryOnEmpty: false
+    });
     const content = (result.content || "").trim();
     await prisma.scheduledJob.update({
       where: { id: jobId },
@@ -173,10 +217,22 @@ export async function runScheduledJob(jobId: string): Promise<SchedulerRunResult
         lastRunAt: new Date(),
         lastStatus: "SUCCEEDED",
         lastError: null,
-        lastResult: content.slice(0, 2000),
+        lastResult: (
+          content ||
+          // 空文本 ≠ 失败：agent 可能以工具调用形式完成任务、或仍在后台收尾；
+          // 微信通知走独立投递回合，不依赖这里抓到文本。
+          "已执行。agent 未返回文本结果（可能以工具调用完成或仍在后台收尾）；如已绑定微信，结果会由 agent 直接推送。"
+        ).slice(0, 2000),
         runCount: { increment: 1 }
       }
     });
+    // 微信通知走**确定性投递**：平台直接调微信官方接口，不依赖 agent 调 --announce。
+    // 单独一轮（而不是把投递塞进任务 prompt）避免被主任务逻辑覆盖；失败仅记日志，不影响任务本身状态。
+    if (target) {
+      void deliverJobResultToWechat(job.name, target, content || "定时任务已执行完成（无文本结果）。").catch(
+        (error) => console.error(`[scheduler] 任务 ${job.name} 微信通知投递失败：`, error)
+      );
+    }
     return { ok: true, status: "SUCCEEDED", content };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

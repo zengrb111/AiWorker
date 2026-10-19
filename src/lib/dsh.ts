@@ -26,6 +26,12 @@ const DSH_CAPABILITY = "storyboard" as const;
 /** 分镜是纯文本任务，180s 足够；与渲染的 900s 是两码事，不要混用。 */
 const DEFAULT_TIMEOUT_MS = 180_000;
 
+/** 渲染（含 Remotion + ffmpeg 后期）是重任务，900s 起步；与分镜的 180s 是两码事。 */
+const RENDER_TIMEOUT_MS = 900_000;
+
+/** DSH 受限 profile 的种类：storyboard=分镜规划（禁 bash/fs），render=出片（放开 bash/fs）。 */
+type DshProfileName = "storyboard" | "render";
+
 /** Python 冷启动（含 SDK 插件加载）预算，计入总超时之外。 */
 const STARTUP_GRACE_MS = 30_000;
 
@@ -201,9 +207,15 @@ function bridgeDir(): string {
  * `profile` + `patches`，等价于命令行 `dsh --profile sdk --patch <path>`。
  * 官方 sdk profile 自带 tool-bash / tool-pwsh / tool-fs / tool-web / subagent
  * 等一整套工具，必须靠这个覆盖层逐个 disabled。
+ *
+ * ⚠ 文件名注意：分镜 profile 的历史文件名是 **`cordis.patch.yml`**（不带 storyboard 后缀），
+ * 出片 profile 是 `cordis-render.patch.yml`。**不要**把 storyboard 也拼成
+ * `cordis-storyboard.patch.yml` —— 文件不存在，ensureProfile 会 ENOENT，
+ * 于是 DSH 分镜静默回退到兜底分镜（2026-10-19 踩过）。
  */
-function profilePatchPath(): string {
-  return join(bridgeDir(), "profile", "cordis.patch.yml");
+function profilePatchPath(name: DshProfileName = "storyboard"): string {
+  const file = name === "storyboard" ? "cordis.patch.yml" : `cordis-${name}.patch.yml`;
+  return join(bridgeDir(), "profile", file);
 }
 
 function readEnv(name: string): string {
@@ -266,15 +278,15 @@ export function resetDshStatusCache(): void {
 }
 
 /**
- * 把受限 profile 布置到 $DSH_HOME/profiles/storyboard/cordis.patch.yml。
+ * 把受限 profile 布置到 $DSH_HOME/profiles/<name>/cordis.patch.yml。
  *
  * 必须在每次调用前做：DSH 的 HOME 目录可能被用户清掉，也可能被升级改写，
  * 幂等覆盖比判断文件是否存在更可靠。
  */
-function ensureProfile(dshHome: string): void {
-  const target = join(dshHome, "profiles", "storyboard");
+function ensureProfile(dshHome: string, name: DshProfileName = "storyboard"): void {
+  const target = join(dshHome, "profiles", name);
   mkdirSync(target, { recursive: true });
-  copyFileSync(join(bridgeDir(), "profile", "cordis.patch.yml"), join(target, "cordis.patch.yml"));
+  copyFileSync(profilePatchPath(name), join(target, "cordis.patch.yml"));
 }
 
 /** 子进程 stderr 的尾部，出错时带给调用方便于定位。 */
@@ -343,7 +355,7 @@ export async function runDshText(options: DshRunOptions): Promise<string> {
 
   mkdirSync(dshHome, { recursive: true });
   mkdirSync(workspaceDir, { recursive: true });
-  ensureProfile(dshHome);
+  ensureProfile(dshHome, "storyboard");
 
   const request = {
     prompt: options.prompt,
@@ -447,6 +459,86 @@ function runBridge(
 
     child.stdin.end(JSON.stringify(request));
   });
+}
+
+/**
+ * 跑一次 DSH 出片（渲染 + 后期）。
+ *
+ * 与 `runDshText` 的区别：用的是 **render profile**（`cordis-render.patch.yml`），
+ * 它**放开 tool-bash / tool-fs**，让 DSH 能在沙箱里调用 Remotion CLI 与 ffmpeg，
+ * 把成片直接写回本项目的 public/videos 目录。prompt 会命令 DSH 原样执行
+ * `render-video.mjs`，脚本内部完成「Remotion 渲染 + 后期一条龙」并写结果 JSON。
+ *
+ * 任何失败（不可用 / 超时 / 崩溃 / 输出非法）都抛异常，调用方（pipeline）会
+ * 自动回退到本地「renderVertical + video-stitch」那条已验证的路径，不会让出片失败。
+ *
+ * 渲染是重任务，超时默认 900s + 启动宽限；cwd 指向项目根，tool-bash 的沙箱按 cwd
+ * 约束可写范围，必须让它能写到 public/videos 与 remotion/public/generated。
+ */
+export async function runDshRender(
+  prompt: string,
+  options: { userId?: string; sessionId?: string | null; timeoutMs?: number; workspaceDir?: string } = {},
+): Promise<string> {
+  const status = await getDshStatus(options.userId);
+  if (!status.ok) throw new Error(status.reason);
+
+  const credential = await resolveStoryboardCredential(options.userId);
+  if (!credential?.apiKey) {
+    throw new Error("尚未配置「分镜规划」模型服务，请在「系统配置」中指定并填写 API Key。");
+  }
+
+  const dshHome = dshHomeDir(options.userId);
+  // 渲染需要在项目根目录下写 public/videos 与 remotion/public/generated，
+  // 所以 cwd 指向项目根（tool-bash 的沙箱按 cwd 约束可写范围）。
+  const workspaceDir = options.workspaceDir || process.cwd();
+  const timeoutMs = options.timeoutMs ?? readPositiveNumberEnv("DSH_RENDER_TIMEOUT_MS", RENDER_TIMEOUT_MS);
+
+  mkdirSync(dshHome, { recursive: true });
+  ensureProfile(dshHome, "render");
+
+  const request = {
+    prompt: prompt.trim(),
+    session_id: options.sessionId
+      ? `${sanitizeSessionId(options.sessionId)}-${randomSuffix()}`
+      : null,
+    cwd: workspaceDir,
+    dsh_home: dshHome,
+    // 出片 profile：放开 bash / fs，让 DSH 能跑 Remotion + ffmpeg
+    patch: profilePatchPath("render"),
+    model: credential.model || readEnv("DSH_MODEL") || null,
+    timeout_ms: timeoutMs,
+    // 把 node / ffmpeg / ffprobe 注入 agent 子进程的 env：
+    // tool-bash 跑 `node render-video.mjs` 时直接能用，不必依赖 PATH 里的解释器顺序。
+    env: {
+      NODE_BIN: process.execPath,
+      FFMPEG_BIN: readStringEnv("FFMPEG_BIN") || "ffmpeg",
+      FFPROBE_BIN: readStringEnv("FFPROBE_BIN") || "ffprobe",
+      REMOTION_BROWSER_EXECUTABLE: readStringEnv("REMOTION_BROWSER_EXECUTABLE") || "",
+      PATH: process.env.PATH || "",
+      // 🔴 关键：DSH 的 approval 插件默认 policy 是 'ask'（见 sdk profile 的
+      // `DSH_PERMISSION_MODE ?? 'workspace-write' ? 'never' : 'ask'`）。'ask' 在无头
+      // 会话里没人点确认，命令会被挂住/拒绝。用户已拍板「放开沙箱」，
+      // 这里显式设为 danger-full-access → approval=never，shell 命令才会真正执行。
+      DSH_PERMISSION_MODE: "danger-full-access",
+    },
+  };
+
+  if (!request.prompt) throw new Error("出片 prompt 为空");
+
+  const stdout = await runBridge(status.python, request, timeoutMs + STARTUP_GRACE_MS, dshHome, credential);
+
+  let parsed: { ok?: boolean; final_response?: string; error?: string };
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error(
+      `DSH 桥接脚本返回的不是合法 JSON。原始输出（尾部）：\n${tail(stdout)}`,
+    );
+  }
+  if (!parsed.ok) {
+    throw new Error(`DSH 调用失败：${parsed.error || "未知原因"}`);
+  }
+  return (parsed.final_response ?? "").trim();
 }
 
 /**

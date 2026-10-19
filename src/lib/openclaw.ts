@@ -25,6 +25,13 @@ export type OpenClawTaskRequest = {
    * 不传则按 userId 派生默认会话，行为与改造前一致。
    */
   sessionKey?: string;
+  /** 等待 agent 最终回复的超时（毫秒）。不传用 OPENCLAW_CHAT_TIMEOUT_MS（默认 120 秒）。 */
+  timeoutMs?: number;
+  /**
+   * 空返回时是否自动重跑一次（默认 true）。**有副作用的任务必须传 false**：
+   * 重跑 = 整个任务再执行一遍（重复入库/重复发布）。
+   */
+  retryOnEmpty?: boolean;
 };
 
 export type OpenClawTaskResult = {
@@ -471,6 +478,95 @@ async function persistWeixinBinding(result: {
 
 function weixinApiBaseUrl(): string {
   return process.env.OPENCLAW_WEIXIN_API_BASE_URL || "https://ilinkai.weixin.qq.com";
+}
+
+// ---------------------------------------------------------------------------
+// 微信主动投递（确定性，绕开 agent 的 --announce 工具调用）
+//
+// 痛点：原先让 agent 在独立回合里调 `--announce --channel openclaw-weixin` 推送，
+// agent 不保证真的调工具 → 用户收不到通知（实测三次均失败）。
+// 改为由平台直接持机器人 token 调微信官方 `ilink/bot/sendmessage`，100% 可控送达。
+// 凭据复用平台已有的微信账号模块（loadWeixinAccountsModule），不做任何新增落盘。
+// ---------------------------------------------------------------------------
+
+type WeixinApiModule = {
+  sendMessage(params: {
+    baseUrl: string;
+    token: string;
+    timeoutMs?: number;
+    body: Record<string, unknown>;
+  }): Promise<{ message_id?: string | number }>;
+};
+
+/** 插件 api.js 路径（与账号模块同源，均在 dist/src/api 下）。 */
+function weixinApiModulePath(): string {
+  const configured = process.env.OPENCLAW_WEIXIN_API_MODULE;
+  if (configured) return configured;
+  // weixinLoginModulePath() 返回 .../dist/src/auth/login-qr.js
+  // api.js 在其同级目录 .../dist/src/api/api.js
+  return path.join(path.dirname(weixinLoginModulePath()), "..", "api", "api.js");
+}
+
+let weixinApiModulePromise: Promise<WeixinApiModule> | null = null;
+
+function loadWeixinApiModule(): Promise<WeixinApiModule> {
+  if (!weixinApiModulePromise) {
+    weixinApiModulePromise = (async () => {
+      const runtimeImport = new Function("specifier", "return import(specifier)") as (
+        specifier: string
+      ) => Promise<unknown>;
+      return (await runtimeImport(
+        pathToFileURL(weixinApiModulePath()).href
+      )) as WeixinApiModule;
+    })().catch((error) => {
+      weixinApiModulePromise = null;
+      throw error;
+    });
+  }
+  return weixinApiModulePromise;
+}
+
+/**
+ * 把一段文本通过微信直接推送给指定收件人（确定性投递，不经过 agent）。
+ *
+ * @param accountRef 绑定记录里存的 bot 标识（wechatOpenId，形如 xxx@im.bot）
+ * @param to         收件人 wechatNo（形如 xxx@im.wechat）
+ * @param text       要发送的正文
+ */
+export async function deliverWechatMessage(
+  accountRef: string,
+  to: string,
+  text: string
+): Promise<{ messageId?: string | number }> {
+  const trimmedTo = (to || "").trim();
+  if (!trimmedTo.endsWith("@im.wechat")) {
+    throw new Error(`非法微信收件人（必须以 @im.wechat 结尾）：${to}`);
+  }
+  const accounts = await loadWeixinAccountsModule();
+  const accountId = resolveBoundWeixinAccountId(accountRef, accounts);
+  const acct = accounts.loadWeixinAccount(accountId);
+  if (!acct?.token) {
+    throw new Error(`微信账号 ${accountId} 未配置 token，无法投递。`);
+  }
+  const api = await loadWeixinApiModule();
+  const clientId = `platform-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const body = {
+    msg: {
+      from_user_id: "",
+      to_user_id: trimmedTo,
+      client_id: clientId,
+      message_type: 2, // MessageType.BOT
+      message_state: 2, // MessageState.FINISH
+      item_list: [{ type: 1, text_item: { text } }] // MessageItemType.TEXT
+    }
+  };
+  const resp = await api.sendMessage({
+    baseUrl: acct.baseUrl || weixinApiBaseUrl(),
+    token: acct.token,
+    timeoutMs: 15_000,
+    body
+  });
+  return { messageId: resp?.message_id };
 }
 
 async function renderQrImageDataUrl(value: string): Promise<string> {
@@ -1701,13 +1797,16 @@ export const openClawClient = {
     // 显式指定的 sessionKey 优先（后台任务用独立会话，避免与实时对话抢同一会话）；
     // 否则按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
     const sessionKey = request.sessionKey || deriveUserSessionKey(request.userId);
-    let result = await requestGatewayChat(message, undefined, undefined, sessionKey);
-    if (!result.content?.trim()) {
+    const retryOnEmpty = request.retryOnEmpty !== false;
+    let result = await requestGatewayChat(message, request.timeoutMs, undefined, sessionKey);
+    if (!result.content?.trim() && retryOnEmpty) {
       await new Promise((resolve) => setTimeout(resolve, 800));
-      result = await requestGatewayChat(message, undefined, undefined, sessionKey);
+      result = await requestGatewayChat(message, request.timeoutMs, undefined, sessionKey);
     }
 
-    if (!result.content?.trim()) {
+    // retryOnEmpty=false（有副作用的定时任务）：空文本不算失败，原样返回空 content，
+    // 由调用方决定语义；此时绝不能重跑任务。
+    if (!result.content?.trim() && retryOnEmpty) {
       throw new Error("OpenClaw 未返回任务内容（已自动重试一次），请稍后重试。");
     }
 

@@ -45,12 +45,14 @@ export type TTSResult = {
 };
 
 /**
- * 云端语音合成引擎。用户在「一键生成视频」对话框里选择：
- * - qwen：千问 TTS（**默认**，英文支持更好，音色自然）
- * - zhipu：智谱 glm-tts（中文自然，可作为中文旁白的备选）
- * 选中的引擎失败时会自动回退到另一家云 TTS，再退到本地通道，保证不断音。
+ * 语音合成引擎。用户在「一键生成视频」对话框里选择：
+ * - edge：免费合成音（edge-tts，**默认**；免费、无需 key，失败自动回退本机 SAPI）
+ * - qwen：千问 TTS（云，需 key，英文支持更好，音色自然）
+ * - zhipu：智谱 glm-tts（云，需 key，中文自然）
+ * 云端引擎失败时会自动回退到另一家云 TTS，再退到本地通道，保证不断音；
+ * 选「免费合成音」则直接走本地通道，不消耗任何云端额度。
  */
-export type TtsProvider = "qwen" | "zhipu";
+export type TtsProvider = "qwen" | "zhipu" | "edge";
 
 /** 实际产音的通道：两家云 TTS + 两个本地兜底。 */
 export type TtsEngine = "zhipu" | "qwen" | "edge" | "sapi";
@@ -58,18 +60,21 @@ export type TtsEngine = "zhipu" | "qwen" | "edge" | "sapi";
 export const TTS_ENGINE_LABELS: Record<TtsEngine, string> = {
   zhipu: "智谱 GLM-TTS",
   qwen: "千问 TTS",
-  edge: "Edge TTS",
+  edge: "免费合成音",
   sapi: "本机语音",
 };
 
 /**
  * 把环境变量/请求参数解析成合法引擎名；非法值一律回落到 fallback。
  *
- * fallback 默认 qwen —— 未显式选择时的全局默认。
+ * fallback 默认 qwen —— 未显式选择时的全局默认（视频生成前端会显式传 edge）。
  */
 export function resolveTtsProvider(raw: unknown, fallback: TtsProvider = "qwen"): TtsProvider {
   const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
-  return value === "qwen" ? "qwen" : value === "zhipu" ? "zhipu" : fallback;
+  if (value === "qwen") return "qwen";
+  if (value === "zhipu") return "zhipu";
+  if (value === "edge") return "edge";
+  return fallback;
 }
 
 /**
@@ -654,9 +659,11 @@ async function synthesizeWithFallback(
 ): Promise<TTSResult> {
   const errors: string[] = [];
   const cloud: Array<{ engine: TtsEngine; run: () => Promise<TTSResult> }> = [];
+  // 选「免费合成音」(edge) 时直接走本地通道，不碰云端、不消耗额度。
+  const allowCloud = provider !== "edge";
   // 只有该用户确实配置了对应接口形态的云配音，才把它放进候选链；
   // 没配置就直接走本地通道（edge-tts / SAPI），保证没云端 key 也能出片。
-  if (credential?.apiFormat === "zhipu-tts") {
+  if (allowCloud && credential?.apiFormat === "zhipu-tts") {
     cloud.push({
       engine: "zhipu",
       run: () =>
@@ -666,13 +673,24 @@ async function synthesizeWithFallback(
         })),
     });
   }
-  if (credential?.apiFormat === "dashscope-tts") {
+  // 千问 TTS：除了专用的 dashscope-tts，也接受 DashScope 的通用 provider
+  // （openai-completions + dashscope 域名）——用户在设置里用一个「通义千问」provider
+  // 就能同时配对话与配音，不必再建一个 tts 专用 provider。
+  // generateQwenTTS 会把 baseUrl 的 /compatible-mode/v1 去掉再拼官方端点，所以通用
+  // provider 的 baseUrl 可直接复用。
+  if (
+    allowCloud &&
+    credential &&
+    (credential.apiFormat === "dashscope-tts" ||
+      (credential.apiFormat === "openai-completions" &&
+        /dashscope\.aliyuncs\.com/i.test(credential.baseUrl)))
+  ) {
     cloud.push({
       engine: "qwen",
       run: () => runWithRateLimitRetry(() => generateQwenTTS(text, outDir, baseName, credential)),
     });
   }
-  if (!cloud.length) {
+  if (allowCloud && !cloud.length) {
     errors.push("cloud:未在系统配置中指定云端配音模型");
   }
 
