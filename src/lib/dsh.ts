@@ -239,16 +239,20 @@ export async function getDshStatus(userId?: string): Promise<DshStatus> {
   const cached = availability.get(cacheKey);
   if (cached) return cached;
 
+  /*
+   * 不可用结果**不缓存**：缺配置、python 缺失这类「状态会变」的失败，
+   * 一旦用户在「系统配置」里补完 key 或装好环境，下一次请求就该立刻可用。
+   * 否则缓存的 ok:false 会让「配完还得重启服务」的怪现象反复出现。
+   * 只缓存 ok:true（已验证过的环境，避免每次出片都重复探测 python/SDK 版本）。
+   */
   const credential = await resolveStoryboardCredential(userId);
   if (!credential?.apiKey) {
-    const status: DshStatus = {
+    return {
       ok: false,
       reason: userId
         ? "尚未配置「分镜规划」模型服务，分镜将使用确定性兜底分镜。请在「系统配置」中指定并填写 API Key。"
         : "缺少登录用户，无法确定分镜规划使用的模型服务。",
     };
-    availability.set(cacheKey, status);
-    return status;
   }
 
   try {
@@ -265,9 +269,7 @@ export async function getDshStatus(userId?: string): Promise<DshStatus> {
     availability.set(cacheKey, status);
     return status;
   } catch (err) {
-    const status: DshStatus = { ok: false, reason: (err as Error).message };
-    availability.set(cacheKey, status);
-    return status;
+    return { ok: false, reason: (err as Error).message };
   }
 }
 

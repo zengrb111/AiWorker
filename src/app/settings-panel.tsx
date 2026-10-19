@@ -95,7 +95,8 @@ const CAPABILITY_FORMAT: Record<string, string[]> = {
 
 /** 有内置零配置数据源的能力：未指定时仍可用，界面要说清免得用户以为坏了。 */
 const CAPABILITY_FALLBACK_NOTE: Record<string, string> = {
-  search: "未指定时使用内置公开热榜（百度 / 抖音 / 头条 / 知乎，零配置零密钥）；指定自己的搜索服务可获得按关键词检索的结果。"
+  search: "未指定时使用内置公开热榜（百度 / 抖音 / 头条 / 知乎，零配置零密钥）；指定自己的搜索服务可获得按关键词检索的结果。",
+  tts: "未指定时使用免费合成音（本地 edge-tts，零配置零密钥）；指定云端配音后出片将优先使用所选服务。"
 };
 
 /**
@@ -172,7 +173,10 @@ export default function SettingsPanel({ resetToken }: { resetToken: number }) {
   }, [refresh, resetToken]);
 
   const assignedCount = capabilities.filter((row) => row.providerRowId && row.model).length;
-  const missingCount = capabilities.filter((row) => !assignmentDraft[row.capability]?.providerRowId).length;
+  // 配音有零配置免费默认（本地 edge-tts），未指定不算缺失，不进警告计数。
+  const missingCount = capabilities.filter(
+    (row) => row.capability !== "tts" && !assignmentDraft[row.capability]?.providerRowId,
+  ).length;
 
   function openCreate() {
     setFormError("");
@@ -476,7 +480,7 @@ export default function SettingsPanel({ resetToken }: { resetToken: number }) {
         <div className="cfg-assign-list">
           {capabilities.map((row) => {
             const allowed = CAPABILITY_FORMAT[row.capability] ?? ["openai-completions"];
-            const candidates = items.filter((item) => {
+            const matched = items.filter((item) => {
               if (allowed.includes(item.apiFormat)) return true;
               // 配音：DashScope 的通用 provider（openai-completions + dashscope 域名）也能跑
               // 千问 TTS（qwen3-tts-flash），不该被 apiFormat 白名单挡住 —— 用户常只建一个
@@ -490,6 +494,10 @@ export default function SettingsPanel({ resetToken }: { resetToken: number }) {
               }
               return false;
             });
+            // 配音已默认走免费合成音（本地 edge-tts），云端配音只是可选增强：
+            // 没有形态匹配的服务时也不能把下拉禁死（那会被当成「配置项坏了」），
+            // 回退列出全部服务，选不选、选哪个都交给用户自己决定。
+            const candidates = row.capability === "tts" && !matched.length ? items : matched;
             const current = assignmentDraft[row.capability] ?? { providerRowId: "", model: "" };
             const provider = items.find((item) => item.id === current.providerRowId);
             // 配音优先只列 TTS 模型（如 qwen3-tts-flash）；没有匹配再回退全部模型。
@@ -528,7 +536,7 @@ export default function SettingsPanel({ resetToken }: { resetToken: number }) {
                     disabled={candidates.length === 0}
                     onChange={(e) => changeAssignment(row.capability, e.target.value)}
                   >
-                    <option value="">未指定</option>
+                    <option value="">{row.capability === "tts" ? "未指定（免费合成音）" : "未指定"}</option>
                     {candidates.map((item) => (
                       <option key={item.id} value={item.id}>
                         {item.label}
