@@ -621,7 +621,7 @@ export default function PlatformClient() {
   /** 点「系统配置」时自增，让模型配置面板重新拉数据。 */
   const [settingsResetToken, setSettingsResetToken] = useState(0);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeConversationId, setActiveConversationId] = useState("");
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [chatError, setChatError] = useState("");
   const [chatErrorSoft, setChatErrorSoft] = useState(false);
@@ -891,7 +891,9 @@ export default function PlatformClient() {
   async function refreshConversations() {
     const data = await api<{ conversations: Conversation[] }>("/api/conversations");
     setConversations(data.conversations);
-    if (!activeConversationId && data.conversations[0]) setActiveConversationId(data.conversations[0].id);
+    // 无论是否为空都重设当前会话：切换登录用户时上一个用户的 activeConversationId 会残留，
+    // 不重设会导致 UI 停留在旧账号的会话上（即使列表已换成新用户的）。
+    setActiveConversationId(data.conversations[0]?.id ?? null);
   }
 
   async function refreshContent() {
@@ -1057,10 +1059,15 @@ export default function PlatformClient() {
   }, [section, activeContent, visibleContentCount, filteredContentItems.length]);
 
   useEffect(() => {
-    if (user) {
-      void refreshConversations();
-      void refreshContent();
+    if (!user) {
+      // 退出登录：清空会话与内容库缓存，避免残留上一个用户的数据。
+      setConversations([]);
+      setActiveConversationId(null);
+      setContentItems([]);
+      return;
     }
+    void refreshConversations();
+    void refreshContent();
   }, [user]);
 
   // 页面长期开着（比如早上 9:00 定时任务跑的时候）时，回到前台就重新拉一次内容库，
