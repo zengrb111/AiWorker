@@ -1652,7 +1652,9 @@ export default function PlatformClient() {
         }
         if (data.type === "progress" && typeof data.text === "string" && data.text.trim()) {
           const line = data.text;
-          setPlanProgressLines((previous) => [...previous, line]);
+          // 规划进展并入「对话回复的流式输出」（与普通助手回复同一条气泡），
+          // 不再用单独的进度卡片，生成完视频后视频预览才能自然排在最后。
+          setStreamingContent((previous) => `${previous}${line}\n`);
         } else if (data.type === "done" && data.data) {
           result = data.data;
         } else if (data.type === "error") {
@@ -1752,6 +1754,8 @@ export default function PlatformClient() {
       clearTimeout(timeoutId);
       setGenVideoPlanning(false);
       setPlanProgressLines([]);
+      // 规划进度并入了流式气泡，收尾清空，避免残留到出片阶段。
+      setStreamingContent("");
     }
   }
 
@@ -1979,6 +1983,7 @@ export default function PlatformClient() {
       clearTimeout(timeoutId);
       setArticlePlanning(false);
       setPlanProgressLines([]);
+      setStreamingContent("");
     }
   }
 
@@ -2926,7 +2931,14 @@ export default function PlatformClient() {
                         const hotTopics =
                           isHotTopicsReply && !isHumanizeResult ? extractHotTopics(message.content) : null;
                         return (
-                        <article key={message.id} id={`message-${message.id}`} className={`message ${message.role === "USER" ? "user" : "assistant"}`}>
+                        <article
+                          key={message.id}
+                          id={`message-${message.id}`}
+                          className={`message ${message.role === "USER" ? "user" : "assistant"}`}
+                          // 出片结果是对话里最后要看到的东西：即便它作为消息先被持久化，
+                          // 也用 order 把它排到回显/方案/进度之后（.message-list 是 grid）。
+                          style={messageVideoUrl && isLastAssistant ? { order: 999 } : undefined}
+                        >
                           {message.role === "ASSISTANT" ? (
                             <>
                               <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(hotTopics ? hotTopics.remainder : message.content) }} />
@@ -3219,7 +3231,7 @@ export default function PlatformClient() {
                         </div>
                       </article>
                     )}
-                    {sending && (isThinking || streamingContent) && (
+                    {(sending || genVideoPlanning || articlePlanning) && (isThinking || streamingContent) && (
                       <article className="message assistant streaming">
                         {isThinking && !streamingContent ? (
                           <span className="thinking-indicator">
