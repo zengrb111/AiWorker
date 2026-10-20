@@ -1317,12 +1317,21 @@ await prisma.message.create({
     referenceProcess = buildReferenceProcessMarkdown(groups, platformLabel, authCtx.entries);
   }
   // 该用户绑定的微信通知目标：注入隔离规则，避免 AI 创建/修改定时任务时把通知投给别的用户。
-  const wechatBinding = await prisma.wechatBinding.findFirst({
-    where: { userId: user.id, status: "BOUND" },
-    orderBy: { boundAt: "desc" },
-    select: { wechatOpenId: true, wechatNo: true }
+  // 同一微信号重复扫码时网关只回 binded_redirect（不签发新凭据），最新的 BOUND
+  // 记录可能身份为空 —— 此时回退到该用户历史绑定记录里最近一条有效身份
+  // （binded_redirect 意味着扫码的就是已绑过本网关的那个 bot，同用户回退安全）。
+  const wechatBindings = await prisma.wechatBinding.findMany({
+    where: { userId: user.id },
+    orderBy: { updatedAt: "desc" },
+    take: 20,
+    select: { status: true, wechatOpenId: true, wechatNo: true }
   });
-  const wechatDelivery = resolveWechatDeliveryTarget(wechatBinding);
+  const wechatDelivery =
+    resolveWechatDeliveryTarget(wechatBindings.find((b) => b.status === "BOUND") ?? null) ??
+    wechatBindings
+      .map((b) => resolveWechatDeliveryTarget(b))
+      .find((target): target is WechatDeliveryTarget => target !== null) ??
+    null;
   // 该用户自己的定时任务清单（按会话 key 过滤），注入后 AI 无需（也不允许）去看全局 cron。
   const userCronJobs = await loadUserScheduledJobs(user.id);
   // 该用户最近上传的素材路径。只收集**属于该用户**的目录，
