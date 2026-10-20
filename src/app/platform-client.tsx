@@ -776,6 +776,8 @@ export default function PlatformClient() {
   const [wechatBinding, setWechatBinding] = useState<WechatBinding | null>(null);
   const [profileQr, setProfileQr] = useState<QrData | null>(null);
   const [profileQrLoading, setProfileQrLoading] = useState(false);
+  /** 绑定检查进行中（长轮询，可能阻塞到 490 秒）。用来防重复发起。 */
+  const [profileChecking, setProfileChecking] = useState(false);
   const [profileUnbinding, setProfileUnbinding] = useState(false);
   const [confirmingUnbind, setConfirmingUnbind] = useState(false);
   const [profileError, setProfileError] = useState("");
@@ -1094,6 +1096,20 @@ export default function PlatformClient() {
     if (authMode !== "register" || !registerQr || registerBound || registerBinding || registerLoading) return;
     void checkRegisterBinding();
   }, [authMode, registerQr, registerBound, registerBinding]);
+
+  /**
+   * 个人中心的微信绑定也要**自动发起一次**检查。
+   *
+   * 之前这条路径只能手点「检查绑定状态」按钮，用户扫完码就走了，绑定流程
+   * 永远停在 PENDING —— 网关侧通道没启动，表现为「在微信里发消息没回复」，
+   * 且没有任何报错。注册页一直有自动检查，这里补齐，两条路径行为一致。
+   */
+  useEffect(() => {
+    if (!profileQr || profileChecking || profileUnbinding) return;
+    void checkProfileBinding();
+    // profileQr 变化时触发一次即可；检查结果由 profileQr 清空 / 提示文案体现。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileQr]);
 
   useEffect(() => {
     if (!toast) return;
@@ -2700,14 +2716,24 @@ export default function PlatformClient() {
   }
 
   async function checkProfileBinding() {
-    if (!profileQr) return;
+    if (!profileQr || profileChecking) return;
+    setProfileChecking(true);
     setProfileError("");
+    setProfileHint("已发起检查，请在微信中完成扫码确认…");
     try {
-      await api<BindingCheckStatus>(`/api/wechat/binding/status?ticketId=${encodeURIComponent(profileQr.ticketId)}`, undefined, bindingWaitTimeoutMs);
+      const status = await api<BindingCheckStatus>(`/api/wechat/binding/status?ticketId=${encodeURIComponent(profileQr.ticketId)}`, undefined, bindingWaitTimeoutMs);
+      if (status.status !== "bound") {
+        setProfileHint("OpenClaw 尚未确认微信绑定，请扫码后再检查。");
+        return;
+      }
       await refreshMe();
       setProfileQr(null);
+      setProfileHint("微信通道已绑定，现在可以在微信里直接发消息了。");
     } catch (error) {
       setProfileError(error instanceof Error ? error.message : "查询微信绑定状态失败。");
+      setProfileHint("");
+    } finally {
+      setProfileChecking(false);
     }
   }
 
@@ -4509,7 +4535,11 @@ export default function PlatformClient() {
                   ) : (
                     <button className="profile-btn" onClick={() => { void ensureProfileQr(); }}>{profileError ? "重新生成二维码" : "立即绑定"}</button>
                   )}
-                  {profileQr && <button className="profile-btn" onClick={() => { void checkProfileBinding(); }}>检查绑定状态</button>}
+                  {profileQr && (
+                    <button className="profile-btn" disabled={profileChecking} onClick={() => { void checkProfileBinding(); }}>
+                      {profileChecking ? "检查中…" : "检查绑定状态"}
+                    </button>
+                  )}
                 </div>
               )}
               {profileError && <p className="error-text">{profileError}</p>}

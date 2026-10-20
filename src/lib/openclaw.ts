@@ -55,6 +55,15 @@ export type OpenClawBindingStatus = {
   wechatNickname?: string;
   wechatOpenId?: string;
   wechatNo?: string;
+  /**
+   * 网关是否**新签发**了凭据。
+   *
+   * false 表示微信服务端没有发新凭据 —— 典型是 binded_redirect（该微信号
+   * 之前已绑过本网关，而微信服务端没有解绑接口）。这种情况下通道凭据
+   * 必须靠本机已有记录恢复，否则网关不会启动微信通道（表现为「绑定成功
+   * 但微信发消息没回复」）。调用方据此决定是否走恢复路径。
+   */
+  credentialsIssued?: boolean;
 };
 
 type GatewaySocket = {
@@ -474,6 +483,87 @@ async function persistWeixinBinding(result: {
     accounts.clearStaleAccountsForUserId(accountId, result.userId);
   }
   await bumpWeixinChannelConfig();
+}
+
+/** 读账号凭据，插件内部抛错时按「没有」处理，不让恢复流程整体崩掉。 */
+function safeLoadWeixinAccount(
+  accounts: WeixinAccountsModule,
+  accountId: string
+): { token?: string; baseUrl?: string; userId?: string } | null {
+  try {
+    return accounts.loadWeixinAccount(accountId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * binded_redirect 场景下，用本机已保存的凭据把微信通道重新拉起来。
+ *
+ * 背景：微信服务端**没有解绑接口**，同一微信号再次扫码只会返回
+ * binded_redirect —— 网关不签发新凭据，waitForWeixinLogin 拿不到
+ * botToken / accountId。原先 persistWeixinBinding 在这种情况下直接 return，
+ * 于是：平台侧以为绑定成功，网关侧通道却从没启动过，用户从微信发消息
+ * 永远没回复（静默失败）。
+ *
+ * 这里从本机已落盘的账号凭据里找出该用户的账号，重新写一遍并更新时间戳，
+ * 让网关重新从磁盘加载通道 —— 效果与正常绑定流程的第三步一致。
+ *
+ * 找不到可用凭据时返回 null，由调用方**如实报错**，绝不谎报绑定成功。
+ */
+async function restoreWeixinChannelFromStoredAccount(
+  identity: { wechatOpenId?: string; wechatNo?: string }
+): Promise<{ accountId: string } | null> {
+  const openId = identity.wechatOpenId?.trim();
+  const no = identity.wechatNo?.trim();
+  if (!openId && !no) return null;
+
+  let accounts: WeixinAccountsModule;
+  try {
+    accounts = await loadWeixinAccountsModule();
+  } catch {
+    return null;
+  }
+
+  // 候选账号 id：先按 bot id 直解，再按凭据里的 userId 反查
+  // （历史数据里 wechatOpenId 存的可能是 userId 而非 bot id）。
+  const candidates: string[] = [];
+  const pushCandidate = (id: string) => {
+    if (id && !candidates.includes(id)) candidates.push(id);
+  };
+  if (openId) pushCandidate(normalizeWeixinAccountId(openId));
+
+  let indexed: string[] = [];
+  try {
+    indexed = accounts.listIndexedWeixinAccountIds();
+  } catch {
+    indexed = [];
+  }
+  if (no) {
+    for (const id of indexed) {
+      const data = safeLoadWeixinAccount(accounts, id);
+      if (data?.userId && data.userId === no) pushCandidate(id);
+    }
+  }
+
+  for (const accountId of candidates) {
+    const data = safeLoadWeixinAccount(accounts, accountId);
+    if (!data?.token) continue;
+    try {
+      // 重新落盘 + 更新时间戳 = 触发网关重载通道配置。
+      accounts.saveWeixinAccount(accountId, {
+        token: data.token,
+        baseUrl: data.baseUrl,
+        userId: data.userId
+      });
+      accounts.registerWeixinAccountId(accountId);
+      await bumpWeixinChannelConfig();
+    } catch {
+      continue;
+    }
+    return { accountId };
+  }
+  return null;
 }
 
 function weixinApiBaseUrl(): string {
@@ -1681,7 +1771,8 @@ export const openClawClient = {
 
     // 扫码成功后把凭据落盘并启用通道；漏掉这一步网关不会启动微信通道，
     // 微信端会一直显示「暂无法连接 OpenClaw」。
-    if (result.connected && result.botToken && result.accountId) {
+    const credentialsIssued = Boolean(result.botToken && result.accountId);
+    if (result.connected && credentialsIssued) {
       await persistWeixinBinding(result);
     }
 
@@ -1691,8 +1782,20 @@ export const openClawClient = {
       ticketId,
       wechatNickname: connected ? "OpenClaw 微信通道" : undefined,
       wechatOpenId: result.accountId ?? result.userId,
-      wechatNo: result.userId ?? result.accountId
+      wechatNo: result.userId ?? result.accountId,
+      credentialsIssued
     };
+  },
+
+  /**
+   * 网关确认已连接、但没签发新凭据时（binded_redirect），用本机已保存的
+   * 凭据把通道重新拉起来。找不到可用凭据返回 null，由调用方如实报错。
+   */
+  async restoreWeixinChannelFromStoredAccount(identity: {
+    wechatOpenId?: string;
+    wechatNo?: string;
+  }): Promise<{ accountId: string } | null> {
+    return restoreWeixinChannelFromStoredAccount(identity);
   },
 
   /**

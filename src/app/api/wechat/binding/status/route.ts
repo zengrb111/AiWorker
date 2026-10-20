@@ -93,16 +93,41 @@ export async function GET(request: Request) {
       return jsonError("缺少 ticketId。");
     }
 
+    const userId = readSessionUserId();
     const status = await openClawClient.getWechatBindingStatus(ticketId);
-    await saveBinding(readSessionUserId(), {
+
+    let wechatOpenId = status.wechatOpenId;
+    let wechatNo = status.wechatNo;
+
+    // 网关说「连上了」但**没有签发凭据** —— binded_redirect：该微信号之前已绑过
+    // 本网关，而微信服务端没有解绑接口。此时通道凭据只能靠本机已有记录恢复；
+    // 恢复不了就必须**如实报错**，绝不能谎报绑定成功（那会导致通道其实没起
+    // 来，用户从微信发消息永远没回复）。
+    if (status.status === "bound" && status.credentialsIssued === false) {
+      const inherited = userId ? await inheritIdentityFromHistory(userId) : null;
+      const restored = inherited
+        ? await openClawClient.restoreWeixinChannelFromStoredAccount(inherited)
+        : null;
+      if (restored && inherited) {
+        wechatOpenId = inherited.wechatOpenId;
+        wechatNo = inherited.wechatNo;
+      } else {
+        throw new Error(
+          "微信服务端没有为该微信号签发新凭据（它此前已绑定过本网关），本机也没有可复用的通道凭据，" +
+            "网关无法启动微信通道。请在微信侧的 ClawBot 设置里解除绑定后，重新扫码绑定。"
+        );
+      }
+    }
+
+    await saveBinding(userId, {
       ticketId,
       status: status.status,
       wechatNickname: status.wechatNickname,
-      wechatOpenId: status.wechatOpenId,
-      wechatNo: status.wechatNo
+      wechatOpenId,
+      wechatNo
     });
 
-    return jsonOk(status);
+    return jsonOk({ ...status, wechatOpenId, wechatNo });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "查询微信绑定状态失败。", 502);
   }
