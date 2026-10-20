@@ -2,7 +2,7 @@ import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { requireUser } from "@/lib/session";
 import { prisma } from "@/lib/prisma";
 import { invalidateUserCache, decryptProviderCredential, type Capability } from "@/lib/model-credentials";
-import { syncModelKeyToOpenClaw, setOpenClawDefaultModel } from "@/lib/openclaw-settings-sync";
+import { syncModelKeyToOpenClaw, syncOpenClawChatModel } from "@/lib/openclaw-settings-sync";
 
 type AssignmentBody = {
   assignments?: Array<{ capability?: string; providerRowId?: string | null; model?: string | null }>;
@@ -100,15 +100,22 @@ export async function PUT(request: Request) {
     const provider = providerById.get(chatRow.providerRowId);
     if (provider) {
       const credential = decryptProviderCredential(provider.credentialEnc);
+      const profileId = `${provider.providerId}:manual`;
       const keyOutcome = await syncModelKeyToOpenClaw({
         provider: provider.providerId,
         apiKey: credential?.apiKey ?? "",
-        profileId: `${provider.providerId}:manual`
+        profileId
       });
       if (!keyOutcome.ok) {
         openclawSync = { ok: false, reason: keyOutcome.reason };
       } else {
-        const modelOutcome = await setOpenClawDefaultModel(chatRow.model);
+        // defaults 与 agent 级配置**一起**改：agent 级优先级更高，只改 defaults
+        // 会导致会话继续用旧模型（见 openclaw-settings-sync 里的实测说明）。
+        const modelOutcome = await syncOpenClawChatModel({
+          provider: provider.providerId,
+          model: chatRow.model,
+          profileId
+        });
         if (!modelOutcome.ok) openclawSync = { ok: false, reason: modelOutcome.reason };
         else openclawSync = { ok: true };
       }

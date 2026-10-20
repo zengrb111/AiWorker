@@ -226,6 +226,89 @@ export async function setOpenClawDefaultModel(model: string): Promise<SyncResult
 }
 
 /**
+ * 设置某个 agent 的**专属**模型（`agents.entries.<agentId>.model`）。
+ *
+ * 为什么必须单独同步这一层：
+ *
+ * OpenClaw 解析 agent 用的模型时，**agent 级配置优先于 defaults**。
+ * 本机实测（2026-10-20）：
+ *   agents.defaults.model.primary = "openai/deepseek-flash"   ← 平台同步写的
+ *   agents.entries.main.model     = "deepseek/deepseek-v4-pro@deepseek:manual"  ← 真正生效
+ * 结果是用户在平台「系统配置」里把 chat 全部指向 deepseek-flash，
+ * 会话却仍在跑 v4-pro —— 因为 `openclaw models set` 只写 defaults，
+ * 它没有 --agent 参数，`openclaw agents` 子命令也没有 set-model。
+ *
+ * 走 `openclaw config set <path> <value>` 写点号路径，可以精确落到 entry 上
+ * （已 dry-run 验证：`Dry run successful: 1 update(s) validated`）。
+ */
+export async function setOpenClawAgentModel(
+  agentId: string,
+  model: string
+): Promise<SyncResult> {
+  const agent = (agentId ?? "").trim();
+  const value = (model ?? "").trim();
+  if (!agent) return { ok: false, reason: "agent id 为空，未设置" };
+  if (!value) return { ok: false, reason: "模型 id 为空，未设置" };
+
+  const outcome = await runOpenClawCli([
+    "config",
+    "set",
+    `agents.entries.${agent}.model`,
+    value,
+  ]);
+  if (!outcome.ok) {
+    console.error(`[openclaw-sync] 设置 agent ${agent} 的模型失败：${outcome.reason}`);
+    return outcome;
+  }
+  console.log(`[openclaw-sync] 已设置 OpenClaw agent[${agent}] 模型：${value}`);
+  return { ok: true };
+}
+
+/** 平台会话使用的 OpenClaw agent id（会话 key 形如 agent:main:user-<id>）。 */
+function resolveAgentId(): string {
+  return (process.env.OPENCLAW_AGENT_ID?.trim() || "main");
+}
+
+/**
+ * 把平台「chat 能力」的模型分配同步给 OpenClaw —— **defaults 与 agent 级一起改**。
+ *
+ * 关键点（2026-10-20 实测踩坑）：
+ *  1. 必须传**全限定 id**（`provider/model`）。只传裸 model id 时，OpenClaw
+ *     会回落到默认 provider（实测 `deepseek-flash` → `openai/deepseek-flash`），
+ *     而 openai provider 根本没配 —— 鉴权直接失败。
+ *  2. 必须同时改 `agents.entries.<agent>.model`。只改 defaults 不够，
+ *     agent 级配置优先级更高，会继续用旧模型。
+ *  3. agent 级值带 `@<profileId>` 绑定 auth profile，与 key 同步用的
+ *     profileId 保持一致（同一个 key，不能一个带 profile 一个不带）。
+ */
+export async function syncOpenClawChatModel(input: {
+  provider: string;
+  model: string;
+  profileId?: string;
+  agentId?: string;
+}): Promise<SyncResult> {
+  const providerId = toOpenClawProviderId(input.provider);
+  if (!providerId) {
+    return {
+      ok: false,
+      reason: `暂不支持同步 provider「${input.provider}」到 OpenClaw`,
+    };
+  }
+  const model = (input.model ?? "").trim();
+  if (!model) return { ok: false, reason: "模型 id 为空，未设置" };
+
+  const qualified = model.includes("/") ? model : `${providerId}/${model}`;
+  const profileId = (input.profileId ?? "").trim();
+  const pinned = profileId ? `${qualified}@${profileId}` : qualified;
+  const agentId = (input.agentId ?? "").trim() || resolveAgentId();
+
+  const defaultsOutcome = await setOpenClawDefaultModel(qualified);
+  if (!defaultsOutcome.ok) return defaultsOutcome;
+
+  return setOpenClawAgentModel(agentId, pinned);
+}
+
+/**
  * 删除服务时清理 OpenClaw 侧 auth profile。
  *
  * 注意 CLI 签名：`logout <profileId>` 的 profileId 是**位置参数**（不是 --profile-id），

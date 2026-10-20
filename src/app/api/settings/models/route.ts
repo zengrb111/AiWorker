@@ -14,7 +14,7 @@ import {
   type Capability
 } from "@/lib/model-credentials";
 import { findPreset } from "@/lib/model-presets";
-import { syncModelKeyToOpenClaw, setOpenClawDefaultModel } from "@/lib/openclaw-settings-sync";
+import { syncModelKeyToOpenClaw, syncOpenClawChatModel } from "@/lib/openclaw-settings-sync";
 
 /**
  * /api/settings/models —— 当前登录用户的模型服务（GET 列表 / POST 保存）。
@@ -203,6 +203,7 @@ export async function POST(request: Request) {
       where: { userId: user.id, capability: "chat", providerRowId: saved.id }
     });
     if (chatAssignment) {
+      const profileId = `${saved.providerId}:manual`;
       // 只有真的填了新 key 才同步；编辑时留空 apiKey 表示不修改，
       // 此时 OpenClaw 侧的 key 也无需更新。
       if (apiKey) {
@@ -210,13 +211,18 @@ export async function POST(request: Request) {
         const outcome = await syncModelKeyToOpenClaw({
           provider: saved.providerId,
           apiKey: credential?.apiKey ?? "",
-          profileId: `${saved.providerId}:manual`
+          profileId
         });
         openclawSync = outcome.ok ? { ok: true } : { ok: false, reason: outcome.reason };
       }
-      // 模型 id 变化时同步默认模型（让会话立刻用上新选的模型）
+      // 模型 id 变化时同步模型（让会话立刻用上新选的模型）。
+      // defaults 与 agent 级配置一起改 —— 只改 defaults 不够，agent 级优先级更高。
       if (openclawSync?.ok !== false && chatAssignment.model) {
-        const modelOutcome = await setOpenClawDefaultModel(chatAssignment.model);
+        const modelOutcome = await syncOpenClawChatModel({
+          provider: saved.providerId,
+          model: chatAssignment.model,
+          profileId
+        });
         if (!modelOutcome.ok) {
           openclawSync = { ok: false, reason: modelOutcome.reason };
         }
