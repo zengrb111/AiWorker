@@ -162,7 +162,7 @@ export function resolvePublishChannels(entries: PlatformAuthEntry[]): PublishCha
 }
 
 /** 生成注入会话 prompt 的文本块（不含任何密钥）。 */
-export function renderPlatformAuthBlock(entries: PlatformAuthEntry[]): string {
+export function renderPlatformAuthBlock(entries: PlatformAuthEntry[], userId?: string): string {
   if (entries.length === 0) {
     return "当前登录用户在「平台授权管理」中还没有任何平台授权，因此不能自动发布到任何渠道，也不要以已完成授权的口吻作答。";
   }
@@ -189,9 +189,13 @@ export function renderPlatformAuthBlock(entries: PlatformAuthEntry[]): string {
     lines.push(
       "内容库的入库 / 发布 / 撤回 / 查询都有现成脚本，**不要自己写脚本、不要自己拼 curl**（自己造脚本极易失败），直接执行下面这些绝对路径命令即可，也不需要向用户索要任何 API Key、Cookie 或 Token："
     );
+    // 归属必须显式带上：ingest.mjs 在没有 --user / --session-key 时会退回默认账号
+    // （脚本的 DEFAULT_OWNER_PHONE），别的用户让 agent 入库就会写进别人的内容库（2026-10-13 事故同型）。
+    // 注意必须用 `--user=` 等号形式：该脚本的 flagValue 对空格分隔的参数返回空串。
+    const ownerFlag = userId ? ` --user=${userId}` : "";
     lines.push(
       [
-        '· 入库（含按授权自动发布）：`node C:\\Users\\zengr\\.openclaw\\workspace\\content-library\\ingest.mjs`',
+        `· 入库（含按授权自动发布）：\`node C:\\Users\\zengr\\.openclaw\\workspace\\content-library\\ingest.mjs${ownerFlag}\``,
         '· 补发/重发某篇：`node C:\\Users\\zengr\\.openclaw\\workspace\\content-library\\publish.mjs "标题关键词"`（`--channels=healing,aiworker` 收窄渠道，`--dry` 只查不发）',
         '· 查最近条目与发布情况：`node C:\\Users\\zengr\\.openclaw\\workspace\\content-library\\list.mjs`（`--days=3` 查最近三天；会列出每个渠道的发布状态与线上 id）',
         '· 从线上撤回（删除）：`node C:\\Users\\zengr\\.openclaw\\workspace\\content-library\\unpublish.mjs "标题关键词"`（`--channels=healing,aiworker`；`--dry` 只查会删哪篇）'
@@ -221,7 +225,7 @@ export async function loadPlatformAuthContext(userId: string): Promise<{
   const entries = await loadUserPlatformAuth(userId);
   return {
     entries,
-    promptBlock: renderPlatformAuthBlock(entries),
+    promptBlock: renderPlatformAuthBlock(entries, userId),
     publishChannels: resolvePublishChannels(entries)
   };
 }

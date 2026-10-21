@@ -2,6 +2,7 @@ import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { openClawClient } from "@/lib/openclaw";
 import { prisma } from "@/lib/prisma";
 import { readSessionUserId } from "@/lib/session";
+import { refreshWeixinAgentBindings } from "@/lib/weixin-bindings";
 
 type BindingStatusValue = "pending" | "bound" | "unbound";
 
@@ -126,6 +127,15 @@ export async function GET(request: Request) {
       wechatOpenId,
       wechatNo
     });
+
+    // 绑定成功后把「这个 bot 的入站消息」路由到该用户自己的 agent，
+    // 否则微信对话会落在 main（共享运营者档案）。热加载字段，无需重启网关；
+    // 后台执行，不拖慢绑定轮询。
+    if (status.status === "bound") {
+      void refreshWeixinAgentBindings().catch((error) => {
+        console.error("[wechat-binding] 刷新微信入站分流失败：", error);
+      });
+    }
 
     return jsonOk({ ...status, wechatOpenId, wechatNo });
   } catch (error) {

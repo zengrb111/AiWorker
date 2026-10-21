@@ -6,6 +6,7 @@ import { sign, createPublicKey } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import QRCode from "qrcode";
+import { ensureUserAgent, userAgentId } from "./openclaw-user-agent";
 
 /**
  * 调用网关跑一轮 agent 对话的请求体。
@@ -21,7 +22,7 @@ export type OpenClawTaskRequest = {
   userId?: string;
   /**
    * 指定会话（可选）。后台任务（如短视频渲染）应传入独立会话，
-   * 避免与用户实时对话抢同一个 agent:main:user-<id> 会话而排到队尾超时。
+   * 避免与用户实时对话抢同一个 agent:u-<id>:* 会话而排到队尾超时。
    * 不传则按 userId 派生默认会话，行为与改造前一致。
    */
   sessionKey?: string;
@@ -1167,16 +1168,39 @@ async function requestGateway<T>(
 type ChatContentItem = { type: string; text: string };
 
 /**
- * 按 userId 派生隔离会话 key。
+ * 每个平台用户对应一个 OpenClaw agent id：`u-<userId>`。
  *
- * **这是多用户隔离的核心**：不传 userId 时会退到 `agent:main:main`，
- * 那是所有用户共用的会话 —— 两个用户的消息会混进同一份上下文与记忆。
- * 因此调用方必须传 userId（messages 路由已保证）。
+ * 记忆（MEMORY.md / memory/*.md）、会话记录、memory_search、sessions_* 工具
+ * 在 OpenClaw 里都是**按 agent** 隔离的（agent = 独立 workspace + 独立会话库）。
+ * 一个用户一个 agent，多租户隔离才落到网关原生边界上，而不是靠 prompt 软约束。
+ *
+ * 装配（建 workspace + 写 agents.entries）见 `openclaw-user-agent.ts`：
+ * 注册时自动装配，聊天/调度链路发消息前再兜一层，避免出现
+ * `Agent "u-<id>" no longer exists in configuration`。
  */
-function deriveUserSessionKey(userId?: string | null): string {
-  if (userId && typeof userId === "string" && userId.trim()) {
-    const safe = userId.trim().replace(/[^a-zA-Z0-9_-]/g, "-");
-    return `agent:main:user-${safe}`;
+export { userAgentId };
+
+/**
+ * 派生隔离会话 key：`agent:u-<userId>:<会话>`。
+ *
+ * 不传 userId 时退到 `agent:main:main`（仅后台/无归属任务才会走到），
+ * 那是所有用户共用的会话 —— 两个用户的消息会混进同一份上下文与记忆，
+ * 因此凡是面向具体用户的调用都必须传 userId。
+ *
+ * 为什么带 conversationId：平台一个用户可以有多个会话，若会话 key 只到用户粒度，
+ * 龙虾会把该用户所有会话的历史累积在一起，平台只能每轮重放当前会话历史去划边界，
+ * 等于同一份历史发两遍、prompt 每轮膨胀。带上会话 id 后，历史按会话各自独立。
+ */
+function deriveUserSessionKey(userId?: string | null, conversationId?: string | null): string {
+  const uid = userId && typeof userId === "string" ? userId.trim() : "";
+  if (uid) {
+    const agentId = userAgentId(uid);
+    const cid = conversationId && typeof conversationId === "string" ? conversationId.trim() : "";
+    if (cid) {
+      const safeConv = cid.replace(/[^a-zA-Z0-9_-]/g, "-");
+      return `agent:${agentId}:c${safeConv}`;
+    }
+    return `agent:${agentId}:main`;
   }
   return process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
 }
@@ -1717,7 +1741,7 @@ export type CronJobSummary = {
   enabled: boolean;
   /** 人类可读的调度描述，如 "0 30 17 * * *"（cron 表达式）。 */
   schedule: string;
-  /** 归属会话 key；用户任务应为 agent:main:user-<id>。 */
+  /** 归属会话 key；用户任务应为 agent:u-<id>:<会话>。 */
   sessionKey: string;
 };
 
@@ -1886,7 +1910,7 @@ export const openClawClient = {
   /**
    * 网关的全部定时任务（**不做用户过滤**）。
    * 本平台多用户共用同一网关 cron 存储，调用方必须按 sessionKey
-   * （agent:main:user-<id>）或名字前缀自行过滤后再使用，否则会把别人的任务泄给当前用户。
+   * （agent:u-<id>:*）或名字前缀自行过滤后再使用，否则会把别人的任务泄给当前用户。
    */
   /**
    * 跑一轮 agent 对话（非流式）。
@@ -1897,9 +1921,16 @@ export const openClawClient = {
     const request: OpenClawTaskRequest = typeof input === "string" ? { message: input } : input;
     const message = request.prompt ?? request.message;
 
+    // 兜底装配：注册接口会装配，但历史用户/装配失败/手工建库的用户也要能聊。
+    // ensureUserAgent 幂等且带进程内缓存，已装配过的只做一次 Set 判断。
+    if (request.userId) {
+      await ensureUserAgent({ userId: request.userId });
+    }
+
     // 显式指定的 sessionKey 优先（后台任务用独立会话，避免与实时对话抢同一会话）；
     // 否则按 userId 派生隔离 sessionKey，避免多用户共用同一 agent 会话上下文/记忆。
-    const sessionKey = request.sessionKey || deriveUserSessionKey(request.userId);
+    // 带 conversationId 时会话 key 下沉到「用户+会话」粒度，历史由龙虾按会话自管。
+    const sessionKey = request.sessionKey || deriveUserSessionKey(request.userId, request.conversationId);
     const retryOnEmpty = request.retryOnEmpty !== false;
     let result = await requestGatewayChat(message, request.timeoutMs, undefined, sessionKey);
     if (!result.content?.trim() && retryOnEmpty) {
@@ -1929,7 +1960,12 @@ export const openClawClient = {
     const request: OpenClawTaskRequest = typeof input === "string" ? { message: input } : input;
     const message = request.prompt ?? request.message;
 
-    const sessionKey = request.sessionKey || deriveUserSessionKey(request.userId);
+    // 兜底装配（同 sendTask）：保证会话 key 指向的 agent 一定存在。
+    if (request.userId) {
+      await ensureUserAgent({ userId: request.userId });
+    }
+
+    const sessionKey = request.sessionKey || deriveUserSessionKey(request.userId, request.conversationId);
     let result = await requestGatewayChat(message, timeoutMs, onDelta, sessionKey);
     if (!result.content?.trim()) {
       await new Promise((resolve) => setTimeout(resolve, 800));

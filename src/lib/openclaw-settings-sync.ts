@@ -16,8 +16,8 @@
  *   写过去只会造成两份无用配置，所以不同步。
  */
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
 export type SyncResult = { ok: true } | { ok: false; reason: string };
@@ -264,9 +264,86 @@ export async function setOpenClawAgentModel(
   return { ok: true };
 }
 
-/** 平台会话使用的 OpenClaw agent id（会话 key 形如 agent:main:user-<id>）。 */
+/** 平台会话默认使用的 OpenClaw agent id（每用户 agent 形如 agent:u-<id>:<会话>）。 */
 function resolveAgentId(): string {
   return (process.env.OPENCLAW_AGENT_ID?.trim() || "main");
+}
+
+/**
+ * 列出「每用户 agent」的 id（`u-<userId>`）。
+ *
+ * 平台给每个登录用户装了一个独立 agent（独立 workspace/记忆/会话库），
+ * 用户 agent 的模型是**显式写死**的（不继承 defaults），所以同步主对话模型时
+ * 必须把用户 agent 一起改，否则新用户/新会话还在跑旧模型。
+ */
+function listUserAgentIds(): string[] {
+  const configPath =
+    process.env.OPENCLAW_CONFIG?.trim() || path.join(homedir(), ".openclaw", "openclaw.json");
+  try {
+    // 历史配置里出现过 BOM，解析前先剥掉。
+    const raw = readFileSync(configPath, "utf8").replace(/^\uFEFF/, "");
+    const cfg = JSON.parse(raw) as {
+      agents?: { entries?: Record<string, unknown> };
+    };
+    const entries = cfg.agents?.entries ?? {};
+    return Object.keys(entries).filter((id) => id.startsWith("u-"));
+  } catch {
+    return [];
+  }
+}
+
+let userAgentModelSyncRunning = false;
+
+/**
+ * 把模型同步到全部用户 agent（`agents.entries.u-*.model`）。
+ *
+ * 走一次 `config set --batch-file`，避免 10 个用户跑 10 次 CLI。
+ * **不阻塞调用方**：本机 CLI 单次冷启动 + 插件清理可能要几分钟，
+ * 绝不能让它拖住「系统配置」的保存请求；失败只记日志，下一轮保存会重试。
+ */
+function syncModelToUserAgents(pinned: string): void {
+  if (userAgentModelSyncRunning) return;
+  const ids = listUserAgentIds();
+  if (!ids.length) return;
+  userAgentModelSyncRunning = true;
+  const file = path.join(tmpdir(), `openclaw-user-agent-model-${Date.now()}.json`);
+  // 配置校验要求 agent 级模型是「可解析的引用」，必须带 @<profileId>
+  // （否则报 Unable to resolve authored model reference），缺省按 <provider>:default 补。
+  const userAgentModel = pinned.includes("@")
+    ? pinned
+    : `${pinned}@${pinned.split("/")[0]}:default`;
+  try {
+    writeFileSync(
+      file,
+      JSON.stringify(
+        ids.map((id) => ({ path: `agents.entries["${id}"].model`, value: userAgentModel }))
+      ),
+      "utf8"
+    );
+  } catch (error) {
+    userAgentModelSyncRunning = false;
+    console.error("[openclaw-sync] 生成用户 agent 模型批量配置失败：", error);
+    return;
+  }
+  void runOpenClawCli(["config", "set", "--batch-file", file])
+    .then((outcome) => {
+      if (!outcome.ok) {
+        console.error(`[openclaw-sync] 同步用户 agent 模型失败：${outcome.reason}`);
+      } else {
+        console.log(`[openclaw-sync] 已同步 ${ids.length} 个用户 agent 的模型：${pinned}`);
+      }
+    })
+    .catch((error) => {
+      console.error("[openclaw-sync] 同步用户 agent 模型异常：", error);
+    })
+    .finally(() => {
+      userAgentModelSyncRunning = false;
+      try {
+        rmSync(file, { force: true });
+      } catch {
+        /* 临时文件清理失败可忽略 */
+      }
+    });
 }
 
 /**
@@ -305,7 +382,12 @@ export async function syncOpenClawChatModel(input: {
   const defaultsOutcome = await setOpenClawDefaultModel(qualified);
   if (!defaultsOutcome.ok) return defaultsOutcome;
 
-  return setOpenClawAgentModel(agentId, pinned);
+  const agentOutcome = await setOpenClawAgentModel(agentId, pinned);
+  if (!agentOutcome.ok) return agentOutcome;
+
+  // 用户各自有独立 agent，模型是显式写死的 → 一起改，不阻塞本次保存。
+  syncModelToUserAgents(pinned);
+  return agentOutcome;
 }
 
 /**

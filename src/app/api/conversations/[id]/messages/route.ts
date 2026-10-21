@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { chatComplete, chatCompleteStream } from "@/lib/llm-client";
 import { openClawClient, friendlyGatewayError, classifyGatewayError } from "@/lib/openclaw";
+import { ensureUserAgent } from "@/lib/openclaw-user-agent";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { searchWeb, type SearchHit } from "@/lib/web-search";
@@ -73,6 +74,15 @@ type ConversationMessage = {
 
 const maxContextMessages = 20;
 const maxContextCharacters = 12000;
+
+/**
+ * 已做过「冷启动种子」的会话 id（进程级）。
+ *
+ * 会话级 sessionKey 下，龙虾自己维护本次对话的完整历史；平台不再每轮重放历史，
+ * 只在某个会话的第一轮把此前的历史一次性喂给龙虾做种子。进程重启后集合清空，
+ * 各会话会再种子一次（多一次全量重放，不影响正确性）。
+ */
+const seededConversations = new Set<string>();
 
 const ARTICLE_KEYWORDS = [
   // 文章类型
@@ -197,47 +207,6 @@ function buildReferenceProcessMarkdown(
   return lines.join("\n");
 }
 
-/** 该用户可用于定时任务微信通知的投递目标。 */
-type WechatDeliveryTarget = { to: string; accountId: string };
-
-/**
- * 复刻 OpenClaw 的 normalizeAccountId：把 bot id（如 "fa3c1b27710c@im.bot"）
- * 规范成网关投递用的账号 key（"fa3c1b27710c-im-bot"）。
- */
-function normalizeWeixinAccountId(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) return "";
-  if (/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(trimmed)) return trimmed.toLowerCase();
-  return (
-    trimmed
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]+/g, "-")
-      .replace(/^-+/, "")
-      .replace(/-+$/, "")
-      .slice(0, 64) || ""
-  );
-}
-
-/**
- * 从用户的微信绑定记录推导「定时任务微信通知」的投递目标。
- * OpenClaw 的 cron 投递需要成对的 (--to 好友 openid, --account 机器人账号)：
- *   - to      = 绑定里的 wechatNo（形如 xxx@im.wechat，是收件人）
- *   - account = 绑定里的 wechatOpenId（形如 xxx@im.bot，规范成 xxx-im-bot）
- * 历史数据里 wechatOpenId 也可能存 userId（@im.wechat），那种情况无法可靠反推账号，
- * 返回 null（宁可不投递，也不能投错人）。
- */
-function resolveWechatDeliveryTarget(binding?: {
-  wechatOpenId?: string | null;
-  wechatNo?: string | null;
-} | null): WechatDeliveryTarget | null {
-  const to = (binding?.wechatNo || "").trim();
-  const rawAccount = (binding?.wechatOpenId || "").trim();
-  if (!to.endsWith("@im.wechat") || !rawAccount.endsWith("@im.bot")) return null;
-  const accountId = normalizeWeixinAccountId(rawAccount);
-  if (!accountId) return null;
-  return { to, accountId };
-}
-
 /** 平台侧定时任务（存在本库，不再依赖网关 cron）。 */
 type UserScheduledJob = {
   id: string;
@@ -289,19 +258,15 @@ function buildCronBlock(jobs: UserScheduledJob[] | null, userId: string): string
     // 文件实时读取的 shell 命令，文件读取是逐字节的，没有复抄误差。
     const envPath = `${process.cwd().replace(/\\/g, "/")}/.env.local`;
     lines.push(
-      "- 定时任务的创建/修改/删除/查询/立即执行一律走**平台接口**（唯一入口，不要用 openclaw cron）：",
+      "- 定时任务的增删改查/立即执行一律走**平台接口**（唯一入口，不要用 openclaw cron：网关侧已无用户任务，用了既拿不到也可能看到别人的）：",
       `  POST ${base}/api/scheduled-jobs/agent`,
       "  Header: Authorization: Bearer $TOKEN ； Content-Type: application/json",
-      "  **$TOKEN 必须先用下面这条命令从平台配置文件读取**（不要手抄任何长令牌——复抄必错、之前已造成 401；也不要从其它配置文件里找令牌）：",
+      "  $TOKEN 必须现场执行下面命令读取，**不要手抄**（48 位长串复抄必错，已造成过 401）：",
       `  TOKEN=$(grep -m1 '^SCHEDULE_API_TOKEN=' '${envPath}' | cut -d= -f2- | tr -d '\\r"'); [ -n "$TOKEN" ] || TOKEN=$(grep -m1 '^CONTENT_INGEST_TOKEN=' '${envPath}' | cut -d= -f2- | tr -d '\\r"')`,
-      "  Body 示例：",
-      `    {"action":"create","userId":"${userId}","name":"每日内容生成","cronExpr":"30 17 * * *","timezone":"Asia/Shanghai","prompt":"到点要执行的完整指令"}`,
-      `    {"action":"update","userId":"${userId}","id":"<任务id>","cronExpr":"0 9 * * *"}`,
-      `    {"action":"delete","userId":"${userId}","id":"<任务id>"}`,
-      `    {"action":"run","userId":"${userId}","id":"<任务id>"}   ← 立即执行一次；执行结果写回任务记录，用 action:list 查看 lastStatus/lastResult`,
-      "  userId 必须固定为当前用户；cronExpr 为 5 段（分 时 日 月 周）；时区默认 Asia/Shanghai。",
-      "- 若接口返回 401，说明 $TOKEN 没取对：重新原样执行上面的 TOKEN=… 命令后再试，不要自己猜、拼或截断令牌。",
-      "- **严禁**使用 `openclaw cron`（add / edit / rm / list 等）：网关侧已不再保存用户定时任务，只剩系统任务；用它既拿不到也可能看到不该看的东西。"
+      "  Body（userId 固定为当前用户，cronExpr 为 5 段「分 时 日 月 周」，时区默认 Asia/Shanghai）：",
+      `  {"action":"create","userId":"${userId}","name":"每日内容生成","cronExpr":"30 17 * * *","timezone":"Asia/Shanghai","prompt":"到点要执行的完整指令"}`,
+      `  {"action":"update|delete|run","userId":"${userId}","id":"<任务id>"}  ← update 只需带要改的字段；run 立即执行一次；action:list 可查 lastStatus/lastResult`,
+      "  401 = $TOKEN 没取对：重新原样执行上面的 TOKEN=… 再试，别猜、别拼、别截断。"
     );
   } else {
     lines.push(
@@ -438,7 +403,6 @@ function buildTaskPrompt(
   kbText?: string,
   authText?: string,
   userId?: string,
-  wechatDelivery?: WechatDeliveryTarget | null,
   cronJobs?: UserScheduledJob[] | null,
   userMaterials?: string[]
 ): string {
@@ -447,23 +411,22 @@ function buildTaskPrompt(
   const isArticleRequest = /(写一篇|写篇|写个?文案|写个?图文|生成一篇|生成篇|小红书(风格|文案|图文)|公众号(风格|文案|图文|文章)|文章正文|软文)/i.test(content);
   // 热点类快捷指令：约定编号列表格式，前端据此渲染可点选的热点卡片。
   const isHotTopicsRequest = /今日全网热点|今日产品热点/.test(content);
-  // 多用户隔离：每个登录用户的会话与模型密钥都独立，规则作为最高优先级指令注入。
+  // 服务边界：2026-10-21 起每个平台用户对应一个独立的 OpenClaw agent
+  // （`u-<userId>`，独立 workspace + 独立会话库 + 独立 memory），微信入站也按
+  // bot 精确分流到各自 agent。隔离是网关的原生边界，不再是 prompt 软约束，
+  // 所以这里只需声明「你的东西都是他本人的」+ 一句兜底，不必罗列一堆禁止项。
+  //
+  // 已删除的两类历史规则（保留原因记录，避免有人「好心」加回来）：
+  //  1. 「长期记忆是跨用户共享、必须忽略」—— agent 隔离后这是**错的**，会让模型
+  //     把自己用户的 MEMORY.md 当脏数据丢掉，等于把记忆功能废掉。
+  //  2. 「定时任务必须带 --announce --channel ... --to ... --account ...」——
+  //     agent 没有主动发微信的能力，定时任务通知由平台调度器
+  //     `resolveWechatTarget(userId)` 确定性投递（scheduler.ts 注释：走 --announce
+  //     那一路实测三次均未真正发出）。这两条在 agent 侧是无处可用的死规则。
   const isolationBlock = [
-    "【多用户隔离规则（最高优先级，必须遵守）】",
-    "- 本平台多名用户共用同一个 AI 员工，你当前只为其中一位用户服务，回答里不得出现其他用户的任何数据。",
-    "- 该用户的一切定时任务都由平台管理：你无法直接创建/修改定时任务，需要变更时请引导用户在平台的「定时任务」界面操作。",
-    ...(wechatDelivery
-      ? [
-          `- 该用户的微信通知投递目标（唯一可用，严禁改用其他用户的）：--announce --channel openclaw-weixin --to ${wechatDelivery.to} --account ${wechatDelivery.accountId}。`,
-          "- 创建/修改任何带微信通知的定时任务时，必须显式带上上面的 --to 与 --account；绝不要复用、猜测或沿用其他用户的 --to/--account（否则会把别人的通知发到这个微信号上）。"
-        ]
-      : [
-          "- 该用户尚未绑定微信：不要创建带微信通知（delivery/announce）的定时任务，也不要复用任何已有的微信投递目标。"
-        ]),
-    "- 严禁引用、复述或推测其他用户的会话内容、定时任务、账号或数据；上下文里出现与当前用户无关的信息时，直接忽略。",
-    "- 你的【长期记忆（memory）】是跨用户共享的存储，其中可能混入其他用户的对话、偏好或数据；这类内容不属于当前用户，必须忽略，绝不可将其当作当前用户的信息使用、回忆或呈现。",
-    "- 只依据上方明确提供的【历史会话】与【当前用户任务】作答；任何不在其中的信息（包括从记忆中“想起来”的）若无法确认属于当前用户，一律视为无关信息丢弃。",
-    "- 用户查询定时任务时，只汇报属于该用户的任务；发现遗留的共享会话任务，提醒用户联系管理员迁移，不要擅自改动其他用户的任务。"
+    "【服务边界（最高优先级）】",
+    "- 你是当前登录用户的专属 AI 员工：他的会话历史、长期记忆（MEMORY.md / memory/*.md）、素材与定时任务都属于他本人，可以正常读取、使用和回忆，不必怀疑这些内容是否属于他。",
+    "- 兜底约束：绝不引用、复述或推测其他用户的会话内容、定时任务、账号或数据；上下文里若出现明显不属于当前用户的信息，直接忽略。"
   ].join("\n");
   const cronBlock = buildCronBlock(cronJobs ?? null, userId ?? "");
   return [
@@ -474,7 +437,7 @@ function buildTaskPrompt(
     "",
     "请结合以下历史会话上下文继续完成用户任务。",
     "",
-    "历史会话：",
+    "历史会话（本次对话之前的内容）：",
     contextText,
     "",
     "当前用户任务：",
@@ -1281,7 +1244,17 @@ await prisma.message.create({
     orderBy: { createdAt: "desc" },
     take: maxContextMessages
   });
-  const conversationContext = buildConversationContext(recentMessages.reverse());
+  const orderedMessages = recentMessages.reverse();
+  // detectCategory / 自动入库判定仍用完整近窗，保持既有行为。
+  const conversationContext = buildConversationContext(orderedMessages);
+  // 发给龙虾的「历史」：会话级 sessionKey 下龙虾自管历史，仅首轮把此前内容一次性种子进去，
+  // 之后回合不再重放 —— 否则每轮重复发送同一份历史，prompt 体积与首字延迟都随会话增长。
+  // 去掉刚写入的当前用户消息（它已在「当前用户任务」段出现，避免重复）。
+  const priorMessages = orderedMessages.slice(0, -1);
+  const needsReplaySeed = !seededConversations.has(conversation.id);
+  const replayContext = needsReplaySeed
+    ? buildConversationContext(priorMessages)
+    : "（本次对话的完整历史已在你自己的会话记录中，此处不再重复。）";
 
   // 通用对话生成也须以「当前登录用户本人创建的知识库」为参考来源，
   // 与「今日产品热点 / 一键仿写爆款」共用同一套按 userId 隔离的检索逻辑。
@@ -1316,35 +1289,20 @@ await prisma.message.create({
       : [];
     referenceProcess = buildReferenceProcessMarkdown(groups, platformLabel, authCtx.entries);
   }
-  // 该用户绑定的微信通知目标：注入隔离规则，避免 AI 创建/修改定时任务时把通知投给别的用户。
-  // 同一微信号重复扫码时网关只回 binded_redirect（不签发新凭据），最新的 BOUND
-  // 记录可能身份为空 —— 此时回退到该用户历史绑定记录里最近一条有效身份
-  // （binded_redirect 意味着扫码的就是已绑过本网关的那个 bot，同用户回退安全）。
-  const wechatBindings = await prisma.wechatBinding.findMany({
-    where: { userId: user.id },
-    orderBy: { updatedAt: "desc" },
-    take: 20,
-    select: { status: true, wechatOpenId: true, wechatNo: true }
-  });
-  const wechatDelivery =
-    resolveWechatDeliveryTarget(wechatBindings.find((b) => b.status === "BOUND") ?? null) ??
-    wechatBindings
-      .map((b) => resolveWechatDeliveryTarget(b))
-      .find((target): target is WechatDeliveryTarget => target !== null) ??
-    null;
   // 该用户自己的定时任务清单（按会话 key 过滤），注入后 AI 无需（也不允许）去看全局 cron。
+  // 微信通知的投递目标不再注入 prompt：通知由调度器按 job.userId 确定性投递，
+  // agent 既不需要、也没有能力自己指定 --to/--account。
   const userCronJobs = await loadUserScheduledJobs(user.id);
   // 该用户最近上传的素材路径。只收集**属于该用户**的目录，
   // 让 OpenClaw 能把用户消息里提到的"这些图"解析成真实路径，
   // 同时它无法构造别人的路径（路径由平台给定，见 buildVideoCapabilityBlock）。
   const userMaterials = collectUserMaterialPaths(user.id);
   const prompt = buildTaskPrompt(
-    conversationContext,
+    replayContext,
     content,
     kbText,
     authCtx.promptBlock,
     user.id,
-    wechatDelivery,
     userCronJobs,
     userMaterials
   );
@@ -1389,17 +1347,29 @@ await prisma.message.create({
           safeEnqueue(sseEncode({ type: "delta", text: referenceProcess }));
         }
 
-        // 主链路：OpenClaw 网关。sessionKey 按 userId 派生，实现多用户隔离。
+        // 主链路：OpenClaw 网关。sessionKey 按「用户 + 会话」派生（conversationId 一并传入），
+        // 龙虾按会话自管历史；平台只在首轮种子时重放历史，之后不再重复发送。
+        // 先确保该用户的专属 agent 已装配（带 phone 让 USER.md 有可读标识）。
+        // 失败不在此处阻断：sendTaskStream 内部还有一层无 phone 的兜底装配，
+        // 真装不上时那边会抛出更准确的说明。
+        try {
+          await ensureUserAgent({ userId: user.id, phone: user.phone });
+        } catch (error) {
+          console.error(`[messages] 装配用户 agent 失败（user=${user.id}）：`, error);
+        }
         // sendTaskStream 内部带 300 秒连接预算 + 网关慢启动重试，失败时抛出的
         // 错误已由 friendlyGatewayError 翻译成可操作中文提示。
         const result = await openClawClient.sendTaskStream(
-          { message: content, context: conversationContext, prompt, conversationId: conversation.id, userId: user.id },
+          { message: content, context: replayContext, prompt, conversationId: conversation.id, userId: user.id },
           (deltaText) => safeEnqueue(sseEncode({ type: "delta", text: deltaText }))
         );
 
         if (!result.content.trim()) {
           throw new Error("助手返回了空回复，请重试。");
         }
+
+        // 本轮成功即视为种子完成：后续回合依赖龙虾自己的会话记录，不再重放历史。
+        seededConversations.add(conversation.id);
 
         const assistantMessage = await prisma.message.create({
           data: {

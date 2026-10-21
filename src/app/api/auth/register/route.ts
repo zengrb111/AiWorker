@@ -1,8 +1,10 @@
 import { Prisma } from "@/generated/prisma";
 import { jsonError, jsonOk, readJson } from "@/lib/http";
+import { ensureUserAgent } from "@/lib/openclaw-user-agent";
 import { hashPassword } from "@/lib/password";
 import { prisma } from "@/lib/prisma";
 import { createSession } from "@/lib/session";
+import { refreshWeixinAgentBindings } from "@/lib/weixin-bindings";
 
 type RegisterBody = {
   phone?: string;
@@ -77,6 +79,21 @@ export async function POST(request: Request) {
       });
 
       return createdUser;
+    });
+
+    // 装配该用户的专属 OpenClaw agent（独立 workspace / 记忆 / 会话库）。
+    // 注册成功但装配失败时不能让用户重试注册（手机号已占用），所以只记日志、
+    // 仍返回成功；聊天链路 sendTask 会再兜一层 ensureUserAgent。
+    try {
+      await ensureUserAgent({ userId: user.id, phone: user.phone });
+    } catch (error) {
+      console.error(`[register] 装配用户 agent 失败（user=${user.id}）：`, error);
+    }
+
+    // 该用户扫码绑定的 bot 需要把入站消息路由到他的专属 agent（而不是 main）。
+    // 注册接口是绑定记录落库后的第一个确定性时点，这里重建一次 bindings。
+    void refreshWeixinAgentBindings().catch((error) => {
+      console.error(`[register] 刷新微信入站分流失败（user=${user.id}）：`, error);
     });
 
     await createSession(user.id);
