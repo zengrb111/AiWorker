@@ -508,8 +508,12 @@ export default function AnalyticsPanel({ resetToken }: { resetToken: number }) {
 
   // 内容效果明细：随顶部时间窗口联动（真实 byWindow：窗口内最新快照 − 窗口前快照）。
   // windowAll = 该窗口内有增量的全部作品（不受渠道/搜索影响，用于 chips 计数）。
+  // ⚠️ 兜底：小红书 / 头条号这类低频、断档采集的渠道，常常算不出某窗口的增量
+  // （窗口前没有基准快照）。若窗口增量取不到，则回退到「累计」快照（route.ts 已为每个
+  // 内容计算最新累计值），保证这些渠道的笔记始终在明细里可见；每行的「数据日期」会
+  // 如实显示真实快照日期，不会误导。
   const windowAll = allItems
-    .map((it) => ({ it, w: it.byWindow?.[winWindow] ?? null }))
+    .map((it) => ({ it, w: it.byWindow?.[winWindow] ?? it.byWindow?.cumulative ?? null }))
     .filter((x) => x.w !== null);
   const filtered = windowAll.filter(({ it }) => {
     if (channel !== "all" && it.platform !== channel) return false;
