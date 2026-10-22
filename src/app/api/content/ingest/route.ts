@@ -3,6 +3,7 @@ import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { ingestContentItems, type IngestItem } from "@/lib/content-ingest";
 import { resolveOwnerFromBody } from "@/lib/ingest-owner";
+import { getIngestToken, isValidAgentToken } from "@/lib/platform-config";
 
 /**
  * POST /api/content/ingest —— 外部（OpenClaw 定时任务）批量写入内容库。
@@ -36,11 +37,11 @@ function extractToken(request: NextRequest): string {
 }
 
 export async function POST(request: NextRequest) {
-  const expected = process.env.CONTENT_INGEST_TOKEN?.trim();
+  const expected = getIngestToken();
   if (!expected) {
-    return jsonError("服务端未配置 CONTENT_INGEST_TOKEN，入库接口未启用。", 503);
+    return jsonError("服务端未配置平台 Agent 令牌（系统配置 → 平台 Agent 令牌），入库接口未启用。", 503);
   }
-  if (extractToken(request) !== expected) {
+  if (!isValidAgentToken(extractToken(request))) {
     return jsonError("入库令牌无效。", 401);
   }
 

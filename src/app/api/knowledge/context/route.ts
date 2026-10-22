@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { resolveOwnerFromBody } from "@/lib/ingest-owner";
+import { getIngestToken, isValidAgentToken } from "@/lib/platform-config";
 import { extractKeywords, loadUserKbContext, retrieveReferenceChunks } from "@/lib/kb-hot-topics";
 
 /**
@@ -37,11 +38,11 @@ function extractToken(request: NextRequest): string {
 }
 
 export async function POST(request: NextRequest) {
-  const expected = process.env.CONTENT_INGEST_TOKEN?.trim();
+  const expected = getIngestToken();
   if (!expected) {
-    return jsonError("服务端未配置 CONTENT_INGEST_TOKEN，接口未启用。", 503);
+    return jsonError("服务端未配置平台 Agent 令牌（系统配置 → 平台 Agent 令牌），接口未启用。", 503);
   }
-  if (extractToken(request) !== expected) {
+  if (!isValidAgentToken(extractToken(request))) {
     return jsonError("令牌无效。", 401);
   }
 

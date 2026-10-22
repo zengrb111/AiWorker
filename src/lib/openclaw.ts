@@ -7,6 +7,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import QRCode from "qrcode";
 import { ensureUserAgent, userAgentId } from "./openclaw-user-agent";
+import { readCredentialBackup, saveCredentialBackup } from "./weixin-channel-health";
 
 /**
  * 调用网关跑一轮 agent 对话的请求体。
@@ -480,6 +481,14 @@ async function persistWeixinBinding(result: {
     userId: result.userId
   });
   accounts.registerWeixinAccountId(accountId);
+  // 平台侧再存一份：插件只维护活跃账号，历史 bot 的凭据会被清掉且无法重新签发。
+  // 没有这份副本，凭据一丢就只剩「平台说绑了、微信其实不通」。
+  saveCredentialBackup({
+    accountId,
+    token: result.botToken,
+    baseUrl: result.baseUrl,
+    userId: result.userId
+  });
   if (result.userId) {
     accounts.clearStaleAccountsForUserId(accountId, result.userId);
   }
@@ -549,13 +558,17 @@ async function restoreWeixinChannelFromStoredAccount(
 
   for (const accountId of candidates) {
     const data = safeLoadWeixinAccount(accounts, accountId);
-    if (!data?.token) continue;
+    // 本机凭据被插件清理时的兜底：平台侧另存了一份（见 saveCredentialBackup）。
+    // 微信服务端不会再签发，这份备份是唯一可恢复的来源。
+    const backup = data?.token ? null : readCredentialBackup(accountId);
+    const token = data?.token ?? backup?.token;
+    if (!token) continue;
     try {
       // 重新落盘 + 更新时间戳 = 触发网关重载通道配置。
       accounts.saveWeixinAccount(accountId, {
-        token: data.token,
-        baseUrl: data.baseUrl,
-        userId: data.userId
+        token,
+        baseUrl: data?.baseUrl ?? backup?.baseUrl,
+        userId: data?.userId ?? backup?.userId
       });
       accounts.registerWeixinAccountId(accountId);
       await bumpWeixinChannelConfig();
@@ -1203,6 +1216,33 @@ function deriveUserSessionKey(userId?: string | null, conversationId?: string | 
     return `agent:${agentId}:main`;
   }
   return process.env.OPENCLAW_SESSION_KEY || "agent:main:main";
+}
+
+/**
+ * 微信入站会话 key —— 与微信插件自己用的 key 逐字节一致：
+ *
+ *   agent:<agentId>:openclaw-weixin:<accountId>:direct:<用户 openid>
+ *
+ * 两个细节都必须照做，否则会新开一条空会话（AI 看不到微信里说过的话）：
+ * - `accountId` 是渠道完整账号 id（`<botId>-im-bot`），不是光秃秃的 botId；
+ * - accountId 与 openid **一律小写**（实测网关里的 key 就是小写，
+ *   而数据库里存的是原始大小写混合值）。
+ *
+ * 平台侧在「微信会话」面板里追问时复用同一个 key，两头才是**同一条会话记录**：
+ * 微信里聊过的平台能看到，平台里追问的微信里也能接上。
+ */
+export function deriveWeixinSessionKey(
+  userId: string,
+  accountId: string,
+  conversationId: string
+): string {
+  const uid = (userId || "").trim();
+  const acc = (accountId || "").trim().toLowerCase();
+  const conv = (conversationId || "").trim().toLowerCase();
+  if (!uid || !acc || !conv) {
+    throw new Error("派生微信会话 key 缺少参数（userId / accountId / conversationId）。");
+  }
+  return `agent:${userAgentId(uid)}:openclaw-weixin:${acc}:direct:${conv}`;
 }
 
 /**

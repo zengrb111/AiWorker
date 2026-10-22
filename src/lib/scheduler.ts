@@ -227,11 +227,30 @@ export async function runScheduledJob(jobId: string): Promise<SchedulerRunResult
       }
     });
     // 微信通知走**确定性投递**：平台直接调微信官方接口，不依赖 agent 调 --announce。
-    // 单独一轮（而不是把投递塞进任务 prompt）避免被主任务逻辑覆盖；失败仅记日志，不影响任务本身状态。
+    // 单独一轮（而不是把投递塞进任务 prompt）避免被主任务逻辑覆盖。
+    // 投递结果回写到 lastResult，避免「任务成功却收不到通知」的不可见问题。
     if (target) {
-      void deliverJobResultToWechat(job.name, target, content || "定时任务已执行完成（无文本结果）。").catch(
-        (error) => console.error(`[scheduler] 任务 ${job.name} 微信通知投递失败：`, error)
-      );
+      const notifyText = content || "定时任务已执行完成（无文本结果）。";
+      try {
+        await deliverJobResultToWechat(job.name, target, notifyText);
+        await prisma.scheduledJob
+          .update({
+            where: { id: jobId },
+            data: { lastResult: `${notifyText}\n\n✅ 微信通知已送达`.slice(0, 2000) }
+          })
+          .catch(() => undefined);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[scheduler] 任务 ${job.name} 微信通知投递失败：`, error);
+        await prisma.scheduledJob
+          .update({
+            where: { id: jobId },
+            data: {
+              lastResult: `${notifyText}\n\n⚠️ 微信通知未送达：${message}`.slice(0, 2000)
+            }
+          })
+          .catch(() => undefined);
+      }
     }
     return { ok: true, status: "SUCCEEDED", content };
   } catch (error) {

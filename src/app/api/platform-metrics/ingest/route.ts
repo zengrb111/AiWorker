@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { getIngestToken, isValidAgentToken } from "@/lib/platform-config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,9 +31,10 @@ export const dynamic = "force-dynamic";
 const ALLOWED_PLATFORMS = new Set(["xhs", "toutiao", "wechat", "channels"]);
 
 export async function POST(req: Request) {
-  const token = process.env.CONTENT_INGEST_TOKEN || "";
+  const token = getIngestToken();
   const auth = req.headers.get("authorization") || "";
-  if (!token || auth !== `Bearer ${token}`) {
+  const presented = auth.replace(/^Bearer\s+/i, "").trim();
+  if (!token || !isValidAgentToken(presented)) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   const body = await req.json().catch(() => null);

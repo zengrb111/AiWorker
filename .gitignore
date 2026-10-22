@@ -11,6 +11,7 @@ Thumbs.db
 !.env.example
 
 # Local data and generated artifacts
+data/
 prisma/*.db
 prisma/*.db-journal
 prisma/*.db.bak*

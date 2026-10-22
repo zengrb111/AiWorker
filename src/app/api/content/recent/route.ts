@@ -1,5 +1,6 @@
 import { jsonError, jsonOk } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
+import { getIngestToken, isValidAgentToken } from "@/lib/platform-config";
 
 /**
  * GET /api/content/recent —— 列出最近的内容库条目及其发布情况（供会话/定时任务自查）。
@@ -24,11 +25,11 @@ function extractToken(request: Request): string {
 }
 
 export async function GET(request: Request) {
-  const expected = process.env.CONTENT_INGEST_TOKEN?.trim();
+  const expected = getIngestToken();
   if (!expected) {
-    return jsonError("服务端未配置 CONTENT_INGEST_TOKEN，查询接口未启用。", 503);
+    return jsonError("服务端未配置平台 Agent 令牌（系统配置 → 平台 Agent 令牌），查询接口未启用。", 503);
   }
-  if (extractToken(request) !== expected) {
+  if (!isValidAgentToken(extractToken(request))) {
     return jsonError("查询令牌无效。", 401);
   }
 

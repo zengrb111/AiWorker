@@ -55,7 +55,7 @@ export function listLocalWeixinAccountIds(): Set<string> {
 }
 
 /** 把 `xxx@im.bot` / `xxx-im-bot` / `xxx` 统一成 `xxx`。 */
-function normalizeBotId(raw: string): string {
+export function normalizeBotId(raw: string): string {
   const value = (raw || "").trim();
   if (!value) return "";
   if (value.endsWith(BOT_SUFFIX)) return value.slice(0, -BOT_SUFFIX.length);

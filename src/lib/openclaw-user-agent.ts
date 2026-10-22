@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { agentTokenFilePath } from "./platform-config";
 
 /**
  * 用户专属 OpenClaw agent 的自动装配。
@@ -139,15 +140,16 @@ const OWN_BOUNDARY_SECTION = [
   "1. **记忆就是他本人的记忆，放心用**：把他的偏好、事实、项目、账号、习惯写进 `MEMORY.md`",
   "   与 `memory/`，需要时用 memory_search 检索。**不要**因为「可能是别人的」就丢掉自己记起的",
   "   内容 —— 那会让他每次都要重复交代同样的背景。",
-  "2. 用户级定时任务（创建/修改/删除/查询）**一律调用平台接口**（会话上下文里会给出端点与令牌，",
-  "   形如 `POST <平台>/api/scheduled-jobs/agent`，body 必须带当前用户的 userId）。",
+  "2. 用户级定时任务（创建/修改/删除/查询）**一律调用平台接口**（端点、令牌取法、请求体示例",
+  "   都写在下面「🔌 平台接口」那节，照着调；body 必须带当前用户的 userId）。",
   "   **绝对禁止**用 `openclaw cron list/get/runs/show`，或读取/grep cron 存储",
   "   （state sqlite、agent sqlite、cron store、脚本缓存）来回答「有哪些定时任务」——",
   "   网关侧只剩系统任务（心跳、记忆整理等），用户任务不在这里。",
   "3. **绝对禁止**把其他用户的数据（任务、内容、账号、会话）写进你的记忆或回答里。",
   "   上下文里若出现明显不属于这位用户的信息，直接忽略。",
-  "4. **微信入站已按机器人账号分流到本 agent**：从微信来的消息就是这位用户本人的，可以正常应答，",
-  "   也可以按第 2 条帮他操作定时任务。",
+  "4. **微信入站已按机器人账号分流到本 agent**：从微信来的消息就是这位用户本人的，可以正常应答。",
+  "   他在微信里说「每天早上 9 点帮我做 XX」时，**直接用平台接口把任务建出来**，",
+  "   不要让他去网页端 —— 两边的任务列表是同一份，微信里建的在网页端也能看到。",
   "5. 涉及「写进谁的库」时务必带归属：入库脚本要带 `--user=<该用户 userId>`",
   "   （脚本在缺少归属参数时会退回主账号，会把他的产出写进别人的内容库）。",
   "",
@@ -192,6 +194,121 @@ const OWN_MEMORY_RULE = [
 ].join("\n");
 
 /**
+ * 用户 agent 的「平台接口」章节。
+ *
+ * 为什么必须写进 AGENTS.md、而不能只靠会话注入：
+ * 平台端点与令牌目前只由 `platform-auth-context.ts` 拼进 **Web 会话**的 prompt，
+ * 而微信入站走 `agent:u-*:openclaw-weixin:...`，根本不经过平台路由 ——
+ * 实测在微信会话里问「我有哪些定时任务」，agent 只能答「端点和令牌没在上下文里」。
+ * AGENTS.md 每轮 bootstrap 都会读，写进 workspace 才能覆盖两条链路；
+ * 又因为 workspace 按用户隔离，这节只会被本人 agent 读到。
+ *
+ * 令牌只写「去读哪个文件」，绝不写明文：明文会随文件被复制/截图外泄，轮换后还会失效。
+ */
+function buildPlatformApiSection(userId: string, tokenFile: string): string {
+  const uid = JSON.stringify(userId);
+  return [
+    "## 🔌 平台接口（定时任务 · 随时可用）",
+    "",
+    "平台跑在本机 `http://127.0.0.1:3000`。**令牌不要跟用户索要，也不要凭记忆复抄**，",
+    "用命令现场取（读不到就说明平台没启动或还没生成令牌）：",
+    "",
+    "```bash",
+    `TOKEN=$(cat ${tokenFile})`,
+    "```",
+    "",
+    `每次请求都带 \`-H "Authorization: Bearer $TOKEN"\`，body 里**必须**带 \`"userId": ${uid}\``,
+    "（这是你服务的那位用户的 id，任何时候都不要换成别人的）。",
+    "",
+    "### 定时任务：查 / 建 / 改 / 删 / 立即跑",
+    "",
+    "`POST http://127.0.0.1:3000/api/scheduled-jobs/agent`",
+    "",
+    "| 想做什么 | body |",
+    "| --- | --- |",
+    `| 列出我的任务 | \`{"action":"list","userId":${uid}}\` |`,
+    `| 新建 | \`{"action":"create","userId":${uid},"name":"每日热点","cronExpr":"0 9 * * *","timezone":"Asia/Shanghai","prompt":"去今日热点找选题，写一篇……"}\` |`,
+    `| 改时间或内容 | \`{"action":"update","userId":${uid},"id":"<任务id>","cronExpr":"30 8 * * *"}\` |`,
+    `| 删掉 | \`{"action":"delete","userId":${uid},"id":"<任务id>"}\` |`,
+    `| 立刻跑一次 | \`{"action":"run","userId":${uid},"id":"<任务id>"}\` |`,
+    "",
+    "**怎么用：**",
+    "",
+    "1. 用户说「每天早上 9 点」「每周一 8 点半」「明天下午 3 点提醒我」时，**直接把话换算成 cron 建任务**，",
+    "   不要反问他 cron 表达式怎么写。`cronExpr` 是 5 段 `分 时 日 月 周`，时区默认 `Asia/Shanghai`（北京时间）。",
+    "2. **不要**在 `prompt` 里写「把结果发给用户」之类的步骤 —— 到点后平台自己会把结果推到他微信，",
+    "   你只管写「要做什么」。也不要用 `--announce`。",
+    "3. 建完把任务名、时间、下一次执行时间复述给他确认；他说要改，就用 `list` 拿到 id 再 `update`。",
+    "4. **不要用 `openclaw cron` 回答「我有哪些定时任务」**：那是网关的系统任务（心跳、记忆整理），",
+    "   和用户任务完全不是一回事，读它只会读到别人的任务名。",
+    "",
+    ""
+  ].join("\n");
+}
+
+/** 该章节的定位标题：换了它会让幂等判断失效，改文案别改这行。 */
+const PLATFORM_API_HEADING = "## 🔌 平台接口";
+
+/**
+ * 写入/更新 AGENTS.md 的「平台接口」章节（幂等）。
+ *
+ * 已存在 → 替换到下一个二级标题为止（文案更新能自动生效）；
+ * 不存在 → 插到「## First Run」之前（那是 bootstrap 的收尾段，插在后面等于被淹没）。
+ */
+function upsertPlatformApiSection(file: string, userId: string): void {
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return;
+  }
+  // 反斜杠在 bash 里是转义符，`cat D:\...` 会被吃掉，一律转成正斜杠再写进文档。
+  const section = buildPlatformApiSection(userId, agentTokenFilePath().replace(/\\/g, "/"));
+  const at = text.indexOf(PLATFORM_API_HEADING);
+
+  let next: string;
+  if (at >= 0) {
+    const afterHeading = at + PLATFORM_API_HEADING.length;
+    const rest = text.slice(afterHeading);
+    const nextHeading = rest.search(/\r?\n## /);
+    const end = nextHeading >= 0 ? afterHeading + nextHeading + 1 : text.length;
+    next = text.slice(0, at) + section + text.slice(end);
+  } else {
+    const anchor = text.indexOf("## First Run");
+    next =
+      anchor >= 0
+        ? text.slice(0, anchor) + section + text.slice(anchor)
+        : `${text.trimEnd()}\n\n${section}`;
+  }
+
+  if (next === text) return;
+  try {
+    // 原子覆盖：网关随时可能读这个文件。
+    const tmp = `${file}.tmp-platform-api`;
+    writeFileSync(tmp, next, "utf8");
+    renameSync(tmp, file);
+  } catch (error) {
+    console.warn("[user-agent] 写入平台接口章节失败：", (error as Error).message);
+  }
+}
+
+/**
+ * 每进程每 workspace 只补一次。
+ *
+ * 补这节要读一次 9K 的文件，聊天是热路径，不能每轮都做；
+ * 但也不能只在「首次装配」时做 —— 老用户的 workspace 早就存在，
+ * 只会在下次交互时补上，所以要绕过 knownAgents 的快速返回。
+ */
+const platformSectionSynced = new Set<string>();
+
+function ensurePlatformSection(workspace: string, userId: string): void {
+  const key = `${workspace}::${userId}`;
+  if (platformSectionSynced.has(key)) return;
+  upsertPlatformApiSection(path.join(workspace, "AGENTS.md"), userId);
+  platformSectionSynced.add(key);
+}
+
+/**
  * 用 `next` 替换 [startMark, endMark) 区间。startMark 与 endMark 都支持多个候选，
  * 便于在「已替换过 / 未替换过」两种文档状态下都能定位。
  */
@@ -229,16 +346,16 @@ function personalizeAgentsMd(file: string): void {
   }
   const original = text;
 
-  // 1) 服务边界：main 是兜底版（陌生外部通道只回一句「去平台网页端」），专属 agent 必须换掉
-  if (!text.includes("这个 agent 只服务一位用户")) {
-    text =
-      replaceSection(
-        text,
-        [BOUNDARY_SECTION_START, BOUNDARY_SECTION_LEGACY],
-        [BOUNDARY_SECTION_END],
-        OWN_BOUNDARY_SECTION
-      ) ?? text;
-  }
+  // 1) 服务边界：main 是兜底版（陌生外部通道只回一句「去平台网页端」），专属 agent 必须换掉。
+  //    这里**不按「是否已替换过」跳过**：文案更新也要能推到已有的 10 多个 workspace，
+  //    替换本身是幂等的，每次都算出同样的文本，写盘前还有 `text === original` 拦一层。
+  text =
+    replaceSection(
+      text,
+      [BOUNDARY_SECTION_START, BOUNDARY_SECTION_LEGACY],
+      [BOUNDARY_SECTION_END],
+      OWN_BOUNDARY_SECTION
+    ) ?? text;
 
   // 2) 心跳章节：先删（它正好夹在「服务边界」与「多账号工作区」之间）
   if (text.includes(HEARTBEAT_SECTION_START)) {
@@ -322,7 +439,12 @@ function personalizeToolsMd(file: string): void {
   }
 }
 
-function seedWorkspace(workspace: string, mainWorkspace: string, account: string): void {
+function seedWorkspace(
+  workspace: string,
+  mainWorkspace: string,
+  account: string,
+  userId: string
+): void {
   mkdirSync(workspace, { recursive: true });
   mkdirSync(path.join(workspace, "memory"), { recursive: true });
 
@@ -341,6 +463,8 @@ function seedWorkspace(workspace: string, mainWorkspace: string, account: string
   // 放在「仅当文件不存在才复制」之后，所以对已存在的 workspace 也会做一次幂等修正。
   personalizeAgentsMd(path.join(workspace, "AGENTS.md"));
   personalizeToolsMd(path.join(workspace, "TOOLS.md"));
+  // 平台接口（定时任务）章节：微信入站不经过平台路由，只能靠这份文件把端点讲清楚。
+  ensurePlatformSection(workspace, userId);
 
   const userMd = path.join(workspace, "USER.md");
   if (!existsSync(userMd)) {
@@ -392,6 +516,8 @@ export async function ensureUserAgent(input: {
   // 快速路径：已装配过，直接返回（绝大多数聊天回合走这里，零 IO）。
   const cachedWorkspace = knownAgents.get(agentId);
   if (cachedWorkspace) {
+    // 老 workspace 也要补上「平台接口」章节（每进程每 workspace 只做一次，有 Set 挡着）。
+    ensurePlatformSection(cachedWorkspace, userId);
     return { agentId, workspace: cachedWorkspace, created: false, configChanged: false };
   }
 
@@ -415,7 +541,7 @@ export async function ensureUserAgent(input: {
     const workspace = wsFromConfig || path.join(defaultWorkspacesRoot(), agentId);
 
     const workspaceExisted = existsSync(path.join(workspace, "MEMORY.md"));
-    seedWorkspace(workspace, mainWorkspace, account);
+    seedWorkspace(workspace, mainWorkspace, account, userId);
 
     let configChanged = false;
     if (!existing) {

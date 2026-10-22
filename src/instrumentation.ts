@@ -13,8 +13,9 @@ export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
   const token = (process.env.SCHEDULE_API_TOKEN || process.env.CONTENT_INGEST_TOKEN || "").trim();
   if (!token) {
-    console.warn("[instrumentation] 未配置 SCHEDULE_API_TOKEN / CONTENT_INGEST_TOKEN，平台调度器未启动。");
-    return;
+    // 不直接退出：令牌可能稍后在「系统配置 → 平台 Agent 令牌」里设置，setAgentToken 会同步写入
+    // 本进程的 process.env，届时下一次 tick 即可带上新令牌开始工作。
+    console.warn("[instrumentation] 暂未读到平台 Agent 令牌，调度器将等待配置后再触发。");
   }
   const base = (process.env.AIWORKER_BASE_URL || "http://127.0.0.1:3000").replace(/\/+$/, "");
   const url = `${base}/api/scheduler/tick`;
@@ -22,7 +23,11 @@ export async function register() {
   const collectUrl = `${base}/api/collectors/tick`;
 
   const post = (target: string, label: string) => {
-    fetch(target, { method: "POST", headers: { Authorization: `Bearer ${token}` } })
+    // 每轮现读 process.env：用户在「系统配置」里重设令牌后，setAgentToken 会同步更新进程内环境变量，
+    // 这里若沿用启动时捕获的 token 就会一直用旧值。
+    const fresh = (process.env.SCHEDULE_API_TOKEN || process.env.CONTENT_INGEST_TOKEN || "").trim() || token;
+    if (!fresh) return; // 还没配置令牌：跳过本轮，等用户配置后再跑
+    fetch(target, { method: "POST", headers: { Authorization: `Bearer ${fresh}` } })
       .then((res) => {
         if (!res.ok) console.error(`[${label}] tick 返回 ${res.status}`);
       })

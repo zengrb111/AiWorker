@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { prisma } from "@/lib/prisma";
 import { getSyncState, startSync } from "@/lib/sync-state";
+import { getAgentToken, isValidAgentToken } from "@/lib/platform-config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,9 +47,10 @@ function writeState(state: Record<string, string>) {
 }
 
 export async function POST(req: Request) {
-  const token = (process.env.SCHEDULE_API_TOKEN || process.env.CONTENT_INGEST_TOKEN || "").trim();
+  const token = getAgentToken();
   const auth = req.headers.get("authorization") || "";
-  if (!token || auth !== `Bearer ${token}`) {
+  const presented = auth.replace(/^Bearer\s+/i, "").trim();
+  if (!token || !isValidAgentToken(presented)) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 

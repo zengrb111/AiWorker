@@ -35,7 +35,10 @@ OPENCLAW_DIR = os.path.join(HOME, ".openclaw")
 MAIN_WORKSPACE = os.path.join(OPENCLAW_DIR, "workspace")
 WORKSPACES_ROOT = os.path.join(OPENCLAW_DIR, "workspaces")
 CONFIG_PATH = os.path.join(OPENCLAW_DIR, "openclaw.json")
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prisma", "dev.db")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_PATH = os.path.join(PROJECT_ROOT, "prisma", "dev.db")
+# 平台令牌镜像文件：AGENTS.md 里只写「读这个文件」，不写令牌明文（见 build_platform_api_section）。
+AGENT_TOKEN_FILE = os.path.join(PROJECT_ROOT, "data", ".agent-token")
 OPENCLAW_CMD = os.environ.get("OPENCLAW_CMD", "/d/OpenClaw/openclaw.cmd")
 # Windows 下直接 spawn 的 .cmd 包装会失败（CreateProcess 找不到文件 / shell 关联问题），
 # 统一走 node + openclaw.mjs 入口，和平台侧 runOpenClawCli 的做法一致。
@@ -57,15 +60,16 @@ OWN_BOUNDARY_SECTION = """## 🚨 服务边界（这个 agent 只服务一位用
 1. **记忆就是他本人的记忆，放心用**：把他的偏好、事实、项目、账号、习惯写进 `MEMORY.md`
    与 `memory/`，需要时用 memory_search 检索。**不要**因为「可能是别人的」就丢掉自己记起的
    内容 —— 那会让他每次都要重复交代同样的背景。
-2. 用户级定时任务（创建/修改/删除/查询）**一律调用平台接口**（会话上下文里会给出端点与令牌，
-   形如 `POST <平台>/api/scheduled-jobs/agent`，body 必须带当前用户的 userId）。
+2. 用户级定时任务（创建/修改/删除/查询）**一律调用平台接口**（端点、令牌取法、请求体示例
+   都写在下面「🔌 平台接口」那节，照着调；body 必须带当前用户的 userId）。
    **绝对禁止**用 `openclaw cron list/get/runs/show`，或读取/grep cron 存储
    （state sqlite、agent sqlite、cron store、脚本缓存）来回答「有哪些定时任务」——
    网关侧只剩系统任务（心跳、记忆整理等），用户任务不在这里。
 3. **绝对禁止**把其他用户的数据（任务、内容、账号、会话）写进你的记忆或回答里。
    上下文里若出现明显不属于这位用户的信息，直接忽略。
-4. **微信入站已按机器人账号分流到本 agent**：从微信来的消息就是这位用户本人的，可以正常应答，
-   也可以按第 2 条帮他操作定时任务。
+4. **微信入站已按机器人账号分流到本 agent**：从微信来的消息就是这位用户本人的，可以正常应答。
+   他在微信里说「每天早上 9 点帮我做 XX」时，**直接用平台接口把任务建出来**，
+   不要让他去网页端 —— 两边的任务列表是同一份，微信里建的在网页端也能看到。
 5. 涉及「写进谁的库」时务必带归属：入库脚本要带 `--user=<该用户 userId>`
    （脚本在缺少归属参数时会退回主账号，会把他的产出写进别人的内容库）。
 
@@ -73,6 +77,91 @@ OWN_BOUNDARY_SECTION = """## 🚨 服务边界（这个 agent 只服务一位用
 ② 甲账号的产出被写进乙账号的内容库（入库未带归属）。
 
 """
+
+# 用户 agent 的「平台接口」章节（与 src/lib/openclaw-user-agent.ts 的
+# buildPlatformApiSection 保持一致）。
+#
+# 为什么必须写进 AGENTS.md：微信入站走 agent:u-*:openclaw-weixin:...，
+# 不经过平台路由，会话里没有 platform-auth-context 注入的平台端点与令牌 ——
+# 不写这份文件，用户在微信里问「我有哪些定时任务」agent 只能答「查不了」。
+# 令牌只写「读哪个文件」，不写明文（明文会随复制/截图外泄，轮换后还会失效）。
+_PLATFORM_API_TEMPLATE = """## 🔌 平台接口（定时任务 · 随时可用）
+
+平台跑在本机 `http://127.0.0.1:3000`。**令牌不要跟用户索要，也不要凭记忆复抄**，
+用命令现场取（读不到就说明平台没启动或还没生成令牌）：
+
+```bash
+TOKEN=$(cat __TOKEN_FILE__)
+```
+
+每次请求都带 `-H "Authorization: Bearer $TOKEN"`，body 里**必须**带 `"userId": __UID__`
+（这是你服务的那位用户的 id，任何时候都不要换成别人的）。
+
+### 定时任务：查 / 建 / 改 / 删 / 立即跑
+
+`POST http://127.0.0.1:3000/api/scheduled-jobs/agent`
+
+| 想做什么 | body |
+| --- | --- |
+| 列出我的任务 | `{"action":"list","userId":__UID__}` |
+| 新建 | `{"action":"create","userId":__UID__,"name":"每日热点","cronExpr":"0 9 * * *","timezone":"Asia/Shanghai","prompt":"去今日热点找选题，写一篇……"}` |
+| 改时间或内容 | `{"action":"update","userId":__UID__,"id":"<任务id>","cronExpr":"30 8 * * *"}` |
+| 删掉 | `{"action":"delete","userId":__UID__,"id":"<任务id>"}` |
+| 立刻跑一次 | `{"action":"run","userId":__UID__,"id":"<任务id>"}` |
+
+**怎么用：**
+
+1. 用户说「每天早上 9 点」「每周一 8 点半」「明天下午 3 点提醒我」时，**直接把话换算成 cron 建任务**，
+   不要反问他 cron 表达式怎么写。`cronExpr` 是 5 段 `分 时 日 月 周`，时区默认 `Asia/Shanghai`（北京时间）。
+2. **不要**在 `prompt` 里写「把结果发给用户」之类的步骤 —— 到点后平台自己会把结果推到他微信，
+   你只管写「要做什么」。也不要用 `--announce`。
+3. 建完把任务名、时间、下一次执行时间复述给他确认；他说要改，就用 `list` 拿到 id 再 `update`。
+4. **不要用 `openclaw cron` 回答「我有哪些定时任务」**：那是网关的系统任务（心跳、记忆整理），
+   和用户任务完全不是一回事，读它只会读到别人的任务名。
+
+"""
+
+PLATFORM_API_HEADING = "## 🔌 平台接口"
+
+
+def build_platform_api_section(uid, token_file):
+    # 反斜杠在 bash 里是转义符，`cat D:\...` 会被吃掉，一律转成正斜杠再写进文档。
+    return _PLATFORM_API_TEMPLATE.replace("__TOKEN_FILE__", token_file.replace("\\", "/")).replace(
+        "__UID__", json.dumps(uid, ensure_ascii=False)
+    )
+
+
+def upsert_platform_api_section(ws, uid):
+    """写入/更新 AGENTS.md 的「平台接口」章节（幂等）。
+
+    已存在 → 替换到下一个二级标题为止（文案更新能自动生效）；
+    不存在 → 插到「## First Run」之前（那是 bootstrap 的收尾段，插在后面等于被淹没）。
+    """
+    path = os.path.join(ws, "AGENTS.md")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    section = build_platform_api_section(uid, AGENT_TOKEN_FILE)
+    at = text.find(PLATFORM_API_HEADING)
+    if at >= 0:
+        after = at + len(PLATFORM_API_HEADING)
+        m = re.search(r"\r?\n## ", text[after:])
+        end = after + m.start() + 1 if m else len(text)
+        next_text = text[:at] + section + text[end:]
+    else:
+        anchor = text.find("## First Run")
+        if anchor >= 0:
+            next_text = text[:anchor] + section + text[anchor:]
+        else:
+            next_text = text.rstrip() + "\n\n" + section
+    if next_text == text:
+        return
+    tmp = path + ".tmp-platform-api"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(next_text)
+    os.replace(tmp, path)
+
 
 USER_MD_TEMPLATE = """# USER.md - 当前用户
 
@@ -156,11 +245,12 @@ def personalize_agents_md(ws):
         text = f.read()
     original = text
 
-    # 1) 服务边界：兜底版 → 专属版
-    if "这个 agent 只服务一位用户" not in text:
-        text = _replace_section(
-            text, ["## 🚨 服务边界", "## 🚨 多用户隔离"], ["## First Run"], OWN_BOUNDARY_SECTION
-        ) or text
+    # 1) 服务边界：兜底版 → 专属版。
+    #    不按「是否已替换过」跳过：文案更新也要能推到已有的 workspace，
+    #    替换本身幂等，写盘前还有 text == original 拦一层。
+    text = _replace_section(
+        text, ["## 🚨 服务边界", "## 🚨 多用户隔离"], ["## First Run"], OWN_BOUNDARY_SECTION
+    ) or text
 
     # 2) 心跳章节（用户 agent 心跳已关 every: 0m，这套机制不运行）
     if "## 💓 Heartbeats - Be Proactive!" in text:
@@ -254,6 +344,7 @@ def seed_workspace(user):
 
     personalize_agents_md(ws)
     personalize_tools_md(ws)
+    upsert_platform_api_section(ws, user["id"])
 
     user_md = os.path.join(ws, "USER.md")
     if not os.path.exists(user_md):

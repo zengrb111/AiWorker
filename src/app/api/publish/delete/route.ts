@@ -1,5 +1,6 @@
 import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
+import { getIngestToken, isValidAgentToken } from "@/lib/platform-config";
 import { HEALING_CHANNEL, deleteContentFromHealing } from "@/lib/healing-publish";
 import { FRONTIER_CHANNEL, deleteContentFromFrontier } from "@/lib/frontier-publish";
 import { PUBLISH_CHANNEL_LABEL, type PublishChannelKey } from "@/lib/platform-auth-context";
@@ -46,11 +47,11 @@ function extractToken(request: Request): string {
 }
 
 export async function POST(request: Request) {
-  const expected = process.env.CONTENT_INGEST_TOKEN?.trim();
+  const expected = getIngestToken();
   if (!expected) {
-    return jsonError("服务端未配置 CONTENT_INGEST_TOKEN，删除接口未启用。", 503);
+    return jsonError("服务端未配置平台 Agent 令牌（系统配置 → 平台 Agent 令牌），删除接口未启用。", 503);
   }
-  if (extractToken(request) !== expected) {
+  if (!isValidAgentToken(extractToken(request))) {
     return jsonError("删除令牌无效。", 401);
   }
 

@@ -9,6 +9,10 @@ import AnalyticsPanel from "./analytics-panel";
 import AccountsPanel from "./accounts-panel";
 import SettingsPanel from "./settings-panel";
 import ModelPicker, { type ModelOption, type CurrentModel } from "./model-picker";
+import WechatConversation from "./wechat-conversation";
+
+/** 置顶「微信会话」的虚拟会话 id（不存库，仅为前端路由用）。 */
+const WECHAT_CONV_ID = "__wechat__";
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -193,6 +197,21 @@ type BindingCheckStatus = {
   wechatNickname?: string;
   wechatOpenId?: string;
   wechatNo?: string;
+};
+
+/**
+ * 微信通道体检结果。
+ *
+ * 平台记着「已绑定」不等于通道真通：凭据会被微信插件清理，同一微信号被两个
+ * 账号绑过时后绑的那个也拿不到凭据。四项检查全真才算通，否则微信里问什么
+ * 都收不到 —— 这正是「微信里问的和会话里不一样」的根因。
+ */
+type ChannelHealthView = {
+  ok: boolean;
+  botId: string | null;
+  accountId: string | null;
+  checks: { identity: boolean; credential: boolean; indexed: boolean; routed: boolean; agentReady: boolean };
+  problems: string[];
 };
 
 const bindingWaitTimeoutMs = 490000;
@@ -774,6 +793,8 @@ export default function PlatformClient() {
   const [publishingFrontier, setPublishingFrontier] = useState(false);
   const [regeneratingImage, setRegeneratingImage] = useState<string | null>(null);
   const [wechatBinding, setWechatBinding] = useState<WechatBinding | null>(null);
+  /** 微信通道体检：BOUND 不等于通，个人中心按这个显示真实状态。 */
+  const [channelHealth, setChannelHealth] = useState<ChannelHealthView | null>(null);
   const [profileQr, setProfileQr] = useState<QrData | null>(null);
   const [profileQrLoading, setProfileQrLoading] = useState(false);
   /** 绑定检查进行中（长轮询，可能阻塞到 490 秒）。用来防重复发起。 */
@@ -878,11 +899,26 @@ export default function PlatformClient() {
     scrollListToBottom();
   }
 
+  // 切换会话（点开历史会话、从微信会话切回等）时，立即把消息列表定位到底部，
+  // 并重新开启底部跟随——打开任意会话都直接看到最后一条，而不是停在顶部旧位置。
+  useEffect(() => {
+    pinMessageListToBottom();
+  }, [activeConversationId]);
+
   async function refreshMe() {
     try {
       const data = await api<{ user: User; wechatBinding: WechatBinding | null }>("/api/me", undefined, 3000);
       setUser(data.user);
       setWechatBinding(data.wechatBinding);
+      // 绑定状态只说明「平台记录」，还要再确认通道真的能收发，否则个人中心
+      // 会一直亮绿灯而用户从微信发消息永远没回复。失败不影响主流程。
+      if (data.wechatBinding?.status === "BOUND") {
+        void api<ChannelHealthView>("/api/wechat/channel-health", undefined, 6000)
+          .then((health) => setChannelHealth(health))
+          .catch(() => setChannelHealth(null));
+      } else {
+        setChannelHealth(null);
+      }
     } catch {
       setUser(null);
     } finally {
@@ -2908,6 +2944,17 @@ export default function PlatformClient() {
                 <span className="title">历史列表</span>
                 <button className="new-button" onClick={createConversation}>＋ 新建</button>
               </div>
+              {user && (
+                <button
+                  key={WECHAT_CONV_ID}
+                  className={`history-item history-item-wechat ${activeConversationId === WECHAT_CONV_ID ? "active" : ""}`}
+                  onClick={() => { setActiveConversationId(WECHAT_CONV_ID); setLastSavedContent(null); setLastVideoUrl(null); }}
+                >
+                  <strong>💬 微信会话</strong>
+                  <span className="preview">与 AI 的微信聊天记录（实时同步）</span>
+                  <span className="meta">置顶</span>
+                </button>
+              )}
               {conversations.map((conversation) => (
                 <button
                   key={conversation.id}
@@ -2920,7 +2967,10 @@ export default function PlatformClient() {
                 </button>
               ))}
             </aside>
-            <section className="chat-panel">
+            {activeConversationId === WECHAT_CONV_ID ? (
+              <WechatConversation />
+            ) : (
+              <section className="chat-panel">
               <div className="chat-head">
                 <div className="left">
                   <h3>{activeConversation?.title ?? "请新建对话"}</h3>
@@ -4198,7 +4248,7 @@ export default function PlatformClient() {
                   </aside>
                 )}
               </div>
-            </section>
+            </section>)}
           </div>
         )}
 
@@ -4455,8 +4505,20 @@ export default function PlatformClient() {
                 <div className="profile-row"><dt>手机号</dt><dd>{user.phone}</dd></div>
                 <div className="profile-row">
                   <dt>微信通道</dt>
-                  <dd className={wechatBinding?.status === "BOUND" ? "state-on" : "state-off"}>
-                    {wechatBinding?.status === "BOUND" ? "已绑定" : "未绑定"}
+                  <dd
+                    className={
+                      wechatBinding?.status === "BOUND"
+                        ? channelHealth && !channelHealth.ok
+                          ? "state-off"
+                          : "state-on"
+                        : "state-off"
+                    }
+                  >
+                    {wechatBinding?.status === "BOUND"
+                      ? channelHealth && !channelHealth.ok
+                        ? "已绑定 · 通道异常"
+                        : "已绑定"
+                      : "未绑定"}
                   </dd>
                 </div>
               </dl>
@@ -4510,9 +4572,22 @@ export default function PlatformClient() {
                 <div className="profile-wechat-body">
                   <div className="profile-wechat-info">
                     <div className="profile-wechat-head">
-                      <span className="profile-status-dot" aria-hidden="true" />
+                      <span
+                        className={`profile-status-dot${channelHealth && !channelHealth.ok ? " dot-bad" : ""}`}
+                        aria-hidden="true"
+                      />
                       <strong>已绑定：{wechatBinding.wechatNickname ?? "AI 员工指挥官"}</strong>
                     </div>
+                    {channelHealth && !channelHealth.ok && (
+                      <div className="profile-channel-warn">
+                        <strong>通道未连通，微信消息发不进来</strong>
+                        <p>{channelHealth.problems.join(" ")}</p>
+                        <p>
+                          修好之后微信里问出来的才会和会话里一致。请解除绑定后换一个微信号重新扫码；
+                          若该微信号已在微信侧绑定过本网关，需要先在微信的 ClawBot 设置里解除。
+                        </p>
+                      </div>
+                    )}
                     <dl className="profile-rows">
                       <div className="profile-row"><dt>微信号</dt><dd>{wechatBinding.wechatNo ?? wechatBinding.wechatOpenId ?? "OpenClaw 微信通道"}</dd></div>
                       <div className="profile-row"><dt>绑定时间</dt><dd>{formatDate(wechatBinding.boundAt)}</dd></div>

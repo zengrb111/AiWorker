@@ -3,6 +3,7 @@ import { openClawClient } from "@/lib/openclaw";
 import { prisma } from "@/lib/prisma";
 import { readSessionUserId } from "@/lib/session";
 import { refreshWeixinAgentBindings } from "@/lib/weixin-bindings";
+import { checkUserChannel, findOtherOwnersOfWechatNo } from "@/lib/weixin-channel-health";
 
 type BindingStatusValue = "pending" | "bound" | "unbound";
 
@@ -86,6 +87,75 @@ async function saveBinding(userId: string | null, body: Required<Pick<BindingSta
   });
 }
 
+/**
+ * 落库前先确认「这条通道以后真能收发」，通了才写 BOUND。
+ *
+ * 只凭网关一句 `connected` 会造出假绑定（binded_redirect / 凭据已被插件清理 /
+ * 同一微信号被别的账号先绑走），用户体感就是「微信里问出来的和会话里不一样」。
+ * 所以这里强制走一遍四道校验，任何一道不过就把状态降回 UNBOUND 并如实报错，
+ * 前端才会显示「未绑定、需处理」，而不是一个永远收不到消息的绿灯。
+ */
+async function commitBound(
+  userId: string,
+  ticketId: string,
+  body: BindingStatusBody
+): Promise<void> {
+  const wechatNo = (body.wechatNo || "").trim();
+  const wechatOpenId = (body.wechatOpenId || "").trim();
+
+  await saveBinding(userId, { ...body, ticketId, status: "bound" });
+
+  const problems: string[] = [];
+
+  // 1) 串号拦截：一个微信号只有一个微信会话窗口，只能连一个 bot。
+  //    被别的账号先绑走时，这个账号拿不到凭据，消息永远进不来。
+  if (wechatNo) {
+    const others = await findOtherOwnersOfWechatNo(wechatNo, userId);
+    if (others.length) {
+      problems.push(
+        `这个微信号已绑定其他平台账号（${others
+          .map((o) => o.phone || o.userId.slice(-6))
+          .join("、")}）。同一个微信号同一时间只能服务一个账号，请换一个微信号重新绑定。`
+      );
+    }
+  }
+
+  // 2) 通道四道校验：凭据在、索引在、路由指向本人、本人 agent 已装配。
+  if (!problems.length) {
+    try {
+      // 先同步刷新路由（必须 await，下面要读它），再核对。
+      await refreshWeixinAgentBindings();
+      let health = await checkUserChannel(userId);
+
+      // 凭据被插件清理，但平台侧留过备份 → 先拉回来再判，别把能救的判成死。
+      if (!health.ok && health.accountId && !health.checks.credential) {
+        const restored = await openClawClient.restoreWeixinChannelFromStoredAccount({
+          wechatOpenId,
+          wechatNo
+        });
+        if (restored) {
+          console.log(`[wechat-binding] 已从平台备份恢复通道凭据（${restored.accountId}）`);
+          await refreshWeixinAgentBindings();
+          health = await checkUserChannel(userId);
+        }
+      }
+
+      if (!health.ok) problems.push(...health.problems);
+    } catch (error) {
+      problems.push(`刷新微信路由失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  if (!problems.length) {
+    console.log(`[wechat-binding] 绑定闭环校验通过（user=${userId}, bot=${wechatOpenId || "-"}）`);
+    return;
+  }
+
+  // 不通过：如实降级，保留历史记录供排查，但不留假绿灯。
+  await saveBinding(userId, { ...body, ticketId, status: "unbound" });
+  throw new Error(`微信通道没有真正建立，绑定未生效。${problems.join(" ")}`);
+}
+
 export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
@@ -120,21 +190,18 @@ export async function GET(request: Request) {
       }
     }
 
-    await saveBinding(userId, {
-      ticketId,
-      status: status.status,
+    const identity = {
       wechatNickname: status.wechatNickname,
       wechatOpenId,
       wechatNo
-    });
+    };
 
-    // 绑定成功后把「这个 bot 的入站消息」路由到该用户自己的 agent，
-    // 否则微信对话会落在 main（共享运营者档案）。热加载字段，无需重启网关；
-    // 后台执行，不拖慢绑定轮询。
-    if (status.status === "bound") {
-      void refreshWeixinAgentBindings().catch((error) => {
-        console.error("[wechat-binding] 刷新微信入站分流失败：", error);
-      });
+    // 绑定成功不再「先写 BOUND 再补路由」，而是校验通过才成立：
+    // 任何一项不过都会降级为 UNBOUND 并抛出可执行的原因。
+    if (status.status === "bound" && userId) {
+      await commitBound(userId, ticketId, identity);
+    } else {
+      await saveBinding(userId, { ...identity, ticketId, status: status.status });
     }
 
     return jsonOk({ ...status, wechatOpenId, wechatNo });
@@ -155,21 +222,21 @@ export async function POST(request: Request) {
       return jsonError("缺少绑定状态。");
     }
 
-    await saveBinding(readSessionUserId(), {
-      ticketId,
-      status,
+    const userId = readSessionUserId();
+    const identity = {
       wechatNickname: body.wechatNickname,
       wechatOpenId: body.wechatOpenId,
       wechatNo: body.wechatNo
-    });
+    };
 
-    return jsonOk({
-      ticketId,
-      status,
-      wechatNickname: body.wechatNickname,
-      wechatOpenId: body.wechatOpenId,
-      wechatNo: body.wechatNo
-    });
+    // 前端上报的 bound 同样要过闭环校验，否则绕过 GET 就能造出假绑定。
+    if (status === "bound" && userId) {
+      await commitBound(userId, ticketId, identity);
+    } else {
+      await saveBinding(userId, { ...identity, ticketId, status });
+    }
+
+    return jsonOk({ ticketId, status, ...identity });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "保存微信绑定状态失败。", 500);
   }

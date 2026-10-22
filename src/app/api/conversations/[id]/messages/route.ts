@@ -31,6 +31,7 @@ import {
   resolvePublishChannels,
   type PlatformAuthEntry
 } from "@/lib/platform-auth-context";
+import { getAgentToken } from "@/lib/platform-config";
 
 type MessageBody = {
   content?: string;
@@ -251,18 +252,19 @@ function buildCronBlock(jobs: UserScheduledJob[] | null, userId: string): string
   lines.push("- 本列表之外的任务都不属于该用户：绝不展示、复述、查询或修改。");
 
   const base = (process.env.AIWORKER_BASE_URL || "http://127.0.0.1:3000").trim();
-  const token = (process.env.SCHEDULE_API_TOKEN || process.env.CONTENT_INGEST_TOKEN || "").trim();
+  const token = getAgentToken();
   if (token) {
-    // 令牌**绝不放进提示词原文**：模型复抄 48 位长随机串必然抄错（实测把 5e384587… 抄成
-    // 5e3845_bd87 → 接口 401，模型还误判"上下文给的是省略值"）。改为注入一条从平台配置
-    // 文件实时读取的 shell 命令，文件读取是逐字节的，没有复抄误差。
-    const envPath = `${process.cwd().replace(/\\/g, "/")}/.env.local`;
+    // 令牌**绝不放进提示词原文**：模型复抄长随机串必然抄错（实测把 5e384587… 抄成
+    // 5e3845_bd87 → 接口 401，模型还误判"上下文给的是省略值"）。改为注入一条从平台固定文件
+    // 读取的 shell 命令——文件读取是逐字节的，没有复抄误差。该文件由「系统配置 → 平台 Agent
+    // 令牌」同步生成，不再从 .env.local 里 grep。
+    const tokenFile = `${process.cwd().replace(/\\/g, "/")}/data/.agent-token`;
     lines.push(
       "- 定时任务的增删改查/立即执行一律走**平台接口**（唯一入口，不要用 openclaw cron：网关侧已无用户任务，用了既拿不到也可能看到别人的）：",
       `  POST ${base}/api/scheduled-jobs/agent`,
       "  Header: Authorization: Bearer $TOKEN ； Content-Type: application/json",
-      "  $TOKEN 必须现场执行下面命令读取，**不要手抄**（48 位长串复抄必错，已造成过 401）：",
-      `  TOKEN=$(grep -m1 '^SCHEDULE_API_TOKEN=' '${envPath}' | cut -d= -f2- | tr -d '\\r"'); [ -n "$TOKEN" ] || TOKEN=$(grep -m1 '^CONTENT_INGEST_TOKEN=' '${envPath}' | cut -d= -f2- | tr -d '\\r"')`,
+      "  $TOKEN 必须现场执行下面命令读取，**不要手抄**（长串复抄必错，已造成过 401）。这条命令会原样打印令牌，复制它输出的整行即可：",
+      `  TOKEN=$(cat '${tokenFile}' 2>/dev/null); echo "$TOKEN"`,
       "  Body（userId 固定为当前用户，cronExpr 为 5 段「分 时 日 月 周」，时区默认 Asia/Shanghai）：",
       `  {"action":"create","userId":"${userId}","name":"每日内容生成","cronExpr":"30 17 * * *","timezone":"Asia/Shanghai","prompt":"到点要执行的完整指令"}`,
       `  {"action":"update|delete|run","userId":"${userId}","id":"<任务id>"}  ← update 只需带要改的字段；run 立即执行一次；action:list 可查 lastStatus/lastResult`,

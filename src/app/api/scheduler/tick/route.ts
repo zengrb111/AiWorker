@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { jsonError, jsonOk } from "@/lib/http";
 import { tickScheduler } from "@/lib/scheduler";
+import { getAgentToken, isValidAgentToken } from "@/lib/platform-config";
 
 export const dynamic = "force-dynamic";
 
@@ -22,11 +23,11 @@ function extractToken(request: NextRequest): string {
 }
 
 async function handle(request: NextRequest) {
-  const expected = (process.env.SCHEDULE_API_TOKEN || process.env.CONTENT_INGEST_TOKEN || "").trim();
+  const expected = getAgentToken();
   if (!expected) {
-    return jsonError("服务端未配置 SCHEDULE_API_TOKEN / CONTENT_INGEST_TOKEN，该接口未启用。", 503);
+    return jsonError("服务端未配置平台 Agent 令牌（系统配置 → 平台 Agent 令牌），该接口未启用。", 503);
   }
-  if (extractToken(request) !== expected) {
+  if (!isValidAgentToken(extractToken(request))) {
     return jsonError("令牌无效。", 401);
   }
   const fired = await tickScheduler();
