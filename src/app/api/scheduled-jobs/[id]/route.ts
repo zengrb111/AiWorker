@@ -2,6 +2,7 @@ import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { isValidCronExpr } from "@/lib/scheduler";
+import { sanitizeScheduledPrompt } from "@/lib/scheduled-job-prompt";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,9 @@ type PatchBody = {
   timezone?: string;
   prompt?: string;
   enabled?: boolean;
+  runOnce?: boolean;
+  oneShotAt?: string | null;
+  notifyWechat?: boolean;
 };
 
 async function loadOwnedJob(id: string, userId: string) {
@@ -43,11 +47,26 @@ export async function PATCH(request: Request, { params }: { params: { id: string
     data.timezone = body.timezone.trim() || "Asia/Shanghai";
   }
   if (body.prompt !== undefined) {
-    const prompt = body.prompt.trim();
+    const prompt = sanitizeScheduledPrompt(body.prompt);
     if (!prompt) return jsonError("执行内容不能为空。");
     data.prompt = prompt;
   }
   if (body.enabled !== undefined) data.enabled = body.enabled !== false;
+  if (body.runOnce !== undefined) {
+    data.runOnce = body.runOnce === true;
+    // 切到一次性时若未同时传 cronExpr，用占位；切回循环时若未传 cronExpr，保留原值。
+    if (data.runOnce && body.cronExpr === undefined) data.cronExpr = "0 0 1 1 *";
+  }
+  if (body.oneShotAt !== undefined) {
+    if (body.oneShotAt === null) {
+      data.oneShotAt = null;
+    } else {
+      const d = new Date(body.oneShotAt);
+      if (Number.isNaN(d.getTime())) return jsonError("执行时间不合法。");
+      data.oneShotAt = d;
+    }
+  }
+  if (body.notifyWechat !== undefined) data.notifyWechat = body.notifyWechat === true;
 
   if (Object.keys(data).length === 0) return jsonError("没有需要修改的字段。");
 

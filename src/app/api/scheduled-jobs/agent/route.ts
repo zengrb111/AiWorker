@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { resolveOwnerFromBody } from "@/lib/ingest-owner";
 import { isValidCronExpr, runScheduledJob } from "@/lib/scheduler";
 import { getAgentToken, isValidAgentToken } from "@/lib/platform-config";
+import { sanitizeScheduledPrompt } from "@/lib/scheduled-job-prompt";
 
 export const dynamic = "force-dynamic";
 
@@ -85,7 +86,7 @@ export async function POST(request: NextRequest) {
     case "create": {
       const name = (body.name || "").trim();
       const cronExpr = (body.cronExpr || "").trim();
-      const prompt = (body.prompt || "").trim();
+      const prompt = sanitizeScheduledPrompt(body.prompt || "");
       const timezone = (body.timezone || "Asia/Shanghai").trim() || "Asia/Shanghai";
       if (!name) return jsonError("缺少 name。");
       if (!isValidCronExpr(cronExpr)) return jsonError("cronExpr 不合法（5 段：分 时 日 月 周）。");
@@ -111,7 +112,7 @@ export async function POST(request: NextRequest) {
       }
       if (body.timezone !== undefined) data.timezone = body.timezone.trim() || "Asia/Shanghai";
       if (body.prompt !== undefined) {
-        const prompt = body.prompt.trim();
+        const prompt = sanitizeScheduledPrompt(body.prompt);
         if (!prompt) return jsonError("prompt 不能为空。");
         data.prompt = prompt;
       }

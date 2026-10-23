@@ -1,7 +1,8 @@
 import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
-import { isValidCronExpr } from "@/lib/scheduler";
+import { isValidCronExpr, nextRunAt } from "@/lib/scheduler";
+import { sanitizeScheduledPrompt } from "@/lib/scheduled-job-prompt";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +19,13 @@ type CreateBody = {
   timezone?: string;
   prompt?: string;
   enabled?: boolean;
+  runOnce?: boolean;
+  oneShotAt?: string;
+  notifyWechat?: boolean;
 };
+
+/** 一次性任务的占位 cron（runOnce 不按 cron 触发，仅用于占位，避免空字段）。 */
+const ONESHOT_PLACEHOLDER_CRON = "0 0 1 1 *";
 
 export async function GET() {
   const user = await requireUser();
@@ -27,7 +34,20 @@ export async function GET() {
     where: { userId: user.id },
     orderBy: { createdAt: "asc" }
   });
-  return jsonOk({ jobs });
+  // 下次执行时间由服务端算：cron 解析逻辑只放在这边一份，前端不做重复实现。
+  // 暂停的任务不显示下次时间，避免「暂停了还显示要跑」的误解。
+  return jsonOk({
+    jobs: jobs.map((job) => ({
+      ...job,
+      nextRunAt: job.enabled
+        ? job.runOnce
+          ? job.oneShotAt && !job.lastRunAt
+            ? new Date(job.oneShotAt).toISOString()
+            : null
+          : nextRunAt(job.cronExpr, job.timezone)?.toISOString() ?? null
+        : null
+    }))
+  });
 }
 
 export async function POST(request: Request) {
@@ -36,15 +56,28 @@ export async function POST(request: Request) {
 
   const body = await readJson<CreateBody>(request);
   const name = (body.name || "").trim();
-  const cronExpr = (body.cronExpr || "").trim();
-  const prompt = (body.prompt || "").trim();
+  const cronExprRaw = (body.cronExpr || "").trim();
+  const prompt = sanitizeScheduledPrompt(body.prompt || "");
   const timezone = (body.timezone || "Asia/Shanghai").trim() || "Asia/Shanghai";
+  const runOnce = body.runOnce === true;
+  const oneShotAt = body.oneShotAt ? new Date(body.oneShotAt) : null;
+  const notifyWechat = body.notifyWechat !== false;
 
   if (!name) return jsonError("缺少任务名。");
-  if (!isValidCronExpr(cronExpr)) {
+  if (!prompt) return jsonError("缺少执行内容（prompt）。");
+
+  let cronExpr = cronExprRaw;
+  if (runOnce) {
+    if (!oneShotAt || Number.isNaN(oneShotAt.getTime())) {
+      return jsonError("一次性任务需要有效的执行时间。");
+    }
+    if (oneShotAt.getTime() <= Date.now()) {
+      return jsonError("一次性任务的执行时间必须晚于当前时间。");
+    }
+    cronExpr = ONESHOT_PLACEHOLDER_CRON;
+  } else if (!isValidCronExpr(cronExpr)) {
     return jsonError("cron 表达式不合法（需 5 段：分 时 日 月 周，如 `30 17 * * *`）。");
   }
-  if (!prompt) return jsonError("缺少执行内容（prompt）。");
 
   const job = await prisma.scheduledJob.create({
     data: {
@@ -53,7 +86,10 @@ export async function POST(request: Request) {
       cronExpr,
       timezone,
       prompt,
-      enabled: body.enabled !== false
+      enabled: body.enabled !== false,
+      runOnce,
+      oneShotAt,
+      notifyWechat
     }
   });
   return jsonOk({ job });

@@ -41,8 +41,31 @@ export async function register() {
     post(collectUrl, "collectors");
   };
 
+  // 重启后自愈微信通道：网关重启会打断到微信服务端的长连接，插件也可能清掉历史 bot 凭据，
+  // 导致「昨天正常、今天重启后微信显示暂无法连接」。这里只做一次本机 HTTP 调用（不 import
+  // 重模块），真正的恢复逻辑在 /api/wechat/self-heal 路由里。
+  const selfHeal = () => {
+    const fresh = (process.env.SCHEDULE_API_TOKEN || process.env.CONTENT_INGEST_TOKEN || "").trim() || token;
+    if (!fresh) return;
+    fetch(`${base}/api/wechat/self-heal`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${fresh}` }
+    })
+      .then((res) => {
+        if (!res.ok) console.error(`[self-heal] 微信通道自愈返回 ${res.status}`);
+        else console.log("[self-heal] 微信通道自愈已触发");
+      })
+      .catch((error) => {
+        console.error("[self-heal] 微信通道自愈失败：", error instanceof Error ? error.message : error);
+      });
+  };
+
   const timer = setInterval(tick, TICK_INTERVAL_MS);
   if (typeof timer.unref === "function") timer.unref();
   setTimeout(tick, FIRST_DELAY_MS);
+  // 启动后延时自愈一次（等平台路由与网关就绪），再补跑一次兜底「网关启动慢于平台」的情况。
+  setTimeout(selfHeal, 20_000);
+  setTimeout(selfHeal, 90_000);
   console.log(`[scheduler] 平台定时任务调度器已启动（每 ${TICK_INTERVAL_MS / 1000}s 触发一次 /api/scheduler/tick + /api/collectors/tick）`);
+  console.log("[self-heal] 微信通道自愈已排期（启动后 20s / 90s 各一次）");
 }

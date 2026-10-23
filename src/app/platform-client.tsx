@@ -8,6 +8,7 @@ import PublishPanel from "./publish-panel";
 import AnalyticsPanel from "./analytics-panel";
 import AccountsPanel from "./accounts-panel";
 import SettingsPanel from "./settings-panel";
+import ScheduledJobsPanel from "./scheduled-jobs-panel";
 import ModelPicker, { type ModelOption, type CurrentModel } from "./model-picker";
 import WechatConversation from "./wechat-conversation";
 
@@ -127,6 +128,7 @@ type AuthMode = "login" | "register";
 type Section =
   | "chat"
   | "library"
+  | "jobs"
   | "publish"
   | "analytics"
   | "knowledge"
@@ -139,6 +141,7 @@ type Section =
 const navItems: Array<[Section, string, string]> = [
   ["chat", "对话", "◉"],
   ["library", "内容库", "▦"],
+  ["jobs", "定时任务", "◔"],
   ["publish", "发布管理", "▣"],
   ["analytics", "效果分析", "◫"],
   ["knowledge", "知识库", "▤"],
@@ -151,6 +154,7 @@ const navItems: Array<[Section, string, string]> = [
 const sectionTitles: Record<Section, string> = {
   chat: "对话",
   library: "内容库",
+  jobs: "定时任务",
   publish: "发布管理",
   analytics: "效果分析",
   knowledge: "知识库",
@@ -639,6 +643,8 @@ export default function PlatformClient() {
   const [accountsResetToken, setAccountsResetToken] = useState(0);
   /** 点「系统配置」时自增，让模型配置面板重新拉数据。 */
   const [settingsResetToken, setSettingsResetToken] = useState(0);
+  /** 点「定时任务」时自增，让任务面板重新拉一次（含下次执行时间与通知结果）。 */
+  const [jobsResetToken, setJobsResetToken] = useState(0);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState("");
@@ -2549,6 +2555,7 @@ export default function PlatformClient() {
       void refreshContent();
     }
     if (key === "knowledge") setKnowledgeResetToken((token) => token + 1);
+    if (key === "jobs") setJobsResetToken((token) => token + 1);
     if (key === "publish") setPublishResetToken((token) => token + 1);
     if (key === "analytics") setAnalyticsResetToken((token) => token + 1);
     if (key === "accounts") setAccountsResetToken((token) => token + 1);
@@ -4479,6 +4486,7 @@ export default function PlatformClient() {
         )}
 
         {section === "knowledge" && <KnowledgePanel resetToken={knowledgeResetToken} />}
+        {section === "jobs" && <ScheduledJobsPanel resetToken={jobsResetToken} />}
         {section === "publish" && <PublishPanel resetToken={publishResetToken} />}
         {section === "analytics" && <AnalyticsPanel resetToken={analyticsResetToken} />}
         {section === "accounts" && <AccountsPanel resetToken={accountsResetToken} />}

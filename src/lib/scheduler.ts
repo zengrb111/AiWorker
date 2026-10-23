@@ -8,6 +8,7 @@
  */
 import { prisma } from "@/lib/prisma";
 import { openClawClient, deliverWechatMessage } from "@/lib/openclaw";
+import { appendTurn } from "@/lib/wechat-conversation-store";
 
 /** 调度轮询间隔。 */
 const TICK_MS = 30_000;
@@ -176,9 +177,14 @@ async function resolveWechatTarget(userId: string): Promise<{ to: string; accoun
  * 走**确定性投递**（平台直接持机器人 token 调 `ilink/bot/sendmessage`），
  * 不再依赖 agent 在回合里自觉调 `--announce` 工具——那一路实测三次均未真正发出。
  * 目标（to / accountRef）来自用户自己的绑定记录，绝不投错人；未绑定不会调到这里。
+ *
+ * 投递成功后**同步落一份平台侧会话**：微信插件只记录它自己收发的消息，
+ * 平台直投的这一条不会进 `ref-messages.sqlite`，不补写的话平台「微信会话」
+ * 里就看不到定时任务的结果（用户侧现象：微信收到了、平台里没有）。
  */
 async function deliverJobResultToWechat(
   jobName: string,
+  userId: string,
   target: { to: string; accountRef: string },
   text: string
 ): Promise<void> {
@@ -187,6 +193,9 @@ async function deliverJobResultToWechat(
   console.log(
     `[scheduler] 微信通知已投递：任务=${jobName} to=${target.to} messageId=${result.messageId ?? "?"}`
   );
+  // 归档到平台会话（conversationId 与「微信会话」面板一致 = 收件人 wechatNo）。
+  // 写失败不影响投递结果：消息已经到微信了，只是平台侧少一条记录。
+  appendTurn({ userId, conversationId: target.to, role: "assistant", body: content });
 }
 
 /** 立即执行一个任务（手动触发与定时触发共用）。 */
@@ -229,10 +238,11 @@ export async function runScheduledJob(jobId: string): Promise<SchedulerRunResult
     // 微信通知走**确定性投递**：平台直接调微信官方接口，不依赖 agent 调 --announce。
     // 单独一轮（而不是把投递塞进任务 prompt）避免被主任务逻辑覆盖。
     // 投递结果回写到 lastResult，避免「任务成功却收不到通知」的不可见问题。
-    if (target) {
+    // notifyWechat=false 的任务只执行不通知（参照 WorkBuddy 的「消息推送到企业微信」开关）。
+    if (target && job.notifyWechat !== false) {
       const notifyText = content || "定时任务已执行完成（无文本结果）。";
       try {
-        await deliverJobResultToWechat(job.name, target, notifyText);
+        await deliverJobResultToWechat(job.name, job.userId, target, notifyText);
         await prisma.scheduledJob
           .update({
             where: { id: jobId },
@@ -251,6 +261,12 @@ export async function runScheduledJob(jobId: string): Promise<SchedulerRunResult
           })
           .catch(() => undefined);
       }
+    }
+    // 成功后收尾：一次性任务 → 关闭，避免反复触发（循环任务保持运行）。
+    if (job.runOnce) {
+      await prisma.scheduledJob
+        .update({ where: { id: jobId }, data: { enabled: false } })
+        .catch(() => undefined);
     }
     return { ok: true, status: "SUCCEEDED", content };
   } catch (error) {
@@ -273,6 +289,21 @@ export async function tickScheduler(now = new Date()): Promise<string[]> {
   const fired: string[] = [];
   for (const job of jobs) {
     if (inFlight.has(job.id)) continue;
+
+    // 一次性任务：到 oneShotAt 时间点执行一次后由 runScheduledJob 自动禁用。
+    // 已执行过（lastRunAt 有值，无论成败）永久跳过；未到计划时间也跳过。
+    if (job.runOnce) {
+      if (job.lastRunAt) continue;
+      const at = job.oneShotAt ? new Date(job.oneShotAt) : null;
+      if (!at || Number.isNaN(at.getTime())) continue;
+      if (now.getTime() < at.getTime()) continue;
+      fired.push(job.id);
+      void runScheduledJob(job.id).catch((error) => {
+        console.error(`[scheduler] 一次性任务 ${job.name} 执行异常：`, error);
+      });
+      continue;
+    }
+
     const key = minuteKey(now, job.timezone);
     // 同一分钟只跑一次（重启后靠 lastRunAt 去重）
     if (job.lastRunAt && minuteKey(job.lastRunAt, job.timezone) === key) continue;
@@ -318,6 +349,35 @@ export function isValidCronExpr(cronExpr: string): boolean {
     const parsed = parseCronField(f, ranges[i][0], ranges[i][1]);
     return parsed !== null && parsed.size > 0;
   });
+}
+
+/**
+ * 算出下一次执行时间（给界面显示「下次 明天 17:30」）。
+ *
+ * 逐分钟向前试，命中即返回 —— 每天跑的任务最多试 1440 次，开销可以忽略。
+ * 上限 60 天：合法 cron 在 60 天内必有触发（最稀疏的是「2 月 29 日」，
+ * 那种会返回 null，界面显示「暂无」即可）。
+ *
+ * 用本地时间推进游标、用 `localParts` 按任务时区判断，所以服务器时区与任务时区
+ * 不一致时也能算对。中国无夏令时，不存在重复/跳过分钟的问题。
+ */
+export function nextRunAt(
+  cronExpr: string,
+  timeZone: string,
+  from: Date = new Date()
+): Date | null {
+  if (!isValidCronExpr(cronExpr)) return null;
+  const cursor = new Date(from.getTime());
+  cursor.setSeconds(0, 0);
+  cursor.setMinutes(cursor.getMinutes() + 1);
+  const limit = 60 * 24 * 60;
+  for (let i = 0; i < limit; i++) {
+    if (matchCron(cronExpr, localParts(cursor, timeZone))) {
+      return new Date(cursor.getTime());
+    }
+    cursor.setMinutes(cursor.getMinutes() + 1);
+  }
+  return null;
 }
 
 export function stopScheduler(): void {

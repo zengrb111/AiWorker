@@ -1,6 +1,7 @@
 import { Prisma } from "@/generated/prisma";
 import { jsonError, jsonOk, readJson } from "@/lib/http";
 import { ensureUserAgent } from "@/lib/openclaw-user-agent";
+import { ensureDefaultScheduledJobs } from "@/lib/default-scheduled-jobs";
 import { hashPassword } from "@/lib/password";
 import { prisma } from "@/lib/prisma";
 import { createSession } from "@/lib/session";
@@ -95,6 +96,15 @@ export async function POST(request: Request) {
     void refreshWeixinAgentBindings().catch((error) => {
       console.error(`[register] 刷新微信入站分流失败（user=${user.id}）：`, error);
     });
+
+    // 为新账号初始化默认定时任务（每日小红书/公众号/头条号）。幂等：重复注册不会重复种。
+    // 注册即启用——新用户明确完成了扫码注册，期望默认任务开始运行。
+    try {
+      const n = await ensureDefaultScheduledJobs(user.id, true);
+      if (n > 0) console.log(`[register] 已为用户 ${user.id} 初始化 ${n} 条默认定时任务`);
+    } catch (error) {
+      console.error(`[register] 初始化默认定时任务失败（user=${user.id}）：`, error);
+    }
 
     await createSession(user.id);
     return jsonOk({ user });
