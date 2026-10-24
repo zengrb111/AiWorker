@@ -9,6 +9,8 @@ import AnalyticsPanel from "./analytics-panel";
 import AccountsPanel from "./accounts-panel";
 import SettingsPanel from "./settings-panel";
 import ScheduledJobsPanel from "./scheduled-jobs-panel";
+import HuashuVideoPanel from "./huashu-video-panel";
+import HuashuVideoActions from "./huashu-video-actions";
 import ModelPicker, { type ModelOption, type CurrentModel } from "./model-picker";
 import WechatConversation from "./wechat-conversation";
 
@@ -674,6 +676,13 @@ export default function PlatformClient() {
   const [montageVideoFiles, setMontageVideoFiles] = useState<File[]>([]);
   const [remakePanelOpen, setRemakePanelOpen] = useState(false);
   const [genVideoPanelOpen, setGenVideoPanelOpen] = useState(false);
+  /**
+   * 弹窗归属的会话 id。
+   *
+   * 弹窗是「在哪个会话里点的，就只在哪个会话里显示」。不记这个 id 的话，
+   * 切到别的会话时弹窗仍挂在那儿，会把新会话的对话区整块盖住（实测问题）。
+   */
+  const [genVideoPanelFor, setGenVideoPanelFor] = useState<string | null>(null);
   const [genVideoImages, setGenVideoImages] = useState<Array<{ file: File; url: string }>>([]);
   const [genVideoRequirement, setGenVideoRequirement] = useState(DEFAULT_GEN_VIDEO_REQUIREMENT);
   const [referenceVideoUrl, setReferenceVideoUrl] = useState("");
@@ -723,8 +732,6 @@ export default function PlatformClient() {
    * 与「一键生成视频」共用方案面板与出片逻辑，差别只有素材来源：
    * 那边传图片，这边传一篇文章，由服务端画好数据图表再当素材用。
    * ------------------------------------------------------------------- */
-  /** 合并后的一键生成视频：同一面板里用 Tab 二选一（参考图 / 参考文章）。 */
-  const [videoInputTab, setVideoInputTab] = useState<"image" | "article">("image");
   /** 文章模式下可选的参考图（作为画面素材补充）。 */
   const [articleRefImages, setArticleRefImages] = useState<Array<{ file: File; url: string }>>([]);
   /** 文章来源方式：url = 抓链接，document = 上传文档，paste = 粘贴正文。 */
@@ -841,6 +848,28 @@ export default function PlatformClient() {
     setLightboxIndex(null);
   }, [activeContent?.id]);
 
+  /**
+   * 「一键生成视频」弹窗跟着会话走：打开时记住当前会话，切走就关掉。
+   *
+   * 只记 id 还不够 —— 切走的那一帧弹窗仍在 DOM 里会盖住新会话，
+   * 所以渲染处也用 `genVideoPanelFor === activeConversation.id` 兜住。
+   */
+  useEffect(() => {
+    if (!genVideoPanelOpen) {
+      if (genVideoPanelFor) setGenVideoPanelFor(null);
+      return;
+    }
+    if (!activeConversationId) return;
+    if (!genVideoPanelFor) {
+      setGenVideoPanelFor(activeConversationId);
+      return;
+    }
+    if (genVideoPanelFor !== activeConversationId) {
+      setGenVideoPanelOpen(false);
+      setGenVideoPanelFor(null);
+    }
+  }, [genVideoPanelOpen, genVideoPanelFor, activeConversationId]);
+
   // 灯箱键盘导航：← 上一张 / → 下一张 / Esc 关闭（首尾循环）
   useEffect(() => {
     if (lightboxIndex === null) return;
@@ -938,6 +967,20 @@ export default function PlatformClient() {
     // 无论是否为空都重设当前会话：切换登录用户时上一个用户的 activeConversationId 会残留，
     // 不重设会导致 UI 停留在旧账号的会话上（即使列表已换成新用户的）。
     setActiveConversationId(data.conversations[0]?.id ?? null);
+  }
+
+  /**
+   * 只刷新消息、不动当前选中的会话。
+   *
+   * 后台自动改片时要用它把进度消息刷出来；不能直接用 refreshConversations ——
+   * 那个会把 active 重置到第一条，用户正在看的会话会被直接弹走。
+   */
+  async function refreshConversationMessages(keepId: string) {
+    const data = await api<{ conversations: Conversation[] }>("/api/conversations");
+    setConversations(data.conversations);
+    setActiveConversationId((current) =>
+      current && data.conversations.some((item) => item.id === current) ? current : keepId
+    );
   }
 
   async function refreshContent() {
@@ -1222,6 +1265,46 @@ export default function PlatformClient() {
     };
   }, [videoTaskProgress?.token, videoTaskProgress?.terminal, activeConversation?.id]);
 
+  /**
+   * 后台自动改片时，把会话里的进度消息刷出来。
+   *
+   * 只在「这条会话有视频正在被自动修改」时才拉整份会话 —— 平时 6 秒一次的心跳
+   * 只是一个内存判断 + 一次轻查询，不会一直拉消息。
+   * 处理结束的那一轮再拉一次，拿到「已自动出片 vN」这行收尾。
+   */
+  useEffect(() => {
+    const conversationId = activeConversation?.id;
+    if (!conversationId) return;
+    let cancelled = false;
+    let timer: number | null = null;
+    let wasProcessing = false;
+
+    const poll = async () => {
+      try {
+        const state = await api<{ processing: boolean }>(
+          `/api/video-motion/active?conversationId=${encodeURIComponent(conversationId)}`
+        );
+        if (cancelled) return;
+        if (state.processing) {
+          wasProcessing = true;
+          await refreshConversationMessages(conversationId);
+        } else if (wasProcessing) {
+          wasProcessing = false;
+          await refreshConversationMessages(conversationId);
+        }
+      } catch {
+        // 心跳失败不打扰用户，下一轮重试
+      }
+      if (!cancelled) timer = window.setTimeout(poll, 6000);
+    };
+
+    timer = window.setTimeout(poll, 5000);
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [activeConversation?.id]);
+
   // 切换对话、或从其它分区（内容库等）切回「对话」时，定位到最新一条回复的末尾并重置高亮。
   // 注意：对话面板是条件渲染，切走会整块卸载，切回来时滚动位置会归零，所以这里必须补一次贴底。
   useEffect(() => {
@@ -1417,13 +1500,12 @@ export default function PlatformClient() {
   async function sendChatContent(content: string, url?: string) {
     if (!content.trim() || sending) return;
 
-    // 「一键生成视频 / 文章转视频」收敛到同一个面板：只切换 Tab 并打开，不往会话里发消息。
+    // 「一键生成视频 / 文章转视频」现在都打开同一个图生视频面板（参考文章入口已下线）。
     const videoShortcut = content.trim();
     if (videoShortcut === "一键生成视频" || videoShortcut === "文章转视频") {
       // 新一轮生成：清掉上一轮保留的回显与方案，弹窗从干净状态开始。
       setGenVideoPlan(null);
       setVideoRequestEcho(null);
-      setVideoInputTab(videoShortcut === "文章转视频" ? "article" : "image");
       setGenVideoPanelOpen(true);
       return;
     }
@@ -1521,15 +1603,13 @@ export default function PlatformClient() {
               setMontagePanelOpen(true);
             }
             if (content === "一键生成视频") {
-              setVideoInputTab("image");
               setGenVideoPanelOpen(true);
             }
             if (content === "一键复刻爆款视频") {
               setRemakePanelOpen(true);
             }
-            // 「文章转视频」已合并进一键生成视频：输入这个词就打开面板的「参考文章」Tab。
+            // 「文章转视频」入口已下线，同样打开图生视频面板，避免旧口令落到无响应。
             if (content === "文章转视频") {
-              setVideoInputTab("article");
               setGenVideoPanelOpen(true);
             }
             // 方案 C：OpenClaw 可能 spawn 了平台视频 CLI。它回传的 JSON 里带 token，
@@ -3088,6 +3168,8 @@ export default function PlatformClient() {
                                   >
                                     打开视频 / 下载 →
                                   </a>
+                                  {/* 修改入口跟着成片消息走：面板关掉、切走会话、刷新页面后依然在 */}
+                                  <HuashuVideoActions videoUrl={messageVideoUrl} />
                                 </>
                               )}
                             </>
@@ -3452,717 +3534,16 @@ export default function PlatformClient() {
                         <div className="viral-remake-actions"><button type="button" onClick={() => setRemakePanelOpen(false)}>取消</button><button type="button" disabled={sending} onClick={() => void createViralRemake()}>开始制作</button></div>
                       </div>
                     )}
-                    {/* 合并后：同一面板顶部用 Tab 二选一（参考图 / 参考文章） */}
-                    {genVideoPanelOpen && (
-                      <div className="article-source-tabs" role="tablist" style={{ marginBottom: 8 }}>
-                        <button
-                          type="button"
-                          role="tab"
-                          aria-selected={videoInputTab === "image"}
-                          className={videoInputTab === "image" ? "active" : ""}
-                          onClick={() => setVideoInputTab("image")}
-                        >
-                          参考图
-                        </button>
-                        <button
-                          type="button"
-                          role="tab"
-                          aria-selected={videoInputTab === "article"}
-                          className={videoInputTab === "article" ? "active" : ""}
-                          onClick={() => setVideoInputTab("article")}
-                        >
-                          参考文章
-                        </button>
-                      </div>
-                    )}
-                    {genVideoPanelOpen && videoInputTab === "article" && (
-                      <div className="viral-remake-panel article-video-panel">
-                        <div className="viral-remake-title">参考文章</div>
-                        <p>
-                          提交一篇文章（链接 / 文档 / 正文）。系统会先读懂文章、抽取其中的数据并逐条核对出处，
-                          再把数据画成柱状图、折线图、数字卡、时间线等画面，规划好解说脚本后请你确认，
-                          最后生成带解说与背景乐的竖屏短视频。
-                        </p>
-
-                        <div className="article-source-tabs" role="tablist">
-                          <button
-                            type="button"
-                            role="tab"
-                            aria-selected={articleSourceType === "url"}
-                            className={articleSourceType === "url" ? "active" : ""}
-                            onClick={() => setArticleSourceType("url")}
-                          >
-                            文章链接
-                          </button>
-                          <button
-                            type="button"
-                            role="tab"
-                            aria-selected={articleSourceType === "document"}
-                            className={articleSourceType === "document" ? "active" : ""}
-                            onClick={() => setArticleSourceType("document")}
-                          >
-                            上传文档
-                          </button>
-                          <button
-                            type="button"
-                            role="tab"
-                            aria-selected={articleSourceType === "paste"}
-                            className={articleSourceType === "paste" ? "active" : ""}
-                            onClick={() => setArticleSourceType("paste")}
-                          >
-                            粘贴正文
-                          </button>
-                        </div>
-
-                        {articleSourceType === "url" && (
-                          <input
-                            value={articleUrl}
-                            onChange={(event) => setArticleUrl(event.target.value)}
-                            placeholder="粘贴文章链接（http/https）"
-                            type="text"
-                          />
-                        )}
-                        {articleSourceType === "document" && (
-                          <label className="viral-remake-file">
-                            上传文章文档（docx / pdf / txt / md，单个不超过 20MB）
-                            <input
-                              type="file"
-                              accept=".docx,.pdf,.txt,.md,.markdown"
-                              onChange={(event) => setArticleFile(event.target.files?.[0] ?? null)}
-                            />
-                          </label>
-                        )}
-                        {articleSourceType === "paste" && (
-                          <textarea
-                            value={articleText}
-                            onChange={(event) => setArticleText(event.target.value)}
-                            placeholder="把文章正文粘贴到这里（至少 80 字）"
-                            style={{
-                              minHeight: 140,
-                              resize: "vertical",
-                              border: "1px solid var(--line)",
-                              borderRadius: 7,
-                              padding: "8px 10px",
-                              fontSize: 12,
-                              fontFamily: "inherit",
-                              lineHeight: 1.6,
-                            }}
-                          />
-                        )}
-
-                        <div className="viral-remake-summary">
-                          {articleSourceType === "url" && (articleUrl.trim() ? `链接：${articleUrl.trim()}` : "暂未填写链接")}
-                          {articleSourceType === "document" && (articleFile ? `已选择：${articleFile.name}` : "暂未选择文档")}
-                          {articleSourceType === "paste" && (articleText.trim() ? `已输入 ${articleText.trim().length} 字` : "暂未粘贴正文")}
-                        </div>
-
-                        <label className="gen-video-engine">
-                          <span className="gen-video-engine-label">解说语音引擎</span>
-                          <select
-                            value={genVideoTtsProvider}
-                            onChange={(event) => {
-                              const v = event.target.value;
-                              setGenVideoTtsProvider(v === "zhipu" ? "zhipu" : v === "edge" ? "edge" : "qwen");
-                            }}
-                          >
-                            <option value="edge">免费合成音（免费）</option>
-                            <option value="qwen">千问 TTS</option>
-                            <option value="zhipu">智谱 GLM-TTS（中文自然）</option>
-                          </select>
-                        </label>
-
-                        <label className="gen-video-engine">
-                          <span className="gen-video-engine-label">视频风格</span>
-                          <select value={genVideoTheme} onChange={(event) => setGenVideoTheme(event.target.value)}>
-                            <option value="">自动（按图表配色挑选）</option>
-                            <option value="warm-default">温暖治愈</option>
-                            <option value="cool-night">冷调夜色</option>
-                            <option value="clean-light">明亮清新</option>
-                            <option value="film-revive">胶片复古</option>
-                            <option value="acid-graphics">酸性设计</option>
-                            <option value="glitch-art">故障艺术</option>
-                            <option value="collage-zine">拼贴胶带</option>
-                            <option value="swiss-grid">瑞士网格</option>
-                            <option value="mono-ink">单色水墨</option>
-                          </select>
-                          <span className="gen-video-engine-hint">
-                            图表会用同一套配色绘制，所以这里的风格同时决定画面与图表的颜色。
-                          </span>
-                        </label>
-
-                        <label className="viral-remake-file" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                          <input
-                            type="checkbox"
-                            checked={articleAllowSearch}
-                            onChange={(event) => setArticleAllowSearch(event.target.checked)}
-                            style={{ width: "auto" }}
-                          />
-                          数据不够时联网补充（全文最多搜索一次，补充的数据会标注来源链接）
-                        </label>
-
-                        {/* 可选参考图：文章模式也能补充画面素材（位于提示词上方） */}
-                        <label className="viral-remake-file">
-                          参考图（可选，作为画面素材补充）
-                          <input
-                            type="file"
-                            multiple
-                            accept="image/jpeg,image/png,image/webp"
-                            onChange={(event) => {
-                              const picked = Array.from(event.target.files ?? []).map((file) => ({
-                                file,
-                                url: URL.createObjectURL(file),
-                              }));
-                              setArticleRefImages((previous) => [...previous, ...picked]);
-                              event.target.value = "";
-                            }}
-                          />
-                        </label>
-                        {articleRefImages.length > 0 && (
-                          <div className="gen-video-thumbs">
-                            {articleRefImages.map((item, index) => (
-                              <div className="gen-video-thumb" key={item.url}>
-                                <img
-                                  src={item.url}
-                                  alt={item.file.name}
-                                  title={item.file.name}
-                                  onClick={() => setGenVideoPreviewUrl(item.url)}
-                                />
-                                <button
-                                  type="button"
-                                  className="gen-video-thumb-remove"
-                                  onClick={() =>
-                                    setArticleRefImages((previous) => previous.filter((_, i) => i !== index))
-                                  }
-                                  aria-label="移除这张参考图"
-                                >
-                                  ×
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        <label className="viral-remake-file" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
-                          额外创作要求（可选）
-                          <textarea
-                            value={articleRequirement}
-                            onChange={(event) => setArticleRequirement(event.target.value)}
-                            placeholder={"例如：时长 40 秒，重点讲增长那部分\n口播偏理性，不要太煽情"}
-                            style={{
-                              minHeight: 72,
-                              resize: "vertical",
-                              border: "1px solid var(--line)",
-                              borderRadius: 7,
-                              padding: "8px 10px",
-                              fontSize: 12,
-                              fontFamily: "inherit",
-                              lineHeight: 1.6,
-                            }}
-                          />
-                        </label>
-
-                        {/* ---- 效果微调：与「一键生成视频」共用同一份 look 状态 ----
-                            方案一旦生成就把 look 写进分镜，之后改只能重新规划，所以必须放在生成方案之前。 */}
-                        <div className="gen-video-look">
-                          <div className="gen-video-look-title">效果微调（可选）</div>
-                          <div className="gen-video-look-row">
-                            <span className="gen-video-look-label">叠加特效层</span>
-                            <div className="gen-video-look-chips">
-                              {(genVideoPlan?.options.effects ?? DEFAULT_LOOK_EFFECTS).map((opt) => {
-                                const active = genVideoEffects.includes(opt.value);
-                                const full = genVideoEffects.length >= 2 && !active;
-                                return (
-                                  <button
-                                    key={opt.value}
-                                    type="button"
-                                    className={`gen-video-look-chip${active ? " active" : ""}`}
-                                    disabled={full}
-                                    title={full ? "最多叠加 2 层，多了画面会糊" : opt.label}
-                                    aria-pressed={active}
-                                    onClick={() =>
-                                      setGenVideoEffects((prev) =>
-                                        prev.includes(opt.value)
-                                          ? prev.filter((v) => v !== opt.value)
-                                          : prev.length >= 2
-                                            ? [prev[1], opt.value]
-                                            : [...prev, opt.value],
-                                      )
-                                    }
-                                  >
-                                    {opt.label}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
-                          <div className="gen-video-look-row">
-                            <span className="gen-video-look-label">统一运镜</span>
-                            <div className="gen-video-look-chips">
-                              {(genVideoPlan?.options.motions ?? DEFAULT_LOOK_MOTIONS).map((opt) => (
-                                <button
-                                  key={opt.value}
-                                  type="button"
-                                  className={`gen-video-look-chip${genVideoMotion === opt.value ? " active" : ""}`}
-                                  aria-pressed={genVideoMotion === opt.value}
-                                  onClick={() => setGenVideoMotion(opt.value)}
-                                >
-                                  {opt.label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                          <div className="gen-video-look-row">
-                            <span className="gen-video-look-label">字幕样式</span>
-                            <div className="gen-video-look-chips">
-                              {(genVideoPlan?.options.captions ?? DEFAULT_LOOK_CAPTIONS).map((opt) => (
-                                <button
-                                  key={opt.value}
-                                  type="button"
-                                  className={`gen-video-look-chip${genVideoCaptionStyle === opt.value ? " active" : ""}`}
-                                  aria-pressed={genVideoCaptionStyle === opt.value}
-                                  onClick={() => setGenVideoCaptionStyle(opt.value)}
-                                >
-                                  {opt.label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-
-                        {articlePlanning && (
-                          <div className="gen-video-plan-loading">
-                            <span className="video-preparing-dot" />
-                            <span>
-                              正在读懂文章并规划方案：抽取数据 → 核对数据出处 → 按需联网补充 → 绘制图表 →
-                              写解说 → 合成配音 → 排分镜，约需 1~2 分钟…
-                            </span>
-                          </div>
-                        )}
-
-                        <div className="viral-remake-actions">
-                          <button type="button" onClick={() => setGenVideoPanelOpen(false)} disabled={articlePlanning}>
-                            取消
-                          </button>
-                          <button type="button" disabled={articlePlanning || sending} onClick={() => void planArticleVideo()}>
-                            {articlePlanning ? "正在生成方案…" : "生成方案"}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                    {videoPreparingTopic && (
-                      <div className="video-preparing">
-                        <span className="video-preparing-dot" />
-                        <span>正在围绕「{videoPreparingTopic}」收集信息、整理短视频创作要求并挑选关联配图，请稍候…</span>
-                      </div>
-                    )}
-                    {genVideoPanelOpen && videoInputTab === "image" && (
-                      <div className="viral-remake-panel">
-                        <div className="viral-remake-title">一键生成视频（参考图）</div>
-                        <p>上传多张参考图，并在下方统一填写整体创作要求。点击开始生成后，系统会自动配文、合成女声配音与字幕，并调用 Remotion 视频技能渲染画面，全程在当前会话中实时展示。</p>
-                        <label className="viral-remake-file">上传参考图（可多选）<input type="file" multiple accept="image/jpeg,image/png,image/webp" onChange={(event) => setGenVideoImages((previous) => [...previous, ...Array.from(event.target.files ?? []).map((file) => ({ file, url: URL.createObjectURL(file) }))])} /></label>
-                        <div className="gen-video-thumbs">
-                          {genVideoImages.map((item, index) => (
-                            <div className="gen-video-thumb" key={item.url}>
-                              <img src={item.url} alt={item.file.name} title={item.file.name} onClick={() => setGenVideoPreviewUrl(item.url)} />
-                              <button type="button" className="gen-video-thumb-remove" onClick={() => removeGenVideoImage(index)} aria-label="删除这张图">×</button>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="viral-remake-summary">{genVideoImages.length === 0 ? "暂未选择参考图（点击缩略图可看大图）" : `已选择 ${genVideoImages.length} 张参考图：点击缩略图看大图，右上角 × 可删除`}</div>
-                        <label className="viral-remake-file" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>整体创作要求（多行）<textarea value={genVideoRequirement} onChange={(event) => setGenVideoRequirement(event.target.value)} placeholder={"例如：竖版 1080×1920，时长 30 秒左右，轻松治愈口播风\n第一张图做开场封面，配文案「爸，我又想你了」\n第二张图做正文，强调一个温暖细节\n结尾引导关注 + 品牌落版"} style={{ minHeight: 88, resize: "vertical", border: "1px solid var(--line)", borderRadius: 7, padding: "8px 10px", fontSize: 12, fontFamily: "inherit", lineHeight: 1.6 }} /></label>
-                        <label className="gen-video-engine">
-                          <span className="gen-video-engine-label">解说语音引擎</span>
-                          <select
-                            value={genVideoTtsProvider}
-                            onChange={(event) => {
-                              const v = event.target.value;
-                              setGenVideoTtsProvider(v === "zhipu" ? "zhipu" : v === "edge" ? "edge" : "qwen");
-                            }}
-                          >
-                            <option value="edge">免费合成音（免费）</option>
-                            <option value="qwen">千问 TTS（英文更好）</option>
-                            <option value="zhipu">智谱 GLM-TTS（中文自然）</option>
-                          </select>
-                          <span className="gen-video-engine-hint">
-                            {genVideoTtsProvider === "edge"
-                              ? "免费合成音（edge-tts）：不消耗任何云端额度；若不可用自动回退本机语音。"
-                              : genVideoTtsProvider === "zhipu"
-                                ? "中文解说用智谱更自然；若智谱不可用会自动切到千问。"
-                                : "千问 TTS；若不可用会自动切回智谱，保证不断音。"}
-                          </span>
-                        </label>
-                        <label className="gen-video-engine">
-                          <span className="gen-video-engine-label">视频风格</span>
-                          <select value={genVideoTheme} onChange={(event) => setGenVideoTheme(event.target.value)}>
-                            <option value="">自动（按素材色调挑选）</option>
-                            <option value="warm-default">温暖治愈</option>
-                            <option value="cool-night">冷调夜色</option>
-                            <option value="clean-light">明亮清新</option>
-                            <option value="film-revive">胶片复古</option>
-                            <option value="acid-graphics">酸性设计</option>
-                            <option value="glitch-art">故障艺术</option>
-                            <option value="collage-zine">拼贴胶带</option>
-                            <option value="swiss-grid">瑞士网格</option>
-                            <option value="mono-ink">单色水墨</option>
-                          </select>
-                          <span className="gen-video-engine-hint">
-                            {genVideoTheme
-                              ? VIDEO_THEME_HINTS[genVideoTheme] ?? ""
-                              : "自动模式会先识别参考图的色调与情绪，再挑一套最协调的风格；识别不可用时退回温暖治愈。"}
-                          </span>
-                        </label>
-
-                        {/* ---- 效果微调：主题之外的加法与覆盖 ----
-                            设计取舍：主题定基调，这里只开放三个互不冲突的维度 ——
-                            外挂特效层（加法）、统一运镜（覆盖）、字幕样式（ffmpeg 通道）。
-                            不开放配色/字体/spring：那三个是主题的定义本身，拆开会让 9 套主题失去意义。 */}
-                        <div className="gen-video-look">
-                          <div className="gen-video-look-title">效果微调（可选）</div>
-                          <div className="gen-video-look-row">
-                            <span className="gen-video-look-label">叠加特效层</span>
-                            <div className="gen-video-look-chips">
-                              {(genVideoPlan?.options.effects ?? DEFAULT_LOOK_EFFECTS).map((opt) => {
-                                const active = genVideoEffects.includes(opt.value);
-                                const full = genVideoEffects.length >= 2 && !active;
-                                return (
-                                  <button
-                                    key={opt.value}
-                                    type="button"
-                                    className={`gen-video-look-chip${active ? " active" : ""}`}
-                                    disabled={full}
-                                    title={full ? "最多叠加 2 层，多了画面会糊" : opt.label}
-                                    aria-pressed={active}
-                                    onClick={() => setGenVideoEffects((prev) =>
-                                      prev.includes(opt.value)
-                                        ? prev.filter((v) => v !== opt.value)
-                                        : prev.length >= 2
-                                          ? [prev[1], opt.value]
-                                          : [...prev, opt.value],
-                                    )}
-                                  >
-                                    {opt.label}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
-                          <div className="gen-video-look-row">
-                            <span className="gen-video-look-label">画面运镜</span>
-                            <select value={genVideoMotion} onChange={(event) => setGenVideoMotion(event.target.value)}>
-                              {(genVideoPlan?.options.motions ?? DEFAULT_LOOK_MOTIONS).map((opt) => (
-                                <option key={opt.value} value={opt.value}>{opt.label}</option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="gen-video-look-row">
-                            <span className="gen-video-look-label">字幕样式</span>
-                            <select value={genVideoCaptionStyle} onChange={(event) => setGenVideoCaptionStyle(event.target.value)}>
-                              {(genVideoPlan?.options.captions ?? DEFAULT_LOOK_CAPTIONS).map((opt) => (
-                                <option key={opt.value} value={opt.value}>{opt.label}</option>
-                              ))}
-                            </select>
-                          </div>
-                          <span className="gen-video-engine-hint">
-                            特效层与主题自带的取并集（如暖色主题也能叠故障感）；运镜选「跟随分镜」则由 AI 逐镜头挑选。
-                          </span>
-                        </div>
-
-                        {/* ---- 主新闻选择 ----
-                            一条视频只讲一条新闻。联网检索（尤其内置热榜）会带回十几条彼此
-                            不相干的新闻，早期版本把它们全喂给写稿模型，结果一条视频里讲了好几件事。
-                            现在由 prepare 阶段选出主新闻，并在这里让用户核对/改选。 */}
-                        {genVideoNewsItems.length > 0 && (
-                          <div className="gen-video-news-picker">
-                            <div className="gen-video-news-picker-title">
-                              这条视频讲哪条新闻
-                              <span className="gen-video-news-picker-hint">
-                                旁白只会讲选中的这一条，其余仅作背景参考，不会写进文案
-                              </span>
-                            </div>
-                            <div className="gen-video-news-options">
-                              {genVideoNewsItems.map((item, i) => {
-                                const active = i === genVideoPrimaryIndex;
-                                return (
-                                  <label key={`${item.title}-${i}`} className={`gen-video-news-option${active ? " active" : ""}`}>
-                                    <input
-                                      type="radio"
-                                      name="genVideoPrimaryNews"
-                                      checked={active}
-                                      onChange={() => setGenVideoPrimaryIndex(i)}
-                                    />
-                                    <span className="gen-video-news-option-body">
-                                      <span className="gen-video-news-option-title">{item.title}</span>
-                                      {item.snippet && !/^来自\s*\S+\s*热榜/.test(item.snippet) && (
-                                        <span className="gen-video-news-option-snippet">{item.snippet}</span>
-                                      )}
-                                    </span>
-                                    {active && <span className="gen-video-news-option-badge">主新闻</span>}
-                                  </label>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        )}
-
-                        {/* ---- 方案确认区 ----
-                            需求原文：「先理解素材 → 出方案 → 用户选 → 再生成」。
-                            改造前这些全藏在 runVideoPipeline 里，点开始就跑，用户全程看不到方案。 */}
-                        {genVideoPlanning && (
-                          <div className="gen-video-plan-loading">
-                            <span className="video-preparing-dot" />
-                            <span>
-                              正在理解素材并规划方案：识别图片内容 → 挑选风格 → 写旁白 → 合成配音 → DeepSeek 排分镜，约需 1~2 分钟…
-                            </span>
-                          </div>
-                        )}
-
-                        {genVideoPlan && (
-                          <div className="gen-video-plan">
-                            <div className="gen-video-plan-head">
-                              <strong>AI 视频方案</strong>
-                              <span className="gen-video-plan-meta">
-                                {genVideoPlan.summary.scenes.length} 个镜头 · 约 {genVideoPlan.summary.durationSeconds.toFixed(1)} 秒
-                                {genVideoPlan.audioSeconds > 0 ? ` · 配音 ${genVideoPlan.audioSeconds.toFixed(1)} 秒` : " · 无配音"}
-                              </span>
-                            </div>
-
-                            {genVideoPlan.title && (
-                              <div className="gen-video-plan-row">
-                                <span className="gen-video-plan-key">标题</span>
-                                <span className="gen-video-plan-val">{genVideoPlan.title}</span>
-                              </div>
-                            )}
-
-                            <div className="gen-video-plan-row">
-                              <span className="gen-video-plan-key">建议风格</span>
-                              <span className="gen-video-plan-val">
-                                {genVideoPlan.summary.themeLabel}
-                                <span className="gen-video-plan-note">{genVideoPlan.themeReason}</span>
-                              </span>
-                            </div>
-
-                            {(genVideoPlan.newsItems?.length ?? 0) > 0 && (
-                              <div className="gen-video-plan-block">
-                                <div className="gen-video-plan-key">文案依据的新闻</div>
-                                <div className="gen-video-news-list">
-                                  {genVideoPlan.newsItems.map((item, i) => (
-                                    <div key={i} className="gen-video-news-item">
-                                      <span className="gen-video-news-no">{i + 1}</span>
-                                      <span className="gen-video-news-body">
-                                        <span className="gen-video-news-title">{item.title}</span>
-                                        {item.snippet && !/^来自\s*\S+\s*热榜/.test(item.snippet) && (
-                                          <span className="gen-video-news-snippet">{item.snippet}</span>
-                                        )}
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                                <span className="gen-video-engine-hint">
-                                  旁白围绕上面这些新闻事实撰写，并要求不编造未出现的人物、数字与结论。
-                                </span>
-                              </div>
-                            )}
-
-                            {(genVideoPlan.insights?.length ?? 0) > 0 && (
-                              <div className="gen-video-plan-block">
-                                <div className="gen-video-plan-key">AI 理解到的素材</div>
-                                <div className="gen-video-insight-list">
-                                  {genVideoPlan.insights.map((item) => (
-                                    <div key={item.index} className="gen-video-insight">
-                                      <span className="gen-video-insight-no">{item.index}</span>
-                                      {item.dominantColor && (
-                                        <span className="gen-video-insight-swatch" style={{ background: item.dominantColor }} aria-hidden="true" />
-                                      )}
-                                      <span className="gen-video-insight-text">
-                                        {item.caption}
-                                        {item.mood && <em>·{item.mood}</em>}
-                                      </span>
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-
-                            {genVideoPlan.article && (
-                              <div className="gen-video-plan-block">
-                                <div className="gen-video-plan-key">
-                                  文章转视频
-                                  <span className="article-source-badge">
-                                    {genVideoPlan.article.sourceType === "url"
-                                      ? "链接"
-                                      : genVideoPlan.article.sourceType === "document"
-                                        ? "文档"
-                                        : "粘贴"}
-                                    · {genVideoPlan.article.sourceLabel}
-                                  </span>
-                                  {genVideoPlan.article.sourceUrl && (
-                                    <a
-                                      className="article-source-link"
-                                      href={genVideoPlan.article.sourceUrl}
-                                      target="_blank"
-                                      rel="noreferrer noopener"
-                                    >
-                                      查看原文
-                                    </a>
-                                  )}
-                                </div>
-
-                                {genVideoPlan.article.summary && (
-                                  <p className="article-plan-summary">{genVideoPlan.article.summary}</p>
-                                )}
-
-                                {(genVideoPlan.article.keyPoints?.length ?? 0) > 0 && (
-                                  <div className="article-key-points">
-                                    {genVideoPlan.article.keyPoints.map((point, index) => (
-                                      <div key={index} className="article-key-point">
-                                        <span>{index + 1}</span>
-                                        {point}
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-
-                                <div className="gen-video-plan-key" style={{ marginTop: 10 }}>
-                                  图表清单（{genVideoPlan.article.charts?.length ?? 0} 张）
-                                </div>
-                                {(genVideoPlan.article.charts?.length ?? 0) === 0 ? (
-                                  <p className="article-notice">
-                                    文章里没有可用的数据，本次不生成图表，画面以字幕与原文配图为主。
-                                  </p>
-                                ) : (
-                                  <div className="article-chart-list">
-                                    {genVideoPlan.article.charts.map((chart, index) => (
-                                      <div key={chart.id} className="article-chart-item">
-                                        <img
-                                          className="article-chart-thumb"
-                                          src={chart.webPath}
-                                          alt={`${chart.kindLabel}：${chart.title}`}
-                                          onClick={() => setGenVideoPreviewUrl(chart.webPath)}
-                                        />
-                                        <div className="article-chart-body">
-                                          <div className="article-chart-head">
-                                            <span className="article-chart-index">{index + 1}</span>
-                                            <span className="article-chart-kind">{chart.kindLabel}</span>
-                                            <strong>{chart.title}</strong>
-                                          </div>
-                                          {chart.dataSummary && (
-                                            <div className="article-chart-data">{chart.dataSummary}</div>
-                                          )}
-                                          <div
-                                            className={`article-chart-verify${chart.downgraded ? " warn" : chart.verified ? " ok" : ""}`}
-                                          >
-                                            {chart.downgraded
-                                              ? `数据无法溯源，已降级为不含数值的图卡${chart.downgradeReason ? `（${chart.downgradeReason}）` : ""}`
-                                              : chart.verified
-                                                ? "画面上的每个数字都已在原文里核对过"
-                                                : "这张图不含具体数值"}
-                                          </div>
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-
-                                {(genVideoPlan.article.notices?.length ?? 0) > 0 && (
-                                  <div className="article-notice-list">
-                                    {genVideoPlan.article.notices.map((notice, index) => (
-                                      <p key={index} className="article-notice">
-                                        {notice}
-                                      </p>
-                                    ))}
-                                  </div>
-                                )}
-
-                                <span className="gen-video-engine-hint">
-                                  图表会作为画面素材进入分镜。带数值的图表都经过「原文逐字核对」这道程序闸门，
-                                  对不上的数字不会出现在画面上。
-                                </span>
-                              </div>
-                            )}
-
-                            <div className="gen-video-plan-block">
-                              <div className="gen-video-plan-key">镜头安排</div>
-                              <div className="gen-video-scene-list">
-                                {genVideoPlan.summary.scenes.map((scene, i) => (
-                                  <div key={scene.id} className="gen-video-scene">
-                                    <span className="gen-video-scene-no">{i + 1}</span>
-                                    <span className="gen-video-scene-time">{scene.startSeconds.toFixed(1)}–{scene.outSeconds.toFixed(1)}s</span>
-                                    <span className="gen-video-scene-body">
-                                      {scene.imageIndexes.length > 0 && (
-                                        <span className="gen-video-scene-imgs">图 {scene.imageIndexes.join("、")}</span>
-                                      )}
-                                      <span className="gen-video-scene-motion">{scene.motion}</span>
-                                      {scene.overlays.filter((o) => o.text).map((o, k) => (
-                                        <span key={k} className="gen-video-scene-overlay">{o.text}</span>
-                                      ))}
-                                      {scene.imageNotes.length > 0 && (
-                                        <span className="gen-video-scene-note">{scene.imageNotes.join("；")}</span>
-                                      )}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-
-                            {genVideoPlan.narration && (
-                              <details className="gen-video-plan-narration" open>
-                                <summary>旁白文案（{genVideoPlan.summary.beatCount} 句）</summary>
-                                <p>{genVideoPlan.narration}</p>
-                              </details>
-                            )}
-
-                            <div className="gen-video-plan-warnings">
-                              {/* 版本自检：DSH 换了版本时必须主动说，否则受限 profile
-                                  的插件 id 可能已对不上而静默失效。 */}
-                              {genVideoPlan.diagnostics.dshVersionNote && (
-                                <span className="gen-video-plan-warn">
-                                  {genVideoPlan.diagnostics.dshVersionNote}
-                                  {genVideoPlan.diagnostics.dshVersion
-                                    ? `（当前：${genVideoPlan.diagnostics.dshVersion}）`
-                                    : ""}
-                                </span>
-                              )}
-                              {genVideoPlan.summary.fallback && (
-                                <span className="gen-video-plan-warn">
-                                  DeepSeek 分镜不可用，这份方案用的是固定节奏兜底（不影响出片）。
-                                </span>
-                              )}
-                              {genVideoPlan.diagnostics.visionTotal > 0 && genVideoPlan.diagnostics.visionRecognized === 0 && (
-                                <span className="gen-video-plan-warn">
-                                  未配置识图模型，AI 没能理解素材内容，方案仅按图片顺序安排。
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        )}
-
-                        <div className="viral-remake-actions">
-                          <button type="button" onClick={() => { setGenVideoPanelOpen(false); setGenVideoPreviewUrl(null); setGenVideoPlan(null); }}>取消</button>
-                          {!genVideoPlan ? (
-                            <button
-                              type="button"
-                              disabled={!genVideoImages.length || genVideoPlanning || sending}
-                              onClick={() => void planGenVideo()}
-                            >
-                              {genVideoPlanning ? "正在生成方案…" : "生成方案"}
-                            </button>
-                          ) : (
-                            <>
-                              <button
-                                type="button"
-                                disabled={genVideoPlanning || sending}
-                                onClick={() => { setGenVideoPlan(null); setGenVideoEffects([]); }}
-                                title="丢弃当前方案，回到上传素材重新开始"
-                              >
-                                重新规划
-                              </button>
-                              <button type="button" disabled={sending} onClick={() => void createGenVideo()}>
-                                {sending ? "生成中…" : "确认并生成"}
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </div>
+                    {genVideoPanelOpen && activeConversation && genVideoPanelFor === activeConversation.id && (
+                      <HuashuVideoPanel
+                        conversationId={activeConversation.id}
+                        defaultRequirement={DEFAULT_GEN_VIDEO_REQUIREMENT}
+                        onClose={() => setGenVideoPanelOpen(false)}
+                        onSaved={async () => {
+                          await refreshContent();
+                          await refreshConversations();
+                        }}
+                      />
                     )}
                     {genVideoPreviewUrl && (
                       <div className="gen-video-lightbox" onClick={() => setGenVideoPreviewUrl(null)}>

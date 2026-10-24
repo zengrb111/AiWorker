@@ -21,6 +21,8 @@ export async function register() {
   const url = `${base}/api/scheduler/tick`;
   // 每日自动采集（到点后每个有授权账号的用户跑一次全渠道同步）
   const collectUrl = `${base}/api/collectors/tick`;
+  // Studio 评论自动接单：扫到新评论就交给 DSH 改片并自动重出片
+  const motionUrl = `${base}/api/video-motion/tick`;
 
   const post = (target: string, label: string) => {
     // 每轮现读 process.env：用户在「系统配置」里重设令牌后，setAgentToken 会同步更新进程内环境变量，
@@ -39,6 +41,7 @@ export async function register() {
   const tick = () => {
     post(url, "scheduler");
     post(collectUrl, "collectors");
+    post(motionUrl, "motion-inbox");
   };
 
   // 重启后自愈微信通道：网关重启会打断到微信服务端的长连接，插件也可能清掉历史 bot 凭据，

@@ -6894,3 +6894,53 @@ a.pub-row-title:hover {
   font-size: 12px;
   color: var(--muted-2);
 }
+
+/* 成片消息上的修改入口（Studio 闭环） */
+.huashu-actions {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
+.huashu-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.huashu-action-btn {
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.huashu-action-btn:hover:not(:disabled) {
+  border-color: var(--brand, #2f6bff);
+  color: var(--brand, #2f6bff);
+}
+
+.huashu-action-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.huashu-actions-lines {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted-2);
+  white-space: pre-wrap;
+}
+
+.huashu-actions-note {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted-2);
+}

@@ -19,6 +19,7 @@ model User {
   contentItems   ContentItem[]
   openClawTasks  OpenClawTask[]
   videoPlans     VideoPlan[]
+  videoMotionProjects VideoMotionProject[]
   knowledgeBases KnowledgeBase[]
   platformAccounts       PlatformAccount[]
   platformSiteMetrics    PlatformSiteMetric[]
@@ -197,6 +198,39 @@ model VideoPlan {
   draftJson      String
   /// 落库时的素材绝对路径，JSON 数组
   materialsJson  String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([conversationId])
+}
+
+/// 图生视频（huashu-motion 链路）的一支片子 = 一个项目目录 + 可反复修改的 index.html。
+/// 与 VideoPlan 的区别：那份是平台自己编排的 Remotion 分镜方案；这份是交给 DSH 里的
+/// huashu-motion 技能，用产品网站的真实素材写 HTML+GSAP 片子，用户在 Studio 里点画面改。
+model VideoMotionProject {
+  id             String   @id @default(cuid())
+  /// 与项目目录同名：public/uploads/huashu/<token>
+  token          String   @unique
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationId String?
+  /// PRODUCT_SITE（以产品网站为主）| IMAGES（只有参考图）
+  source         String   @default("PRODUCT_SITE")
+  siteUrl        String?
+  /// 用户填写的「整体创作需求」，作为 huashu 的产品名称输入
+  productName    String
+  /// 项目根目录（绝对路径）
+  projectDir     String
+  /// Studio 监听端口；未启动为 null
+  studioPort     Int?
+  /// 最近一次成片（对外 URL）
+  videoUrl       String?
+  /// 版本记录 JSON：[{ version, videoUrl, duration, createdAt, note }]
+  versionsJson   String   @default("[]")
+  /// BUILDING（首次出片中）| READY | FAILED
+  status         String   @default("BUILDING")
+  error          String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
