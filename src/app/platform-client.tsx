@@ -9,7 +9,7 @@ import AnalyticsPanel from "./analytics-panel";
 import AccountsPanel from "./accounts-panel";
 import SettingsPanel from "./settings-panel";
 import ScheduledJobsPanel from "./scheduled-jobs-panel";
-import HuashuVideoPanel from "./huashu-video-panel";
+import HuashuVideoPanel, { useHuashuVideoPanel } from "./huashu-video-panel";
 import HuashuVideoActions from "./huashu-video-actions";
 import ModelPicker, { type ModelOption, type CurrentModel } from "./model-picker";
 import WechatConversation from "./wechat-conversation";
@@ -242,7 +242,10 @@ const contentFilterOptions: Array<{ key: ContentFilterKey; label: string }> = [
 
 /** 把一条内容归到某一类型：有视频优先算视频，再看 category 文案。 */
 function contentKindOf(item: ContentItem): ContentKind {
-  if (item.videoUrl || item.category === "视频") return "video";
+  // 判「视频」只看有没有成片文件。
+  // 之前把 `category === "视频"` 也算视频：agent 跑文字任务时经常自己把分类写成「视频」，
+  // 结果内容库里「视频」下面全是没视频的图文（实测两条）。
+  if (item.videoUrl) return "video";
   const category = item.category ?? "";
   if (category.includes("小红书")) return "xhs";
   if (category.includes("公众号") || category.includes("微信")) return "wechat";
@@ -317,6 +320,14 @@ function parseInlineImages(value: unknown): string[] {
 
 function videoUrlFromMessage(content: string): string | null {
   return content.match(/\/videos\/[A-Za-z0-9._-]+\.mp4\b/)?.[0] ?? null;
+}
+
+/**
+ * 从成片 URL 里取 huashu 项目 token（`/videos/huashu-<token>-vN.mp4`）。
+ * 不是 huashu 出的片子返回 null —— 那种没有 Studio 可开。
+ */
+function huashuTokenOf(videoUrl?: string | null): string | null {
+  return /\/videos\/huashu-([A-Za-z0-9-]+)-v\d+\.mp4/.exec(videoUrl || "")?.[1] ?? null;
 }
 
 /** 把任意图片 blob 转成 PNG（剪贴板写图片基本只接受 image/png）。 */
@@ -683,6 +694,20 @@ export default function PlatformClient() {
    * 切到别的会话时弹窗仍挂在那儿，会把新会话的对话区整块盖住（实测问题）。
    */
   const [genVideoPanelFor, setGenVideoPanelFor] = useState<string | null>(null);
+  /**
+   * 「一键生成视频」面板的状态与动作钩子。
+   *
+   * 必须在组件顶层调用（platform-client 常驻不卸载）：面板本身内联在对话输入区，
+   * 切模块/切会话时它从 DOM 消失，但状态与 SSE 生成流都活在这个钩子里——
+   * 切回来原样继续，不再打回初始状态（实测过的老毛病）。
+   */
+  const huashuPanel = useHuashuVideoPanel({
+    getConversationId: () => genVideoPanelFor,
+    onSaved: async () => {
+      await refreshContent();
+      await refreshConversations();
+    }
+  });
   const [genVideoImages, setGenVideoImages] = useState<Array<{ file: File; url: string }>>([]);
   const [genVideoRequirement, setGenVideoRequirement] = useState(DEFAULT_GEN_VIDEO_REQUIREMENT);
   const [referenceVideoUrl, setReferenceVideoUrl] = useState("");
@@ -803,6 +828,8 @@ export default function PlatformClient() {
   const [contentSaving, setContentSaving] = useState(false);
   const [publishingContent, setPublishingContent] = useState(false);
   const [publishingHealing, setPublishingHealing] = useState(false);
+  /** 内容详情页「去 Studio 修改」的启动中状态（huashu 成片才有） */
+  const [studioOpening, setStudioOpening] = useState(false);
   const [publishingFrontier, setPublishingFrontier] = useState(false);
   const [regeneratingImage, setRegeneratingImage] = useState<string | null>(null);
   const [wechatBinding, setWechatBinding] = useState<WechatBinding | null>(null);
@@ -849,24 +876,66 @@ export default function PlatformClient() {
   }, [activeContent?.id]);
 
   /**
-   * 「一键生成视频」弹窗跟着会话走：打开时记住当前会话，切走就关掉。
+   * 详情页快照与内容列表保持同步。
    *
-   * 只记 id 还不够 —— 切走的那一帧弹窗仍在 DOM 里会盖住新会话，
-   * 所以渲染处也用 `genVideoPanelFor === activeConversation.id` 兜住。
+   * Studio 改片由后台 worker 完成：跑完只回写数据库里的 ContentItem（videoUrl /
+   * coverImageUrl 按 huashu token 更新）。详情页里的 activeContent 是打开那一刻的
+   * 快照对象，列表刷新后它不会自己变——不在这里同步的话，详情页的视频/封面
+   * 永远停在旧版本（实测问题）。
+   */
+  useEffect(() => {
+    if (!activeContent) return;
+    const latest = contentItems.find((item) => item.id === activeContent.id);
+    if (!latest) return;
+    setActiveContent((current) => {
+      if (!current) return current;
+      const changed =
+        latest.videoUrl !== current.videoUrl ||
+        latest.coverImageUrl !== current.coverImageUrl ||
+        latest.title !== current.title ||
+        latest.body !== current.body ||
+        latest.inlineImagesJson !== current.inlineImagesJson;
+      // 无变化时返回原引用，避免无意义的重渲染（也让本 effect 不再触发）。
+      return changed ? { ...current, ...latest } : current;
+    });
+  }, [contentItems, activeContent]);
+
+  /**
+   * huashu 视频详情页开着时轮询内容列表（12 秒）。
+   *
+   * Studio 改片在服务端跑完不会有任何推送进详情页；没有这一步，上面的同步
+   * effect 只有在别处恰好触发 refreshContent 时才会拿到新版本。
+   * 标签页切到后台时暂停，省请求。
+   */
+  const detailPollBusyRef = useRef(false);
+  useEffect(() => {
+    if (section !== "library" || !huashuTokenOf(activeContent?.videoUrl)) return;
+    const timer = setInterval(() => {
+      if (document.hidden || detailPollBusyRef.current) return;
+      detailPollBusyRef.current = true;
+      void refreshContent()
+        .catch(() => undefined)
+        .finally(() => {
+          detailPollBusyRef.current = false;
+        });
+    }, 12000);
+    return () => clearInterval(timer);
+  }, [section, activeContent?.videoUrl]);
+
+  /**
+   * 「一键生成视频」弹窗持久化：面板挂在组件根层级（不受 section 切换影响），
+   * 这里只负责记「面板属于哪个会话 / 面板关了要清归属」。
+   *
+   * 关键点：生成中（SSE 进行时）切到其他模块甚至其他会话，面板**不卸载**，
+   * 否则组件卸载会 abort 掉 SSE，用户回来就看到弹窗被打回初始状态（实测问题）。
    */
   useEffect(() => {
     if (!genVideoPanelOpen) {
       if (genVideoPanelFor) setGenVideoPanelFor(null);
       return;
     }
-    if (!activeConversationId) return;
-    if (!genVideoPanelFor) {
+    if (!genVideoPanelFor && activeConversationId) {
       setGenVideoPanelFor(activeConversationId);
-      return;
-    }
-    if (genVideoPanelFor !== activeConversationId) {
-      setGenVideoPanelOpen(false);
-      setGenVideoPanelFor(null);
     }
   }, [genVideoPanelOpen, genVideoPanelFor, activeConversationId]);
 
@@ -987,6 +1056,38 @@ export default function PlatformClient() {
     const data = await api<{ contentItems: ContentItem[] }>("/api/content");
     setContentItems(data.contentItems);
     return data.contentItems;
+  }
+
+  /**
+   * 从会话里的成片消息跳到内容库那一条。
+   *
+   * 成片消息只带视频 URL（`/videos/huashu-<token>-vN.mp4`），不带内容条目 id，
+   * 所以按「同一条视频」匹配：先比 URL，再比 huashu token（改片出新版后消息与库里的
+   * 版本号可能差一版）。本地列表可能是登录时拉的旧数据，找不到就现拉一次。
+   */
+  async function openContentFromVideo(videoUrl: string) {
+    const token = huashuTokenOf(videoUrl);
+    const matches = (item: ContentItem) =>
+      item.videoUrl === videoUrl || (!!token && huashuTokenOf(item.videoUrl) === token);
+
+    let item = contentItems.find(matches) ?? null;
+    if (!item) {
+      try {
+        const items = await refreshContent();
+        item = items.find(matches) ?? null;
+      } catch {
+        item = null;
+      }
+    }
+
+    setSection("library");
+    setContentFilter("all");
+    if (item) {
+      setActiveContent(item);
+    } else {
+      setActiveContent(null);
+      showCopyHint("内容库里暂时没找到这条视频，稍等一下再试（刚出片时可能还在入库）。");
+    }
   }
 
   useEffect(() => {
@@ -1506,6 +1607,8 @@ export default function PlatformClient() {
       // 新一轮生成：清掉上一轮保留的回显与方案，弹窗从干净状态开始。
       setGenVideoPlan(null);
       setVideoRequestEcho(null);
+      huashuPanel.reset(DEFAULT_GEN_VIDEO_REQUIREMENT);
+      setGenVideoPanelFor(activeConversationId);
       setGenVideoPanelOpen(true);
       return;
     }
@@ -1603,6 +1706,8 @@ export default function PlatformClient() {
               setMontagePanelOpen(true);
             }
             if (content === "一键生成视频") {
+              huashuPanel.reset(DEFAULT_GEN_VIDEO_REQUIREMENT);
+              setGenVideoPanelFor(activeConversationId);
               setGenVideoPanelOpen(true);
             }
             if (content === "一键复刻爆款视频") {
@@ -1610,6 +1715,8 @@ export default function PlatformClient() {
             }
             // 「文章转视频」入口已下线，同样打开图生视频面板，避免旧口令落到无响应。
             if (content === "文章转视频") {
+              huashuPanel.reset(DEFAULT_GEN_VIDEO_REQUIREMENT);
+              setGenVideoPanelFor(activeConversationId);
               setGenVideoPanelOpen(true);
             }
             // 方案 C：OpenClaw 可能 spawn 了平台视频 CLI。它回传的 JSON 里带 token，
@@ -2245,6 +2352,11 @@ export default function PlatformClient() {
       setGenVideoRequirement(prepared.requirement ?? "");
       setGenVideoNewsItems(prepared.newsItems ?? []);
       setGenVideoPrimaryIndex(0);
+      // 面板状态现在常驻在 huashuPanel 钩子里：热点流程备好的需求/配图直接灌进去
+      // （配图带的是现成 objectURL，走 setImagesFromFiles，不再让面板从空表单开始）。
+      huashuPanel.reset(prepared.requirement ?? "");
+      huashuPanel.setImagesFromFiles(files);
+      setGenVideoPanelFor(conversationId);
       setGenVideoPanelOpen(true);
       if (prepared.degraded) {
         // 降级模式：没有联网资讯与新闻配图，只有本地整理出的创作要求。
@@ -2800,6 +2912,30 @@ export default function PlatformClient() {
     }
   }
 
+  /**
+   * 内容详情页的「去 Studio 修改」：只对 huashu 成片可用。
+   *
+   * 内容库里存的视频 URL 带项目 token（`/videos/huashu-<token>-vN.mp4`），
+   * 所以这里不需要额外的关联字段；改了之后平台会自动出新版并回写本条内容。
+   */
+  async function openStudioForContent() {
+    const token = huashuTokenOf(activeContent?.videoUrl);
+    if (!token || studioOpening) return;
+    setStudioOpening(true);
+    setCopiedButton(null);
+    setCopyHint("");
+    try {
+      const data = await api<{ url?: string }>(`/api/video-motion/${token}/studio`, { method: "POST" }, 60000);
+      if (!data?.url) throw new Error("Studio 未返回地址。");
+      window.open(data.url, "_blank", "noopener,noreferrer");
+      showCopyHint("Studio 已打开：点画面写评论，提交后会自动改片并出新版。");
+    } catch (error) {
+      showCopyHint(error instanceof Error ? error.message : "Studio 启动失败。");
+    } finally {
+      setStudioOpening(false);
+    }
+  }
+
   /** 把当前这篇图文推送到 AI员工官网「AI最前沿」频道（aiworker.aimemory.cafe/frontier.html）。 */
   async function publishToFrontier() {
     if (!activeContent || publishingFrontier) return;
@@ -3169,7 +3305,10 @@ export default function PlatformClient() {
                                     打开视频 / 下载 →
                                   </a>
                                   {/* 修改入口跟着成片消息走：面板关掉、切走会话、刷新页面后依然在 */}
-                                  <HuashuVideoActions videoUrl={messageVideoUrl} />
+                                  <HuashuVideoActions
+                                    videoUrl={messageVideoUrl}
+                                    onOpenContent={(url) => void openContentFromVideo(url)}
+                                  />
                                 </>
                               )}
                             </>
@@ -3534,15 +3673,12 @@ export default function PlatformClient() {
                         <div className="viral-remake-actions"><button type="button" onClick={() => setRemakePanelOpen(false)}>取消</button><button type="button" disabled={sending} onClick={() => void createViralRemake()}>开始制作</button></div>
                       </div>
                     )}
+                    {/* 「一键生成视频」面板内联在发起会话里；状态在 huashuPanel 钩子（常驻），
+                        切模块/切会话只是视觉隐藏，回来后表单、进度、成片原样还在。 */}
                     {genVideoPanelOpen && activeConversation && genVideoPanelFor === activeConversation.id && (
                       <HuashuVideoPanel
-                        conversationId={activeConversation.id}
-                        defaultRequirement={DEFAULT_GEN_VIDEO_REQUIREMENT}
+                        panel={huashuPanel}
                         onClose={() => setGenVideoPanelOpen(false)}
-                        onSaved={async () => {
-                          await refreshContent();
-                          await refreshConversations();
-                        }}
                       />
                     )}
                     {genVideoPreviewUrl && (
@@ -3692,10 +3828,24 @@ export default function PlatformClient() {
                     className="publish-site-button publish-healing-button"
                     disabled={publishingHealing}
                     onClick={() => void publishToHealing()}
-                    title="推送到 AI回忆录官网「心灵驿站」频道（aimemory.cafe/healing.html），需先在「平台授权管理」配置官网 + 心灵驿站令牌"
+                    title={
+                      activeContent.videoUrl
+                        ? "把这条视频推送到 AI回忆录官网「心灵驿站」频道（会先上传成片与封面帧），改完可再推一次覆盖同一条"
+                        : "推送到 AI回忆录官网「心灵驿站」频道（aimemory.cafe/healing.html），需先在「平台授权管理」配置官网 + 心灵驿站令牌"
+                    }
                   >
-                    {publishingHealing ? "推送中..." : "推送心灵驿站"}
+                    {publishingHealing ? (activeContent.videoUrl ? "上传中..." : "推送中...") : "推送心灵驿站"}
                   </button>
+                  {huashuTokenOf(activeContent.videoUrl) && (
+                    <button
+                      className="publish-site-button"
+                      disabled={studioOpening}
+                      onClick={() => void openStudioForContent()}
+                      title="在 Studio 里点画面提修改，AI 自动改片并出新版；改完可再「推送心灵驿站」覆盖线上同一条"
+                    >
+                      {studioOpening ? "启动中..." : "去 Studio 修改"}
+                    </button>
+                  )}
                   <button
                     className="publish-site-button publish-frontier-button"
                     disabled={publishingFrontier}
@@ -3716,7 +3866,7 @@ export default function PlatformClient() {
               {activeContent.videoUrl ? (
                 /* 视频内容：居中放大展示 */
                 <div className="detail-video-block">
-                  <video controls src={activeContent.videoUrl} className="detail-video-player" />
+                  <video key={activeContent.videoUrl} controls src={activeContent.videoUrl} className="detail-video-player" />
                 </div>
               ) : (
                 <>
@@ -3838,7 +3988,18 @@ export default function PlatformClient() {
                     className="content-card"
                     onClick={() => setActiveContent(item)}
                   >
-                    <img src={item.coverImageUrl ?? fallbackImages[index % fallbackImages.length]} alt="内容封面" loading="lazy" />
+                    {item.videoUrl && !item.coverImageUrl ? (
+                      // 老视频没有封面图：直接用 <video> 的首帧当缩略图（preload=metadata，不下载整片）
+                      <div className="content-card-video">
+                        <video src={item.videoUrl} preload="metadata" muted playsInline />
+                        <span className="content-card-play" aria-hidden="true">▶</span>
+                      </div>
+                    ) : (
+                      <div className="content-card-cover">
+                        <img src={item.coverImageUrl ?? fallbackImages[index % fallbackImages.length]} alt="内容封面" loading="lazy" />
+                        {item.videoUrl && <span className="content-card-play" aria-hidden="true">▶</span>}
+                      </div>
+                    )}
                     <div className="content-card-head">
                       <span className={`category-tag ${kindMeta.tagClass}`}>{kindMeta.label}</span>
                       <span className="content-date">{formatDate(item.createdAt)}</span>

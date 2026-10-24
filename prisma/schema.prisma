@@ -96,6 +96,12 @@ model ScheduledJob {
   timezone   String    @default("Asia/Shanghai")
   /// 到点在「该用户专属会话」里执行的指令（原网关任务 payload.message）
   prompt     String
+  /// TEXT | VIDEO。VIDEO 不经 agent，直接走 huashu-motion 出片并把成片写进内容库
+  kind       String    @default("TEXT")
+  /// 视频任务：产品网站（与参考图至少填一个）
+  videoSiteUrl String?
+  /// 视频任务：参考图 URL 数组（JSON），支持 /uploads/... 与外部 URL
+  videoImagesJson String?
   /// 迁移溯源：原网关任务 id（可空）
   gatewayJobId String? @unique
   lastRunAt  DateTime?
@@ -106,9 +112,31 @@ model ScheduledJob {
   runCount   Int       @default(0)
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
+  runs       ScheduledJobRun[]
 
   @@index([userId])
   @@index([enabled])
+}
+
+/// 每次执行的记录。用于任务卡片里展开「运行记录」（只保留最近若干条）。
+model ScheduledJobRun {
+  id         String   @id @default(cuid())
+  jobId      String
+  job        ScheduledJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  userId     String
+  /// RUNNING | SUCCEEDED | FAILED
+  status     String   @default("RUNNING")
+  /// SCHEDULE | MANUAL —— 区分定时触发与手动「立即执行」
+  trigger    String   @default("SCHEDULE")
+  startedAt  DateTime @default(now())
+  finishedAt DateTime?
+  /// 耗时（毫秒），结束时回填
+  durationMs Int?
+  result     String?
+  error      String?
+
+  @@index([jobId, startedAt])
+  @@index([userId])
 }
 
 model WechatBinding {
@@ -230,6 +258,9 @@ model VideoMotionProject {
   versionsJson   String   @default("[]")
   /// BUILDING（首次出片中）| READY | FAILED
   status         String   @default("BUILDING")
+  /// Studio 改片过程是否写进会话。手动出片的会话里不展示（用户只要成片，不要刷屏）；
+  /// 定时视频任务需要看到「这条初稿改了什么」，置 true。
+  progressInChat Boolean  @default(false)
   error          String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt

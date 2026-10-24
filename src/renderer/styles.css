@@ -6074,6 +6074,12 @@ a.pub-row-title:hover {
   max-width: 1060px;
   margin: 0 auto;
   padding: 26px 24px 80px;
+  /* 外层 .workspace 是固定高度 + overflow:hidden，面板必须自己滚，
+     否则任务一多，最后一条会被裁掉（实测）。 */
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .sj-head {
@@ -6943,4 +6949,212 @@ a.pub-row-title:hover {
   font-size: 12px;
   line-height: 1.6;
   color: var(--muted-2);
+}
+
+/* 定时任务：参考图上传与缩略图回显 */
+.sj-image-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.sj-image-thumb {
+  position: relative;
+  width: 84px;
+  height: 56px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel-soft);
+}
+
+.sj-image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.sj-image-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 13px;
+  line-height: 16px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.sj-image-remove:hover {
+  background: rgba(0, 0, 0, 0.75);
+}
+
+.sj-image-add {
+  width: 84px;
+  height: 56px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.sj-image-add:hover:not(:disabled) {
+  border-color: var(--brand, #2f6bff);
+  color: var(--brand, #2f6bff);
+}
+
+.sj-image-add:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 定时任务：运行记录 */
+.sj-history {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-soft, rgba(0, 0, 0, 0.02));
+}
+
+.sj-history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.sj-history-head strong {
+  font-size: 13px;
+}
+
+.sj-history-head span {
+  font-size: 12px;
+  color: var(--muted-2);
+}
+
+.sj-history-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted-2);
+}
+
+.sj-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.sj-history-item {
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: var(--card, #fff);
+  border: 1px solid var(--line);
+}
+
+.sj-history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.sj-history-item.ok .sj-dot { background: #1f9d55; }
+.sj-history-item.bad .sj-dot { background: #d64545; }
+.sj-history-item.wait .sj-dot { background: #d9a423; }
+
+.sj-history-time {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2, inherit);
+}
+
+.sj-history-tag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--muted-2);
+}
+
+.sj-history-status {
+  font-weight: 600;
+}
+
+.sj-history-item.ok .sj-history-status { color: #1f9d55; }
+.sj-history-item.bad .sj-history-status { color: #d64545; }
+.sj-history-item.wait .sj-history-status { color: #b8860b; }
+
+.sj-history-cost {
+  margin-left: auto;
+  color: var(--muted-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.sj-history-detail {
+  margin-top: 6px;
+}
+
+.sj-history-detail summary {
+  font-size: 12px;
+  color: var(--muted-2);
+  cursor: pointer;
+}
+
+.sj-history-detail pre {
+  margin: 6px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 内容库：视频条目的封面（抽帧图 / 视频首帧）与播放角标 */
+.content-card-video,
+.content-card-cover {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  background: #000;
+  flex-shrink: 0;
+}
+
+.content-card-video video,
+.content-card-cover img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+}
+
+.content-card-play {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  line-height: 26px;
+  text-align: center;
+  pointer-events: none;
 }

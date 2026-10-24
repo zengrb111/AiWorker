@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * 「定时任务」面板。
@@ -24,6 +24,10 @@ type JobItem = {
   cronExpr: string;
   timezone: string;
   prompt: string;
+  /** TEXT | VIDEO —— 视频任务到点直接走 huashu-motion 出片并写进内容库 */
+  kind: string | null;
+  videoSiteUrl: string | null;
+  videoImagesJson: string | null;
   lastRunAt: string | null;
   lastStatus: string | null;
   lastError: string | null;
@@ -31,6 +35,17 @@ type JobItem = {
   runCount: number;
   nextRunAt: string | null;
   createdAt: string;
+};
+
+type JobRun = {
+  id: string;
+  status: string;
+  trigger: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  result: string | null;
+  error: string | null;
 };
 
 type ChannelHealth = {
@@ -46,6 +61,12 @@ type Draft = {
   id?: string;
   name: string;
   prompt: string;
+  /** TEXT | VIDEO */
+  kind: "TEXT" | "VIDEO";
+  /** 视频任务：产品网站（与参考图至少一个） */
+  videoSiteUrl: string;
+  /** 视频任务：参考图 URL，一行一个 */
+  videoImages: string;
   freq: Freq;
   time: string;
   weekdays: number[];
@@ -81,6 +102,9 @@ const WEEK_LABELS = ["周日", "周一", "周二", "周三", "周四", "周五",
 const EMPTY_DRAFT: Draft = {
   name: "",
   prompt: "",
+  kind: "TEXT",
+  videoSiteUrl: "",
+  videoImages: "",
   freq: "daily",
   time: "09:00",
   weekdays: [1, 2, 3, 4, 5],
@@ -109,6 +133,19 @@ async function request<T>(path: string, init?: RequestInit, timeoutMs = 20000): 
   } finally {
     window.clearTimeout(timer);
   }
+}
+
+/** 毫秒 → 「1 分 20 秒」这种给人看的耗时。 */
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const total = Math.round(ms / 1000);
+  if (total < 60) return `${total} 秒`;
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes < 60) return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} 小时 ${rest} 分` : `${hours} 小时`;
 }
 
 function pad(n: number | string): string {
@@ -257,6 +294,13 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
   const [error, setError] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
+  /** 参考图上传中（视频任务） */
+  const [uploadingImages, setUploadingImages] = useState(false);
+  /** 展开看运行记录的任务 id（同时只展开一条） */
+  const [historyJobId, setHistoryJobId] = useState<string | null>(null);
+  const [historyRuns, setHistoryRuns] = useState<JobRun[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [toast, setToast] = useState("");
@@ -317,6 +361,16 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
       id: job.id,
       name: job.name,
       prompt: job.prompt,
+      kind: (job.kind || "").toUpperCase() === "VIDEO" ? "VIDEO" : "TEXT",
+      videoSiteUrl: job.videoSiteUrl ?? "",
+      videoImages: (() => {
+        try {
+          const parsed = JSON.parse(job.videoImagesJson || "[]");
+          return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string").join("\n") : "";
+        } catch {
+          return "";
+        }
+      })(),
       ...parseCron(job.cronExpr),
       runOnce: job.runOnce,
       oneShotAt: isoToLocalInput(job.oneShotAt),
@@ -337,6 +391,60 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
     });
   }
 
+  const videoImageList = useMemo(
+    () => (draft ? draft.videoImages.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) : []),
+    [draft]
+  );
+
+  /** 上传参考图：传完直接拼进 videoImages，缩略图随之回显。 */
+  async function uploadReferenceImages(files: FileList | null) {
+    if (!draft || !files || files.length === 0) return;
+    const remain = Math.max(0, 6 - videoImageList.length);
+    if (remain === 0) {
+      showToast("参考图最多 6 张");
+      return;
+    }
+    setUploadingImages(true);
+    try {
+      const form = new FormData();
+      Array.from(files).slice(0, remain).forEach((file) => form.append("file", file));
+      const res = await fetch("/api/uploads/images", { method: "POST", body: form });
+      const payload = (await res.json()) as { ok?: boolean; data?: { urls?: string[] }; error?: string };
+      if (!payload.ok || !payload.data?.urls?.length) {
+        throw new Error(payload.error || "上传失败。");
+      }
+      setDraft((current) =>
+        current
+          ? {
+              ...current,
+              videoImages: [...videoImageList, ...payload.data!.urls!].slice(0, 6).join("\n")
+            }
+          : current
+      );
+      showToast(`已上传 ${payload.data.urls.length} 张`);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "上传失败。");
+    } finally {
+      setUploadingImages(false);
+      if (imageInputRef.current) imageInputRef.current.value = "";
+    }
+  }
+
+  function removeReferenceImage(url: string) {
+    setDraft((current) =>
+      current
+        ? {
+            ...current,
+            videoImages: current.videoImages
+              .split(/[\n,]/)
+              .map((item) => item.trim())
+              .filter((item) => item && item !== url)
+              .join("\n")
+          }
+        : current
+    );
+  }
+
   async function save() {
     if (!draft) return;
     const name = draft.name.trim();
@@ -346,8 +454,21 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
       return;
     }
     if (!prompt) {
-      showToast("执行内容不能为空");
+      showToast(draft.kind === "VIDEO" ? "请填写创作需求（会作为产品名称）" : "执行内容不能为空");
       return;
+    }
+    const videoImages = draft.videoImages
+      .split(/[\n,]/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 6);
+    if (draft.kind === "VIDEO") {
+      const site = draft.videoSiteUrl.trim();
+      if (site && !/^https?:\/\//i.test(site)) {
+        showToast("产品网站需以 http:// 或 https:// 开头");
+        return;
+      }
+      // 素材（网站/参考图）都是可选的：提示词是主输入，AI 会先选题再出片
     }
     if (!draft.runOnce && draft.freq === "weekly" && draft.weekdays.length === 0) {
       showToast("至少选一天");
@@ -370,7 +491,10 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
       prompt,
       cronExpr,
       runOnce: draft.runOnce,
-      notifyWechat: draft.notifyWechat
+      notifyWechat: draft.notifyWechat,
+      kind: draft.kind,
+      videoSiteUrl: draft.kind === "VIDEO" ? draft.videoSiteUrl.trim() : "",
+      videoImages: draft.kind === "VIDEO" ? videoImages : []
     };
     if (draft.runOnce) body.oneShotAt = localInputToIso(draft.oneShotAt);
     setSaving(true);
@@ -423,6 +547,30 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
       showToast(e instanceof Error ? e.message : "触发失败");
     } finally {
       setBusyId(null);
+    }
+  }
+
+  /**
+   * 展开/收起某条任务的运行记录。
+   *
+   * 每次展开都重新拉：定时任务可能在后台刚跑完，缓存反而会让人看到旧数据。
+   */
+  async function toggleHistory(job: JobItem) {
+    if (historyJobId === job.id) {
+      setHistoryJobId(null);
+      setHistoryRuns([]);
+      return;
+    }
+    setHistoryJobId(job.id);
+    setHistoryRuns([]);
+    setHistoryLoading(true);
+    try {
+      const data = await request<{ runs: JobRun[] }>(`/api/scheduled-jobs/${job.id}/runs?limit=20`);
+      setHistoryRuns(data.runs || []);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "读取运行记录失败");
+    } finally {
+      setHistoryLoading(false);
     }
   }
 
@@ -531,6 +679,12 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
                 </span>
                 <div className="sj-job-actions">
                   <button
+                    className={`sj-btn sm ghost${historyJobId === job.id ? " active" : ""}`}
+                    onClick={() => void toggleHistory(job)}
+                  >
+                    {historyJobId === job.id ? "收起记录" : "运行记录"}
+                  </button>
+                  <button
                     className="sj-btn sm ghost"
                     disabled={busyId === job.id}
                     onClick={() => void runNow(job)}
@@ -558,6 +712,9 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
               </div>
 
               <div className="sj-job-meta">
+                <span>
+                  <i>类型</i> {(job.kind || "").toUpperCase() === "VIDEO" ? "视频任务（huashu-motion）" : "文字任务"}
+                </span>
                 <span>
                   <i>频率</i> {job.runOnce ? "仅执行一次" : describeCron(job.cronExpr)}
                 </span>
@@ -635,6 +792,54 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
                   <strong>通知没送达：</strong>
                   {summarize(notify?.text || "通道不可用", 160)}
                   　任务本身已正常执行，结果可在内容库查看。
+                </div>
+              )}
+
+              {historyJobId === job.id && (
+                <div className="sj-history">
+                  <div className="sj-history-head">
+                    <strong>运行记录</strong>
+                    <span>最近 20 次（新的在上）</span>
+                  </div>
+                  {historyLoading ? (
+                    <p className="sj-history-empty">读取中…</p>
+                  ) : historyRuns.length === 0 ? (
+                    <p className="sj-history-empty">
+                      还没有记录。执行一次后就会出现（历史任务在本次上线前的执行没有单独留档）。
+                    </p>
+                  ) : (
+                    <ul className="sj-history-list">
+                      {historyRuns.map((run) => {
+                        const ok = run.status === "SUCCEEDED";
+                        const failed = run.status === "FAILED";
+                        return (
+                          <li key={run.id} className={`sj-history-item ${ok ? "ok" : failed ? "bad" : "wait"}`}>
+                            <div className="sj-history-row">
+                              <i className="sj-dot" />
+                              <span className="sj-history-time">
+                                {formatRunAt(run.startedAt, job.timezone)}
+                              </span>
+                              <span className="sj-history-tag">
+                                {run.trigger === "MANUAL" ? "手动" : "定时"}
+                              </span>
+                              <span className="sj-history-status">
+                                {ok ? "成功" : failed ? "失败" : "执行中"}
+                              </span>
+                              {run.durationMs != null && (
+                                <span className="sj-history-cost">{formatDuration(run.durationMs)}</span>
+                              )}
+                            </div>
+                            {(run.result || run.error) && (
+                              <details className="sj-history-detail">
+                                <summary>查看结果全文</summary>
+                                <pre>{run.result || run.error}</pre>
+                              </details>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
                 </div>
               )}
             </article>
@@ -739,6 +944,29 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
                 </div>
               )}
 
+              <div className="sj-field">
+                <span>任务类型</span>
+                <div className="sj-seg">
+                  <button
+                    className={draft.kind === "TEXT" ? "active" : ""}
+                    onClick={() => setDraft({ ...draft, kind: "TEXT" })}
+                  >
+                    文字任务
+                  </button>
+                  <button
+                    className={draft.kind === "VIDEO" ? "active" : ""}
+                    onClick={() => setDraft({ ...draft, kind: "VIDEO" })}
+                  >
+                    视频任务
+                  </button>
+                </div>
+                <em>
+                  {draft.kind === "VIDEO"
+                    ? "到点由 AI 直接出一版竖版短视频（1080×1920、20 秒内，约 15~25 分钟）。成品自动进内容库，可随时去 Studio 点画面改。"
+                    : "到点把执行内容交给 AI 员工，在该用户的专属会话里执行。"}
+                </em>
+              </div>
+
               <label className="sj-field">
                 <span>任务名称</span>
                 <input
@@ -749,17 +977,86 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
                 />
               </label>
 
+              {draft.kind === "VIDEO" && (
+                <>
+                  <label className="sj-field">
+                    <span>产品网站（可选）</span>
+                    <input
+                      type="text"
+                      value={draft.videoSiteUrl}
+                      placeholder="https://aimemory.cafe"
+                      onChange={(e) => setDraft({ ...draft, videoSiteUrl: e.target.value })}
+                    />
+                    <em>AI 会抓这个站的真实截图 / logo / 配色当素材。与参考图至少填一个。</em>
+                  </label>
+                  <div className="sj-field">
+                    <span>
+                      参考图（可选）
+                      <em className="sj-count">{videoImageList.length}/6</em>
+                    </span>
+                    <div className="sj-image-row">
+                      {videoImageList.map((url) => (
+                        <div className="sj-image-thumb" key={url} title={url}>
+                          {/* 缩略图直接读站内路径：编辑已有任务时原图会一起回显 */}
+                          <img src={url} alt="参考图" />
+                          <button
+                            type="button"
+                            className="sj-image-remove"
+                            onClick={() => removeReferenceImage(url)}
+                            title="移除这张"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                      {videoImageList.length < 6 && (
+                        <button
+                          type="button"
+                          className="sj-image-add"
+                          disabled={uploadingImages}
+                          onClick={() => imageInputRef.current?.click()}
+                        >
+                          {uploadingImages ? "上传中…" : "＋ 上传"}
+                        </button>
+                      )}
+                    </div>
+                    <input
+                      ref={imageInputRef}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      multiple
+                      hidden
+                      onChange={(e) => void uploadReferenceImages(e.target.files)}
+                    />
+                    <textarea
+                      value={draft.videoImages}
+                      placeholder="/uploads/scheduled/xxx.jpg&#10;https://example.com/cover.png"
+                      onChange={(e) => setDraft({ ...draft, videoImages: e.target.value })}
+                    />
+                    <em>可以点「上传」选本地图片，也可以直接粘贴图片链接（一行一个）。最多 6 张。</em>
+                  </div>
+                </>
+              )}
+
               <label className="sj-field">
                 <span>
-                  执行内容
+                  {draft.kind === "VIDEO" ? "提示词（AI 先选题再出片）" : "执行内容"}
                   <em className="sj-count">{draft.prompt.length} 字</em>
                 </span>
                 <textarea
                   value={draft.prompt}
-                  placeholder="用一句话说清要做什么，AI 员工到点执行。不需要写「发给我」——通知由平台负责。"
+                  placeholder={
+                    draft.kind === "VIDEO"
+                      ? "例如：看今天和「AI 回忆录 / 父母故事」相关的热点、节日或社会情绪，挑一个最有共鸣的，做一条 20 秒竖版短片。"
+                      : "用一句话说清要做什么，AI 员工到点执行。不需要写「发给我」——通知由平台负责。"
+                  }
                   onChange={(e) => setDraft({ ...draft, prompt: e.target.value })}
                 />
-                <em>只写「要做什么」。发送通知是平台的事，别写进执行内容。</em>
+                <em>
+                  {draft.kind === "VIDEO"
+                    ? "和文字任务同一套写法：只写要做什么。到点 AI 会先检索热点、选定 1 个选题，再自动写成创作需求（不用你提前写）。产品网站/参考图只是补充素材，可以不填。"
+                    : "只写「要做什么」。发送通知是平台的事，别写进执行内容。"}
+                </em>
               </label>
 
               <p className="sj-section">触发规则</p>

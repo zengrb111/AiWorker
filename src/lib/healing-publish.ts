@@ -1,6 +1,8 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
 import { prisma } from "@/lib/prisma";
 import { generateCoverImage, coverPlatformOf } from "@/lib/image-gen";
 import { loadHealingCredential } from "@/lib/platform-sync";
@@ -43,6 +45,8 @@ function healingCategory(category?: string | null, override?: string): string {
   const custom = (override || "").trim();
   if (custom) return custom;
   const value = (category || "").trim();
+  // 视频条目（内容库分类「视频」或 huashu 成片）默认归到「陪伴日常」
+  if (value.includes("视频")) return "陪伴日常";
   if (value.includes("小红书")) return "陪伴日常";
   if (value.includes("公众号")) return "时光信箱";
   if (value.includes("头条") || value.includes("微头条")) return "疗愈短文";
@@ -51,38 +55,135 @@ function healingCategory(category?: string | null, override?: string): string {
 
 type UploadTarget = { domain: string; token: string };
 
-/** 本地 /uploads/... 或远程 URL → 二进制 */
-async function readImage(imageUrl: string): Promise<{ buffer: Buffer; mime: string }> {
-  if (imageUrl.startsWith("/uploads/")) {
-    const filePath = path.join(process.cwd(), "public", imageUrl);
-    const ext = path.extname(filePath).replace(".", "").toLowerCase() || "jpg";
+type Asset = { buffer: Buffer; mime: string; ext: string };
+
+/** 本地 /videos、/uploads 或远程 URL → 二进制。视频与图片共用。 */
+async function readAsset(assetUrl: string): Promise<Asset> {
+  if (assetUrl.startsWith("/uploads/") || assetUrl.startsWith("/videos/")) {
+    const filePath = path.join(process.cwd(), "public", assetUrl);
+    const ext = path.extname(filePath).replace(".", "").toLowerCase() || "bin";
     const buffer = await fs.promises.readFile(filePath);
-    return { buffer, mime: ext === "jpg" ? "image/jpeg" : `image/${ext}` };
+    const mime =
+      ext === "jpg" || ext === "jpeg"
+        ? "image/jpeg"
+        : ext === "mp4"
+          ? "video/mp4"
+          : ext === "webm"
+            ? "video/webm"
+            : ext === "mov"
+              ? "video/quicktime"
+              : `image/${ext}`;
+    return { buffer, mime, ext };
   }
-  const res = await fetch(imageUrl, { signal: AbortSignal.timeout(20000) });
-  if (!res.ok) throw new Error(`拉取图片失败 ${res.status}`);
+  const res = await fetch(assetUrl, { signal: AbortSignal.timeout(60000) });
+  if (!res.ok) throw new Error(`拉取素材失败 ${res.status}`);
   const buffer = Buffer.from(await res.arrayBuffer());
-  const mime = (res.headers.get("content-type") || "image/jpeg").split(";")[0].trim();
-  return { buffer, mime };
+  const mime = (res.headers.get("content-type") || "application/octet-stream").split(";")[0].trim();
+  const ext = (mime.split("/")[1] || "bin").replace("jpeg", "jpg").replace(/[^a-z0-9]/gi, "");
+  return { buffer, mime, ext };
 }
 
-/** POST /api/healing/upload —— 上传一张图，返回站内 URL */
-async function uploadImage(target: UploadTarget, imageUrl: string, prefix: string): Promise<string> {
-  const { buffer, mime } = await readImage(imageUrl);
-  const ext = mime.split("/")[1]?.replace("jpeg", "jpg").replace(/[^a-z0-9]/gi, "") || "jpg";
+/** POST /api/healing/upload —— 上传任意素材（图片 / 视频），返回站内 URL */
+async function uploadAsset(target: UploadTarget, asset: Asset, prefix: string): Promise<string> {
   const form = new FormData();
-  form.append("file", new Blob([new Uint8Array(buffer)], { type: mime }), `${prefix}-${Date.now()}.${ext}`);
+  form.append(
+    "file",
+    new Blob([new Uint8Array(asset.buffer)], { type: asset.mime }),
+    `${prefix}-${Date.now()}.${asset.ext}`
+  );
   const res = await fetch(`${target.domain}/api/healing/upload`, {
     method: "POST",
     headers: { Authorization: `Bearer ${target.token}` },
     body: form,
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(180000),
   });
   const payload = (await res.json().catch(() => ({}))) as { ok?: boolean; url?: string; detail?: string };
   if (!res.ok || !payload.ok || !payload.url) {
-    throw new Error(`配图上传失败 ${res.status} ${payload.detail || ""}`.trim());
+    throw new Error(`素材上传失败 ${res.status} ${payload.detail || ""}`.trim());
   }
   return payload.url;
+}
+
+/** 本地 /uploads/... 或远程 URL → 二进制（图片） */
+async function readImage(imageUrl: string): Promise<{ buffer: Buffer; mime: string }> {
+  const asset = await readAsset(imageUrl);
+  return { buffer: asset.buffer, mime: asset.mime };
+}
+
+/** POST /api/healing/upload —— 上传一张图，返回站内 URL */
+async function uploadImage(target: UploadTarget, imageUrl: string, prefix: string): Promise<string> {
+  const asset = await readAsset(imageUrl);
+  return uploadAsset(target, asset, prefix);
+}
+
+/** ffmpeg/ffprobe 是否可用（不可用时视频仍可推送，只是没有时长与封面帧）。 */
+function hasFfmpeg(): boolean {
+  try {
+    const probe = process.platform === "win32" ? "ffprobe.exe" : "ffprobe";
+    return spawnSync(probe, ["-version"], { stdio: "ignore" }).status === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** 用 ffprobe 取时长（秒），失败返回 null。 */
+async function probeMediaDuration(filePath: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const child = spawn("ffprobe", [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=nw=1:nk=1",
+      filePath,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (chunk) => (out += String(chunk)));
+    child.on("error", () => resolve(null));
+    child.on("close", () => {
+      const value = Number.parseFloat(out.trim());
+      resolve(Number.isFinite(value) && value > 0 ? value : null);
+    });
+  });
+}
+
+/**
+ * 从视频里抽一帧当竖版封面（poster）。
+ *
+ * 频道列表优先用 video.poster 当缩略图；没有 poster 时会用 `<video preload=metadata>`
+ * 做封面，首帧常常是白/黑，不好看。所以能抽就抽一张。
+ */
+async function extractPosterFrame(videoPath: string, atSeconds = 0.6): Promise<Asset | null> {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "healing-poster-"));
+  const target = path.join(dir, "poster.jpg");
+  try {
+    const ok = await new Promise<boolean>((resolve) => {
+      const child = spawn("ffmpeg", [
+        "-y",
+        "-v",
+        "error",
+        "-ss",
+        String(atSeconds),
+        "-i",
+        videoPath,
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=720:-1",
+        target,
+      ], { stdio: ["ignore", "pipe", "pipe"] });
+      child.on("error", () => resolve(false));
+      child.on("close", (code) => resolve(code === 0));
+    });
+    if (!ok) return null;
+    const buffer = await fs.promises.readFile(target);
+    return { buffer, mime: "image/jpeg", ext: "jpg" };
+  } catch {
+    return null;
+  } finally {
+    await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 export type HealingPublishOptions = {
@@ -124,8 +225,10 @@ export async function publishContentToHealing(
   }
   const target: UploadTarget = { domain: loaded.credential.domain, token: loaded.credential.token };
 
-  // 幂等：同一篇内容（同标题）已成功推送过 → 直接跳过
-  if (!options.force) {
+  // 幂等：同一篇内容（同标题）已成功推送过 → 直接跳过。
+  // 视频例外：Studio 改完会出 vN，再推一次就是要用新成片覆盖同一条，
+  // 所以视频条目不做跳过（sync 的 id 稳定，upsert 只会更新不会重复）。
+  if (!options.force && !item.videoUrl) {
     const existed = await prisma.publishRecord.findFirst({
       where: { contentItemId: item.id, channel: HEALING_CHANNEL, status: "SUCCESS", title: item.title },
       orderBy: { publishedAt: "desc" },
@@ -143,21 +246,53 @@ export async function publishContentToHealing(
   }
 
   try {
-    // 封面闸门：与好物推荐一致，必须先有本地封面图（占位图先触发免费生图）
-    if (!item.coverImageUrl || !item.coverImageUrl.startsWith("/uploads/")) {
-      const localCover = await generateCoverImage(
-        item.title,
-        item.body || "",
-        coverPlatformOf(item.category)
-      ).catch(() => null);
-      if (!localCover) throw new Error("封面尚未生成（免费生图失败），暂缓推送，待封面就绪后重试。");
-      await prisma.contentItem.update({ where: { id: item.id }, data: { coverImageUrl: localCover } });
-      item.coverImageUrl = localCover;
+    // 视频条目走视频链路：上传 mp4 + 抽帧当封面帧，写入 post.video
+    // （频道详情页用 full.video.url 渲染播放器，列表优先用 video.poster 当缩略图）。
+    const isVideo = Boolean(item.videoUrl);
+    let videoPayload: { url: string; duration: number | null; poster: string } | null = null;
+    let cover = "";
+
+    if (isVideo) {
+      const localPath = item.videoUrl!.startsWith("/videos/") || item.videoUrl!.startsWith("/uploads/")
+        ? path.join(process.cwd(), "public", item.videoUrl!)
+        : null;
+      const asset = await readAsset(item.videoUrl!);
+      const sizeMb = asset.buffer.byteLength / 1024 / 1024;
+      if (sizeMb > 80) {
+        throw new Error(`视频 ${sizeMb.toFixed(1)}MB 偏大，频道上传上限按 80MB 保守限制，请先压缩。`);
+      }
+
+      const remoteVideo = await uploadAsset(target, asset, "video");
+
+      // 封面帧优先级：内容库已有本地封面 → 视频抽帧 → 无（频道会用视频首帧兜底）
+      let poster = "";
+      if (item.coverImageUrl && item.coverImageUrl.startsWith("/uploads/")) {
+        poster = await uploadImage(target, item.coverImageUrl, "poster").catch(() => "");
+      }
+      if (!poster && localPath && hasFfmpeg()) {
+        const frame = await extractPosterFrame(localPath);
+        if (frame) poster = await uploadAsset(target, frame, "poster").catch(() => "");
+      }
+
+      const duration = localPath ? await probeMediaDuration(localPath) : null;
+      videoPayload = { url: remoteVideo, duration, poster };
+      cover = poster;
+    } else {
+      // 封面闸门：与好物推荐一致，必须先有本地封面图（占位图先触发免费生图）
+      if (!item.coverImageUrl || !item.coverImageUrl.startsWith("/uploads/")) {
+        const localCover = await generateCoverImage(
+          item.title,
+          item.body || "",
+          coverPlatformOf(item.category)
+        ).catch(() => null);
+        if (!localCover) throw new Error("封面尚未生成（免费生图失败），暂缓推送，待封面就绪后重试。");
+        await prisma.contentItem.update({ where: { id: item.id }, data: { coverImageUrl: localCover } });
+        item.coverImageUrl = localCover;
+      }
+      cover = await uploadImage(target, item.coverImageUrl, "cover");
     }
 
-    const cover = await uploadImage(target, item.coverImageUrl, "cover");
-
-    // 图集（前 3 张内联图）
+    // 图集（前 3 张内联图）：视频条目通常没有内联图，循环自然为空
     let inlineImages: string[] = [];
     try {
       const parsed = JSON.parse(item.inlineImagesJson || "[]");
@@ -187,7 +322,10 @@ export async function publishContentToHealing(
     const post = {
       id: postId,
       title,
-      summary: buildSummary(item.body || "", 140),
+      // 视频条目通常没有正文：给一句能站得住的说明，频道卡片/详情不至于空白
+      summary: isVideo
+        ? buildSummary(item.body || "", 140) || "AI 回忆录 · 竖版短片"
+        : buildSummary(item.body || "", 140),
       content: mdToPlainText(item.body || ""),
       cover,
       images,
@@ -196,6 +334,8 @@ export async function publishContentToHealing(
       author: publisher,
       source: SOURCE,
       source_url: "",
+      // 频道详情页用 video.url 渲染播放器；poster 缺省时退回 cover
+      video: videoPayload,
       published_at: publishedAt,
     };
 

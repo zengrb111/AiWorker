@@ -22,6 +22,12 @@ type CreateBody = {
   runOnce?: boolean;
   oneShotAt?: string;
   notifyWechat?: boolean;
+  /** TEXT（默认，走 agent）| VIDEO（走 huashu-motion 直接出片） */
+  kind?: string;
+  /** 视频任务：产品网站（与参考图至少一个） */
+  videoSiteUrl?: string;
+  /** 视频任务：参考图 URL 数组 */
+  videoImages?: string[];
 };
 
 /** 一次性任务的占位 cron（runOnce 不按 cron 触发，仅用于占位，避免空字段）。 */
@@ -62,6 +68,11 @@ export async function POST(request: Request) {
   const runOnce = body.runOnce === true;
   const oneShotAt = body.oneShotAt ? new Date(body.oneShotAt) : null;
   const notifyWechat = body.notifyWechat !== false;
+  const kind = (body.kind || "").trim().toUpperCase() === "VIDEO" ? "VIDEO" : "TEXT";
+  const videoSiteUrl = (body.videoSiteUrl || "").trim();
+  const videoImages = Array.isArray(body.videoImages)
+    ? body.videoImages.map((u) => String(u || "").trim()).filter(Boolean).slice(0, 6)
+    : [];
 
   if (!name) return jsonError("缺少任务名。");
   if (!prompt) return jsonError("缺少执行内容（prompt）。");
@@ -79,6 +90,13 @@ export async function POST(request: Request) {
     return jsonError("cron 表达式不合法（需 5 段：分 时 日 月 周，如 `30 17 * * *`）。");
   }
 
+  if (kind === "VIDEO") {
+    if (videoSiteUrl && !/^https?:\/\//i.test(videoSiteUrl)) {
+      return jsonError("产品网站需以 http:// 或 https:// 开头。");
+    }
+    // 没有网站/参考图也可以：提示词是主输入，AI 会按选题自己设计画面
+  }
+
   const job = await prisma.scheduledJob.create({
     data: {
       userId: user.id,
@@ -89,7 +107,10 @@ export async function POST(request: Request) {
       enabled: body.enabled !== false,
       runOnce,
       oneShotAt,
-      notifyWechat
+      notifyWechat,
+      kind,
+      videoSiteUrl: kind === "VIDEO" ? videoSiteUrl || null : null,
+      videoImagesJson: kind === "VIDEO" ? JSON.stringify(videoImages) : null
     }
   });
   return jsonOk({ job });

@@ -16,6 +16,12 @@ type PatchBody = {
   runOnce?: boolean;
   oneShotAt?: string | null;
   notifyWechat?: boolean;
+  /** TEXT | VIDEO */
+  kind?: string;
+  /** 视频任务：产品网站 */
+  videoSiteUrl?: string | null;
+  /** 视频任务：参考图 URL 数组 */
+  videoImages?: string[];
 };
 
 async function loadOwnedJob(id: string, userId: string) {
@@ -68,6 +74,30 @@ export async function PATCH(request: Request, { params }: { params: { id: string
   }
   if (body.notifyWechat !== undefined) data.notifyWechat = body.notifyWechat === true;
 
+  if (body.kind !== undefined) {
+    const kind = body.kind.trim().toUpperCase() === "VIDEO" ? "VIDEO" : "TEXT";
+    data.kind = kind;
+    // 切回文字任务时清掉视频配置，避免残留字段让下次执行误判
+    if (kind === "TEXT") {
+      data.videoSiteUrl = null;
+      data.videoImagesJson = null;
+    }
+  }
+  if (body.videoSiteUrl !== undefined) {
+    const siteUrl = (body.videoSiteUrl || "").trim();
+    if (siteUrl && !/^https?:\/\//i.test(siteUrl)) {
+      return jsonError("产品网站需以 http:// 或 https:// 开头。");
+    }
+    data.videoSiteUrl = siteUrl || null;
+  }
+  if (body.videoImages !== undefined) {
+    const images = Array.isArray(body.videoImages)
+      ? body.videoImages.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 6)
+      : [];
+    data.videoImagesJson = JSON.stringify(images);
+  }
+
+  // 视频任务不再强制要求素材：提示词是主输入，AI 会先选题再出片
   if (Object.keys(data).length === 0) return jsonError("没有需要修改的字段。");
 
   const job = await prisma.scheduledJob.update({ where: { id: params.id }, data });

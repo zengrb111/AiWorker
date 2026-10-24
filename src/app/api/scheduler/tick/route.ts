@@ -1,9 +1,18 @@
 import { NextRequest } from "next/server";
 import { jsonError, jsonOk } from "@/lib/http";
-import { tickScheduler } from "@/lib/scheduler";
+import { recoverInterruptedRuns, tickScheduler } from "@/lib/scheduler";
 import { getAgentToken, isValidAgentToken } from "@/lib/platform-config";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * 进程启动后的第一次 tick 顺手清理「上次进程留下的 RUNNING」。
+ *
+ * 真正拉起调度的是 instrumentation 本机 fetch 本接口（startScheduler 那套已不在用），
+ * 所以收尾也挂在这里；模块级标记保证每个进程只做一次。
+ */
+// 用 globalThis 而不是模块变量：dev 模式 HMR 会重建模块，模块变量会失效并重复清理。
+const recoveryState = globalThis as unknown as { __schedulerRecoveryDone?: boolean };
 
 /**
  * POST /api/scheduler/tick —— 触发一轮平台定时任务调度。
@@ -29,6 +38,12 @@ async function handle(request: NextRequest) {
   }
   if (!isValidAgentToken(extractToken(request))) {
     return jsonError("令牌无效。", 401);
+  }
+  if (!recoveryState.__schedulerRecoveryDone) {
+    recoveryState.__schedulerRecoveryDone = true;
+    await recoverInterruptedRuns().catch((error) => {
+      console.error("[scheduler] 清理中断执行失败：", error instanceof Error ? error.message : error);
+    });
   }
   const fired = await tickScheduler();
   return jsonOk({ fired, firedCount: fired.length });

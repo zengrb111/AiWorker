@@ -477,7 +477,31 @@ function runBridge(
  * 渲染是重任务，超时默认 900s + 启动宽限；cwd 指向项目根，tool-bash 的沙箱按 cwd
  * 约束可写范围，必须让它能写到 public/videos 与 remotion/public/generated。
  */
+/**
+ * DSH 串行闸：同一时刻只允许一个出片/改片调用。
+ *
+ * 实测两个桥接并发时（定时出片 + Studio 改片），两边的会话文件都不再增长、
+ * 进程活着但模型调用不返回，最后双双超时。串行化牺牲一点并行度，换确定性。
+ */
+let dshRenderQueue: Promise<unknown> = Promise.resolve();
+
+function withDshRenderSlot<T>(task: () => Promise<T>): Promise<T> {
+  const run = dshRenderQueue.then(task, task);
+  dshRenderQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
 export async function runDshRender(
+  prompt: string,
+  options: { userId?: string; sessionId?: string | null; timeoutMs?: number; workspaceDir?: string } = {},
+): Promise<string> {
+  return withDshRenderSlot(() => runDshRenderUnlocked(prompt, options));
+}
+
+async function runDshRenderUnlocked(
   prompt: string,
   options: { userId?: string; sessionId?: string | null; timeoutMs?: number; workspaceDir?: string } = {},
 ): Promise<string> {

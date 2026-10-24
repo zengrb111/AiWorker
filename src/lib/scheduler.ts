@@ -9,6 +9,7 @@
 import { prisma } from "@/lib/prisma";
 import { openClawClient, deliverWechatMessage } from "@/lib/openclaw";
 import { appendTurn } from "@/lib/wechat-conversation-store";
+import { runHuashuGeneration } from "@/lib/video/huashu-generate";
 
 /** 调度轮询间隔。 */
 const TICK_MS = 30_000;
@@ -198,8 +199,160 @@ async function deliverJobResultToWechat(
   appendTurn({ userId, conversationId: target.to, role: "assistant", body: content });
 }
 
-/** 立即执行一个任务（手动触发与定时触发共用）。 */
-export async function runScheduledJob(jobId: string): Promise<SchedulerRunResult> {
+/**
+ * 视频任务用哪个会话展示进度。
+ *
+ * 单独开一条「定时视频 · 任务名」的会话，而不是塞进用户正在聊的会话：
+ * 定时出片是后台行为，进度消息和成片混进日常对话会把主线顶走；
+ * 同一条会话反复复用，用户点进去就能看到历次初稿。
+ */
+async function resolveVideoConversation(userId: string, jobName: string): Promise<string> {
+  const title = `定时视频 · ${jobName}`.slice(0, 60);
+  const existing = await prisma.conversation.findFirst({
+    where: { userId, title },
+    orderBy: { updatedAt: "desc" }
+  });
+  if (existing) return existing.id;
+  const created = await prisma.conversation.create({ data: { userId, title } });
+  return created.id;
+}
+
+/**
+ * 视频任务的「先选题、再出片」。
+ *
+ * 为什么需要这一步：视频任务的输入现在是一条**提示词**（和文字任务同一套写法），
+ * 用户不再手写「创作需求」。所以到点先用 agent 按提示词检索一遍热点、选一个选题，
+ * 产出一条能直接开拍的创作需求，再交给 huashu-motion 出片。
+ *
+ * 选题失败不能拖垮整个任务：拿不到就用提示词本身出片（质量差一点，但不会白跑）。
+ */
+const VIDEO_IDEA_TIMEOUT_MS = Number(process.env.SCHEDULE_VIDEO_IDEA_TIMEOUT_MS ?? 420_000);
+
+type VideoIdea = { topic: string | null; requirement: string; reason: string | null };
+
+function buildVideoIdeaPrompt(prompt: string, siteUrl: string | null): string {
+  return [
+    "你是竖版短视频的选题策划。请根据下面的任务要求，先选题，再写出一条可以直接开拍的创作需求。",
+    "",
+    "【任务要求】",
+    prompt,
+    siteUrl ? `\n【产品/参考站点】${siteUrl}` : "",
+    "",
+    "【做法】",
+    "1. 如果任务要求需要结合当下热点，用你的搜索/抓取工具查一遍（与任务主题相关的最新话题、节日、社会情绪都算）。",
+    "2. 只选 1 个最有传播力的选题，不要罗列多个，也不要给备选。",
+    "3. 如果任务要求里已经明确了主题或产品名，直接沿用，不必强行找热点。",
+    "4. 创作需求要能直接开拍：第一句就是视频的主题/产品名称，后面说清给谁看、讲什么、情绪基调。",
+    "",
+    "【输出格式】严格三行，不要任何额外文字、不要 markdown 标题：",
+    "选题：<一句话>",
+    "创作需求：<40~160 字>",
+    "理由：<一句话>"
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** 从 agent 回复里抽三段；抽不到就整段当创作需求。 */
+function parseVideoIdea(text: string, fallback: string): VideoIdea {
+  const pick = (label: string): string | null => {
+    const matched = new RegExp(`${label}[：:]\\s*([^\\n]+)`).exec(text);
+    const value = matched?.[1]?.trim();
+    return value ? value.replace(/^[「"'*]+|[」"'*]+$/g, "").trim() : null;
+  };
+  const requirement = pick("创作需求");
+  const topic = pick("选题");
+  const reason = pick("理由");
+  if (requirement && requirement.length >= 8) return { topic, requirement, reason };
+  // 兜底：整段压缩成一句（去掉 markdown 符号与多余空行）
+  const flattened = text
+    .replace(/[#*>`]/g, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  return { topic, requirement: (flattened || fallback).slice(0, 300), reason };
+}
+
+async function pickVideoIdea(
+  userId: string,
+  prompt: string,
+  siteUrl: string | null
+): Promise<VideoIdea | null> {
+  try {
+    const result = await openClawClient.sendTask({
+      message: buildVideoIdeaPrompt(prompt, siteUrl),
+      userId,
+      timeoutMs: VIDEO_IDEA_TIMEOUT_MS,
+      // 选题独立会话：不污染用户正在聊的会话，也不与视频任务的会话混在一起
+      sessionKey: `agent:u-${userId}:video-idea`,
+      retryOnEmpty: false
+    });
+    const text = (result.content || "").trim();
+    if (!text) return null;
+    return parseVideoIdea(text, prompt);
+  } catch (error) {
+    console.error("[scheduler] 视频选题失败，改用提示词直接出片：", error);
+    return null;
+  }
+}
+
+/** 视频任务：先选题 → 再走 huashu-motion 出片 → 写进内容库，返回给用户看的摘要。 */
+async function runVideoJob(job: {
+  userId: string;
+  name: string;
+  prompt: string;
+  videoSiteUrl: string | null;
+  videoImagesJson: string | null;
+}): Promise<string> {
+  let imageUrls: string[] = [];
+  try {
+    const parsed = JSON.parse(job.videoImagesJson || "[]");
+    if (Array.isArray(parsed)) imageUrls = parsed.filter((item): item is string => typeof item === "string");
+  } catch {
+    imageUrls = [];
+  }
+
+  const conversationId = await resolveVideoConversation(job.userId, job.name);
+  const idea = await pickVideoIdea(job.userId, job.prompt, job.videoSiteUrl || null);
+  const requirement = idea?.requirement || job.prompt;
+  const prefixLines = idea
+    ? [
+        "选题完成…",
+        `选题：${idea.topic || "（沿用任务给定主题）"}`,
+        `创作需求：${requirement}`,
+        ...(idea.reason ? [`理由：${idea.reason}`] : [])
+      ]
+    : ["选题步骤未返回结果，直接用任务提示词出片。"];
+
+  const result = await runHuashuGeneration({
+    userId: job.userId,
+    conversationId,
+    requirement,
+    siteUrl: job.videoSiteUrl || null,
+    images: imageUrls.map((url) => ({ url })),
+    progressTitle: `定时视频 · ${job.name}`,
+    prefixLines,
+    allowNoMaterials: true,
+    // 定时视频是「初稿」，改片过程留在这条任务会话里便于回看
+    progressInChat: true
+  });
+
+  const duration = result.duration != null ? `${result.duration.toFixed(1)}s` : "时长未知";
+  return [
+    `视频初稿已生成（${duration}）：${result.videoUrl}`,
+    idea?.topic ? `选题：${idea.topic}` : "",
+    "已存入内容库（分类「视频」）。想改：在这条会话的成片下方点「在 Studio 里修改」，或内容库打开这条再点同一个按钮。"
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** 立即执行一个任务（手动触发与定时触发共用）。 */export async function runScheduledJob(
+  jobId: string,
+  trigger: "SCHEDULE" | "MANUAL" = "SCHEDULE"
+): Promise<SchedulerRunResult> {
   const job = await prisma.scheduledJob.findUnique({ where: { id: jobId } });
   if (!job) return { ok: false, status: "FAILED", error: "任务不存在。" };
   if (inFlight.has(jobId)) return { ok: false, status: "FAILED", error: "任务正在执行中。" };
@@ -208,18 +361,65 @@ export async function runScheduledJob(jobId: string): Promise<SchedulerRunResult
   await prisma.scheduledJob
     .update({ where: { id: jobId }, data: { lastStatus: "RUNNING", lastError: null } })
     .catch(() => undefined);
+
+  // 每次执行落一条运行记录（任务卡片里可以展开看历史）。
+  // 记录失败不能影响任务本身：整段 catch 掉。
+  const startedAt = Date.now();
+  const run = await prisma.scheduledJobRun
+    .create({ data: { jobId, userId: job.userId, status: "RUNNING", trigger, startedAt: new Date() } })
+    .catch(() => null);
+
+  /** 收尾：写状态/耗时，并只保留最近 50 条，避免表无限长。 */
+  const finishRun = async (status: "SUCCEEDED" | "FAILED", payload: { result?: string; error?: string }) => {
+    if (!run) return;
+    await prisma.scheduledJobRun
+      .update({
+        where: { id: run.id },
+        data: {
+          status,
+          finishedAt: new Date(),
+          durationMs: Date.now() - startedAt,
+          result: payload.result?.slice(0, 4000) ?? null,
+          error: payload.error?.slice(0, 1000) ?? null
+        }
+      })
+      .catch(() => undefined);
+    const overflow = await prisma.scheduledJobRun
+      .findMany({ where: { jobId }, orderBy: { startedAt: "desc" }, skip: 50, select: { id: true } })
+      .catch(() => [] as Array<{ id: string }>);
+    if (overflow.length) {
+      await prisma.scheduledJobRun
+        .deleteMany({ where: { id: { in: overflow.map((item) => item.id) } } })
+        .catch(() => undefined);
+    }
+  };
+
   try {
     const target = await resolveWechatTarget(job.userId).catch(() => null);
 
-    const result = await openClawClient.sendTask({
-      message: job.prompt,
-      userId: job.userId,
-      // 定时任务常是多步长流程（抓热点/生成/入库），120s 默认超时必掐断；放宽到 10 分钟。
-      timeoutMs: Number(process.env.SCHEDULE_TASK_TIMEOUT_MS ?? 600_000),
-      // 空文本自动重跑 = 整个任务再执行一遍（重复入库/发布），对有副作用的任务绝不允许。
-      retryOnEmpty: false
-    });
-    const content = (result.content || "").trim();
+    // 视频任务不走 agent：直接跑 huashu-motion 出片（一条 15~25 分钟），
+    // 成片写进内容库并在这条任务专属会话里留进度，方便之后去 Studio 改。
+    const isVideoJob = (job.kind || "TEXT").toUpperCase() === "VIDEO";
+    let content = "";
+    if (isVideoJob) {
+      content = await runVideoJob({
+        userId: job.userId,
+        name: job.name,
+        prompt: job.prompt,
+        videoSiteUrl: job.videoSiteUrl ?? null,
+        videoImagesJson: job.videoImagesJson ?? null
+      });
+    } else {
+      const result = await openClawClient.sendTask({
+        message: job.prompt,
+        userId: job.userId,
+        // 定时任务常是多步长流程（抓热点/生成/入库），120s 默认超时必掐断；放宽到 10 分钟。
+        timeoutMs: Number(process.env.SCHEDULE_TASK_TIMEOUT_MS ?? 600_000),
+        // 空文本自动重跑 = 整个任务再执行一遍（重复入库/发布），对有副作用的任务绝不允许。
+        retryOnEmpty: false
+      });
+      content = (result.content || "").trim();
+    }
     await prisma.scheduledJob.update({
       where: { id: jobId },
       data: {
@@ -268,6 +468,7 @@ export async function runScheduledJob(jobId: string): Promise<SchedulerRunResult
         .update({ where: { id: jobId }, data: { enabled: false } })
         .catch(() => undefined);
     }
+    await finishRun("SUCCEEDED", { result: content });
     return { ok: true, status: "SUCCEEDED", content };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -277,6 +478,7 @@ export async function runScheduledJob(jobId: string): Promise<SchedulerRunResult
         data: { lastRunAt: new Date(), lastStatus: "FAILED", lastError: message.slice(0, 1000) }
       })
       .catch(() => undefined);
+    await finishRun("FAILED", { error: message });
     return { ok: false, status: "FAILED", error: message };
   } finally {
     inFlight.delete(jobId);
@@ -318,9 +520,54 @@ export async function tickScheduler(now = new Date()): Promise<string[]> {
 }
 
 /** 启动调度器（幂等，服务启动时调用一次）。 */
+/**
+ * 服务启动时把「上一次进程里没跑完」的状态收尾。
+ *
+ * 执行任务的 promise 活在上一个进程里，进程一重启它就消失了，
+ * 但数据库里 lastStatus / ScheduledJobRun.status 仍是 RUNNING、视频项目仍是 BUILDING，
+ * 面板会永远显示「正在执行」，定时任务也可能因为 inFlight 判断而卡住。
+ */
+export async function recoverInterruptedRuns(): Promise<void> {
+  const now = new Date();
+  // 只清「3 分钟前就开始了」的：清理本身可能因为 HMR / 多实例被再次触发，
+  // 无差别清理会把刚点「立即执行」还在跑的任务误判为中断（实测踩过一次）。
+  const cutoff = new Date(now.getTime() - 3 * 60 * 1000);
+  const jobs = await prisma.scheduledJob
+    .updateMany({
+      where: { lastStatus: "RUNNING", lastRunAt: { lt: cutoff } },
+      data: { lastStatus: "FAILED", lastError: "服务重启，本次执行被中断。" }
+    })
+    .catch(() => null);
+  const runs = await prisma.scheduledJobRun
+    .updateMany({
+      where: { status: "RUNNING", startedAt: { lt: cutoff } },
+      data: { status: "FAILED", finishedAt: now, error: "服务重启，本次执行被中断。" }
+    })
+    .catch(() => null);
+  if (jobs?.count || runs?.count) {
+    console.log(`[scheduler] 清理中断执行：任务 ${jobs?.count ?? 0} 条，记录 ${runs?.count ?? 0} 条`);
+  }
+
+  // 出片项目同理：卡在 BUILDING 的（30 分钟前创建）一定是被中断的，改 FAILED 才能重试
+  const projects = await prisma.videoMotionProject
+    .updateMany({
+      where: { status: "BUILDING", createdAt: { lt: new Date(Date.now() - 30 * 60 * 1000) } },
+      data: { status: "FAILED", error: "生成中断（服务重启或 DSH 无响应）。" }
+    })
+    .catch(() => null);
+  if (projects?.count) {
+    console.log(`[scheduler] 清理中断的视频项目：${projects.count} 个`);
+  }
+}
+
 export function startScheduler(): void {
   if (started) return;
   started = true;
+  // 进程重启时，上一轮还在跑的任务/记录会永远停在 RUNNING（执行它的进程已经没了）。
+  // 启动即补一次收尾，否则面板上会一直显示「正在执行」。
+  void recoverInterruptedRuns().catch((error) => {
+    console.error("[scheduler] 清理中断任务失败：", error instanceof Error ? error.message : error);
+  });
   timer = setInterval(() => {
     tickScheduler().catch((error) => {
       console.error("[scheduler] 轮询失败：", error instanceof Error ? error.message : error);

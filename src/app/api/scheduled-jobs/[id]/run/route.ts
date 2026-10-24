@@ -16,7 +16,7 @@ export async function POST(_request: Request, { params }: { params: { id: string
   const job = await prisma.scheduledJob.findUnique({ where: { id: params.id } });
   if (!job || job.userId !== user.id) return jsonError("任务不存在。", 404);
 
-  void runScheduledJob(job.id).catch((error) => {
+  void runScheduledJob(job.id, "MANUAL").catch((error) => {
     console.error(`[scheduler] 手动执行任务 ${job.name} 失败：`, error);
   });
   return jsonOk({ triggered: job.id, message: "已触发，稍后可在任务列表查看执行结果。" });

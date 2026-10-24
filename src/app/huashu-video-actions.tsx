@@ -15,11 +15,15 @@
 
 import { useState } from "react";
 
-type Props = { videoUrl: string };
+type Props = {
+  videoUrl: string;
+  /** 点「去内容库查看」时交给上层：成片消息只带视频 URL，条目 id 由平台侧按 token 匹配 */
+  onOpenContent?: (videoUrl: string) => void;
+};
 
 const TOKEN_RE = /\/videos\/huashu-([A-Za-z0-9-]+)-v(\d+)\.mp4/;
 
-export default function HuashuVideoActions({ videoUrl }: Props) {
+export default function HuashuVideoActions({ videoUrl, onOpenContent }: Props) {
   const match = TOKEN_RE.exec(videoUrl);
   const token = match?.[1] ?? null;
 
@@ -48,6 +52,16 @@ export default function HuashuVideoActions({ videoUrl }: Props) {
   return (
     <div className="huashu-actions">
       <div className="huashu-actions-row">
+        {onOpenContent && (
+          <button
+            type="button"
+            className="huashu-action-btn"
+            onClick={() => onOpenContent(videoUrl)}
+            title="打开内容库里这条视频（可以改标题、推送心灵驿站、继续用 Studio 改）"
+          >
+            去内容库查看
+          </button>
+        )}
         <button type="button" className="huashu-action-btn" onClick={() => void openStudio()} disabled={busy}>
           {busy ? "正在启动 Studio…" : "在 Studio 里修改"}
         </button>

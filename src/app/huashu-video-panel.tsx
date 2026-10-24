@@ -3,33 +3,66 @@
 /**
  * 「图生视频」面板（huashu-motion 链路）。
  *
- * 与旧的「参考图 / 参考文章」双 Tab 面板的区别：
- * - 只剩一条链路：产品网站（可选）+ 参考图（可选）+ 创作需求 → 直接出片；
- * - 出片由 DSH 里的 huashu-motion 技能完成（HTML+GSAP），不是平台自己的分镜管线；
- * - 成片后可以在 Studio 里点画面改：打开 Studio → 写完评论 → 回来点「同步修改」→「重新出片」。
+ * 结构（2026-10-24 重构）：
+ * - `useHuashuVideoPanel()`：所有状态 + 提交/SSE/Studio 动作。它被 platform-client
+ *   顶层调用（常驻不卸载），所以**切模块/切会话时面板从 DOM 消失，但状态与
+ *   生成流都活着**——切回来原样继续，不会再被打回初始状态。
+ * - 默认导出的 `HuashuVideoPanel`：纯展示组件，在对话输入区内联渲染。
  *
- * 为什么单独一个组件：原来那块 JSX 400 多行，混在 platform-client 里既难读也容易误改
- * 旧管线的状态。这里只依赖 conversationId 与两个回调，边界清楚。
+ * 链路说明：产品网站（可选）+ 参考图（可选）+ 创作需求 → huashu-motion 直接出片
+ * （HTML+GSAP，非平台分镜管线）；成片后可打开 Studio 点画面改。
  */
 
-import { useEffect, useRef, useState } from "react";
-
-type Props = {
-  conversationId: string;
-  /** 默认创作需求（沿用原来的「生成ai回忆录宣传片」）。 */
-  defaultRequirement: string;
-  onClose: () => void;
-  /** 出片成功并入库后通知外层刷新内容库。 */
-  onSaved?: () => void | Promise<void>;
-};
+import { useRef, useState } from "react";
 
 type Phase = "form" | "running" | "done";
 
+export type HuashuPanelImage = { file: File; url: string };
 
-export default function HuashuVideoPanel({ conversationId, defaultRequirement, onClose, onSaved }: Props) {
+export type HuashuPanelController = {
+  // 表单
+  siteUrl: string;
+  setSiteUrl: (value: string) => void;
+  requirement: string;
+  setRequirement: (value: string) => void;
+  images: HuashuPanelImage[];
+  addImages: (files: FileList | null) => void;
+  removeImage: (index: number) => void;
+  /** 外部直接灌入图片（热点流程已备好带 objectURL 的素材）。 */
+  setImagesFromFiles: (files: HuashuPanelImage[]) => void;
+  /** 清空全部状态回到初始；nextRequirement 作为新的创作需求（不传=清空）。 */
+  reset: (nextRequirement?: string) => void;
+  // 运行状态
+  phase: Phase;
+  progress: string[];
+  error: string;
+  videoUrl: string | null;
+  projectToken: string | null;
+  duration: number | null;
+  studioUrl: string | null;
+  busy: "" | "studio";
+  notice: string;
+  preview: string | null;
+  setPreview: (value: string | null) => void;
+  canSubmit: boolean;
+  // 动作
+  submit: () => Promise<void>;
+  openStudio: () => Promise<void>;
+};
+
+/**
+ * 面板状态钩子。必须在常驻组件（platform-client）顶层调用。
+ *
+ * getConversationId 用 getter 是故意的：提交那一刻才解析归属会话
+ * （platform-client 里它是 genVideoPanelFor，会随「在哪个会话点开」变化）。
+ */
+export function useHuashuVideoPanel(options: {
+  getConversationId: () => string | null;
+  onSaved?: () => void | Promise<void>;
+}): HuashuPanelController {
   const [siteUrl, setSiteUrl] = useState("");
-  const [requirement, setRequirement] = useState(defaultRequirement);
-  const [images, setImages] = useState<Array<{ file: File; url: string }>>([]);
+  const [requirement, setRequirement] = useState("");
+  const [images, setImages] = useState<HuashuPanelImage[]>([]);
   const [phase, setPhase] = useState<Phase>("form");
   const [progress, setProgress] = useState<string[]>([]);
   const [error, setError] = useState("");
@@ -43,13 +76,10 @@ export default function HuashuVideoPanel({ conversationId, defaultRequirement, o
   const [busy, setBusy] = useState<"" | "studio">("");
   const [notice, setNotice] = useState("");
 
+  // options 用 ref 存：回调体在调用时才解引用，避免渲染期 TDZ / 闭包过期。
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
   const abortRef = useRef<AbortController | null>(null);
-
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-    };
-  }, []);
 
   const canSubmit = requirement.trim().length > 0 && (siteUrl.trim().length > 0 || images.length > 0);
 
@@ -61,6 +91,10 @@ export default function HuashuVideoPanel({ conversationId, defaultRequirement, o
     ]);
   }
 
+  function setImagesFromFiles(files: HuashuPanelImage[]) {
+    setImages(files);
+  }
+
   function removeImage(index: number) {
     setImages((previous) => {
       const target = previous[index];
@@ -69,8 +103,26 @@ export default function HuashuVideoPanel({ conversationId, defaultRequirement, o
     });
   }
 
+  function reset(nextRequirement = "") {
+    for (const item of images) URL.revokeObjectURL(item.url);
+    setImages([]);
+    setSiteUrl("");
+    setRequirement(nextRequirement);
+    setPhase("form");
+    setProgress([]);
+    setError("");
+    setVideoUrl(null);
+    setProjectToken(null);
+    setDuration(null);
+    setStudioUrl(null);
+    setBusy("");
+    setNotice("");
+    setPreview(null);
+  }
+
   async function submit() {
-    if (!canSubmit || phase === "running") return;
+    const conversationId = optionsRef.current.getConversationId();
+    if (!conversationId || !canSubmit || phase === "running") return;
     setPhase("running");
     setError("");
     setProgress([]);
@@ -78,7 +130,10 @@ export default function HuashuVideoPanel({ conversationId, defaultRequirement, o
     setProjectToken(null);
     setDuration(null);
     setStudioUrl(null);
+    setNotice("");
 
+    // 兜底：上一条流还挂着（理论上 running 期间进不来）就掐掉，避免两条流互写状态。
+    abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -135,7 +190,7 @@ export default function HuashuVideoPanel({ conversationId, defaultRequirement, o
             setProjectToken(data.projectToken || null);
             setDuration(data.duration ?? null);
             setPhase("done");
-            if (data.contentSaved) void onSaved?.();
+            if (data.contentSaved) void optionsRef.current.onSaved?.();
           } else if (data.type === "error") {
             throw new Error(data.error || "视频生成失败。");
           }
@@ -144,13 +199,15 @@ export default function HuashuVideoPanel({ conversationId, defaultRequirement, o
       setPhase((current) => (current === "done" ? current : "done"));
     } catch (submitError) {
       if (controller.signal.aborted) {
+        // 被新一条生成顶掉或显式重置：不打扰用户，静默让位。
+        if (abortRef.current !== controller) return;
         setError("已中断。");
       } else {
         setError(submitError instanceof Error ? submitError.message : "视频生成失败。");
       }
       setPhase("form");
     } finally {
-      abortRef.current = null;
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }
 
@@ -171,6 +228,28 @@ export default function HuashuVideoPanel({ conversationId, defaultRequirement, o
       setBusy("");
     }
   }
+
+  return {
+    siteUrl, setSiteUrl,
+    requirement, setRequirement,
+    images, addImages, removeImage, setImagesFromFiles, reset,
+    phase, progress, error, videoUrl, projectToken, duration,
+    studioUrl, busy, notice, preview, setPreview, canSubmit,
+    submit, openStudio
+  };
+}
+
+type PanelProps = {
+  panel: HuashuPanelController;
+  onClose: () => void;
+};
+
+export default function HuashuVideoPanel({ panel, onClose }: PanelProps) {
+  const {
+    siteUrl, setSiteUrl, requirement, setRequirement, images, addImages, removeImage,
+    phase, progress, error, videoUrl, duration, studioUrl, busy, notice, preview,
+    setPreview, canSubmit, submit, openStudio
+  } = panel;
 
   return (
     <div className="viral-remake-panel">
@@ -245,7 +324,7 @@ export default function HuashuVideoPanel({ conversationId, defaultRequirement, o
       {phase === "running" && (
         <div className="gen-video-plan-loading" style={{ marginTop: 10 }}>
           <span className="video-preparing-dot" />
-          <span>正在创作：抓素材 → AI 写片 → 自检 → 渲染，通常 5~15 分钟，可以切到别的会话等。</span>
+          <span>正在创作：抓素材 → AI 写片 → 自检 → 渲染，通常 5~15 分钟。可以切到别的模块或会话，回来进度还在。</span>
         </div>
       )}
 

@@ -31,11 +31,14 @@ import {
   trimToSeconds,
   type MotionComment
 } from "./huashu";
-import { mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { extractVideoPoster } from "@/lib/video/poster";
 
 const MAX_SECONDS = 20.3;
 const MAX_PROJECTS_PER_TICK = 2;
+/** 每轮最多检查多少个项目的 inbox（纯读文件，很便宜） */
+const MAX_SCAN_PER_TICK = 400;
 const MAX_COMMENTS_PER_PROJECT = 1;
 const RECENT_MS = 24 * 60 * 60 * 1000;
 
@@ -44,6 +47,8 @@ type ProjectLike = {
   token: string;
   userId: string;
   conversationId: string | null;
+  /** 改片过程是否写进会话（手动出片为 false） */
+  progressInChat: boolean;
   projectDir: string;
   videoUrl: string | null;
   versionsJson: string;
@@ -56,6 +61,65 @@ type VersionRecord = {
   createdAt: string;
   note: string;
 };
+
+/**
+ * 给 promise 套一层硬超时。
+ *
+ * runDshRender 自己也带 timeout，但它等的是子进程 exit：实测桥接进程被系统回收后
+ * promise 永不 settle，任务会一直占着项目锁（评论停在 working，之后再也不能改）。
+ * 这里再兜一层，超时直接抛错，交给上层 reopen 重试。
+ */
+function withHardTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+/**
+ * 本地判断 .om/inbox.jsonl 里有没有 pending 评论。
+ *
+ * 规则与 om 的 comments() 折叠一致：comment→pending、claim→working、
+ * done→done、reopen→pending、cancel→cancelled。
+ * 纯读文件（几 KB），用来决定「值不值得 spawn om inbox」——
+ * 之前每轮对每个项目都 spawn 一次，只好把扫描量压到 2 个，老视频就永远轮不到。
+ */
+function readPendingCount(projectDir: string): number {
+  try {
+    const file = join(projectDir, ".om", "inbox.jsonl");
+    if (!existsSync(file)) return 0;
+    const status = new Map<string, string>();
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      let event: { type?: string; id?: string };
+      try {
+        event = JSON.parse(line) as { type?: string; id?: string };
+      } catch {
+        continue;
+      }
+      if (!event.id) continue;
+      if (event.type === "comment") status.set(event.id, "pending");
+      else if (event.type === "claim") status.set(event.id, "working");
+      else if (event.type === "done") status.set(event.id, "done");
+      else if (event.type === "reopen") status.set(event.id, "pending");
+      else if (event.type === "cancel") status.set(event.id, "cancelled");
+    }
+    let count = 0;
+    for (const value of status.values()) if (value === "pending") count += 1;
+    return count;
+  } catch {
+    return 0;
+  }
+}
 
 /** 正在处理的项目（同一项目不并发，手动与自动共用这一把锁）。 */
 const processing = new Set<string>();
@@ -72,6 +136,9 @@ const PROGRESS_REUSE_MS = 60 * 60 * 1000;
 const PROGRESS_MAX_LINES = 30;
 
 /** 每条评论的自动重试次数（进程内），避免一条改不动的评论无限占用 tick。 */
+/** 改片硬超时：比 DSH 自己的 900s 再多给 2 分钟收尾 */
+const DSH_EDIT_TIMEOUT_MS = 1_020_000;
+
 const retryAttempts = new Map<string, number>();
 const MAX_RETRY = 2;
 
@@ -142,7 +209,7 @@ export async function processPendingComments(
 
     // 会话里的进度消息：用户切走了也能回来看到「AI 在做什么、改到第几条」。
     // 1 小时内复用同一条（3 条评论 = 3 轮 tick，不该刷出 3 条独立消息）。
-    if (project.conversationId) {
+    if (project.conversationId && project.progressInChat) {
       const cached = progressMessages.get(project.id);
       const reusable =
         cached && Date.now() - cached.at < PROGRESS_REUSE_MS && cached.lines.length < PROGRESS_MAX_LINES;
@@ -207,14 +274,15 @@ export async function processPendingComments(
         );
         const look = await omLook(comment.id, project.projectDir);
         await report("帧图已生成，AI 正在只改这一处…");
-        const reply = await runDshRender(
-          buildEditPrompt({ dir: project.projectDir, comment, lookOutput: look }),
-          {
+        const reply = await withHardTimeout(
+          runDshRender(buildEditPrompt({ dir: project.projectDir, comment, lookOutput: look }), {
             userId: project.userId,
             timeoutMs: 900_000,
             sessionId: `huashu-edit-${project.token}`,
             workspaceDir: project.projectDir
-          }
+          }),
+          DSH_EDIT_TIMEOUT_MS,
+          `DSH 改片超时（${Math.round(DSH_EDIT_TIMEOUT_MS / 60000)} 分钟无响应）`
         );
         const note =
           (reply || "已按要求修改。").trim().split(/\r?\n/).filter(Boolean).slice(-1)[0] || "已按要求修改。";
@@ -353,9 +421,27 @@ export async function rerenderProject(project: ProjectLike): Promise<{
     });
 
     if (project.videoUrl) {
-      await prisma.contentItem
-        .updateMany({ where: { userId: project.userId, videoUrl: project.videoUrl }, data: { videoUrl } })
-        .catch(() => undefined);
+      // 内容库同样按 token 匹配：只按「上一版 URL」精确更新会漏（历史跳号时那条记录永远停在旧版）。
+      const contentMarker = `/videos/huashu-${project.token}-v`;
+      const linked = await prisma.contentItem
+        .findMany({ where: { userId: project.userId, videoUrl: { contains: contentMarker } }, select: { id: true } })
+        .catch(() => [] as Array<{ id: string }>);
+      if (linked.length) {
+        await prisma.contentItem
+          .updateMany({ where: { id: { in: linked.map((item) => item.id) } }, data: { videoUrl } })
+          .catch(() => undefined);
+
+        // 新版可能换了开场画面，封面帧跟着重抽一次（失败就保留旧封面）
+        const poster = await extractVideoPoster(videoUrl, `huashu-${project.token}-v${version}`);
+        if (poster) {
+          await prisma.contentItem
+            .updateMany({
+              where: { id: { in: linked.map((item) => item.id) } },
+              data: { coverImageUrl: poster }
+            })
+            .catch(() => undefined);
+        }
+      }
 
       // 会话里那条「视频已生成」消息也一起指向新版。
       //
@@ -404,29 +490,32 @@ export async function runHuashuInboxTick(): Promise<TickResult> {
   let rendered = 0;
 
   try {
+    // 🔴 不能再只扫「最近更新的 N 个项目」：老视频在 Studio 里改了以后永远轮不到
+    // （实测 v12 那条 7 小时没更新过，评论一直 pending）。改成扫全部 READY/FAILED，
+    // 先用**本地读文件**判断有没有 pending 评论（纯 fs，不 spawn om），有才认领。
     const projects = await prisma.videoMotionProject.findMany({
       where: {
         status: { in: ["READY", "FAILED"] },
         updatedAt: { gte: new Date(Date.now() - RECENT_MS) }
       },
       orderBy: { updatedAt: "desc" },
-      take: MAX_PROJECTS_PER_TICK
+      take: MAX_SCAN_PER_TICK
     });
 
+    let claimedThisTick = 0;
     for (const project of projects) {
       scanned += 1;
       if (processing.has(project.id)) continue;
+      if (claimedThisTick >= MAX_PROJECTS_PER_TICK) break;
+      if (readPendingCount(project.projectDir) === 0) continue;
 
-      const pending = (await omInboxList(project.projectDir).catch(() => [])).filter(
-        (c) => !c.status || c.status === "pending"
-      );
-      if (!pending.length) continue;
-
-      notes.push(`${project.token}: 收到 ${pending.length} 条评论`);
+      const pendingCount = readPendingCount(project.projectDir);
+      notes.push(`${project.token}: 收到 ${pendingCount} 条评论`);
       const outcome = await processPendingComments(project, {
         limit: MAX_COMMENTS_PER_PROJECT,
         onProgress: (text) => notes.push(`${project.token}: ${text}`)
       });
+      claimedThisTick += 1;
       edited += outcome.processed.length;
       if (!outcome.processed.length) continue;
 
