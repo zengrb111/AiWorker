@@ -28,6 +28,8 @@ type CreateBody = {
   videoSiteUrl?: string;
   /** 视频任务：参考图 URL 数组 */
   videoImages?: string[];
+  /** 视频任务：目标时长（秒），10~60，默认 20。null 表示沿用默认。 */
+  videoTargetSeconds?: number;
 };
 
 /** 一次性任务的占位 cron（runOnce 不按 cron 触发，仅用于占位，避免空字段）。 */
@@ -73,6 +75,10 @@ export async function POST(request: Request) {
   const videoImages = Array.isArray(body.videoImages)
     ? body.videoImages.map((u) => String(u || "").trim()).filter(Boolean).slice(0, 6)
     : [];
+  let videoTargetSeconds: number | null = null;
+  if (typeof body.videoTargetSeconds === "number" && Number.isFinite(body.videoTargetSeconds)) {
+    videoTargetSeconds = Math.min(60, Math.max(10, Math.round(body.videoTargetSeconds)));
+  }
 
   if (!name) return jsonError("缺少任务名。");
   if (!prompt) return jsonError("缺少执行内容（prompt）。");
@@ -110,7 +116,8 @@ export async function POST(request: Request) {
       notifyWechat,
       kind,
       videoSiteUrl: kind === "VIDEO" ? videoSiteUrl || null : null,
-      videoImagesJson: kind === "VIDEO" ? JSON.stringify(videoImages) : null
+      videoImagesJson: kind === "VIDEO" ? JSON.stringify(videoImages) : null,
+      videoTargetSeconds: kind === "VIDEO" ? videoTargetSeconds : null
     }
   });
   return jsonOk({ job });

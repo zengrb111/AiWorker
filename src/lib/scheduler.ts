@@ -230,19 +230,31 @@ const VIDEO_IDEA_TIMEOUT_MS = Number(process.env.SCHEDULE_VIDEO_IDEA_TIMEOUT_MS 
 
 type VideoIdea = { topic: string | null; requirement: string; reason: string | null };
 
-function buildVideoIdeaPrompt(prompt: string, siteUrl: string | null): string {
+/**
+ * 选题 agent 兜底用的「干净创作需求」。
+ *
+ * 重要：定时视频任务的 `prompt` 是写给 OpenClaw agent 的**操作脚本**（含命令行、文件路径、入库步骤），
+ * 任务类型是 VIDEO 时调度器**压根不走 agent**，直接调用 huashu-motion 出片。
+ * 所以那个 prompt 绝不能当产品名塞给 DSH（会变成一整面操作指令，出片方向全乱）。
+ * 选题失败时用这条与产品解耦的兜底 brief——产品细节由 om grab 抓下的官网素材推断。
+ */
+const DEFAULT_VIDEO_BRIEF =
+  "结合今日与产品相关的热点做一支产品宣传片：前段把热点讲清楚、讲到位，并自然过渡到本产品（把父母的故事/照片做成一本可导出 PDF/长图的实体书）；后段集中讲产品价值与明确行动指引。温暖治愈风格、经典白字烧录字幕、带真人感口播配音，总时长约 30 秒。";
+
+function buildVideoIdeaPrompt(prompt: string): string {
   return [
     "你是竖版短视频的选题策划。请根据下面的任务要求，先选题，再写出一条可以直接开拍的创作需求。",
     "",
     "【任务要求】",
     prompt,
-    siteUrl ? `\n【产品/参考站点】${siteUrl}` : "",
     "",
     "【做法】",
     "1. 如果任务要求需要结合当下热点，用你的搜索/抓取工具查一遍（与任务主题相关的最新话题、节日、社会情绪都算）。",
     "2. 只选 1 个最有传播力的选题，不要罗列多个，也不要给备选。",
     "3. 如果任务要求里已经明确了主题或产品名，直接沿用，不必强行找热点。",
     "4. 创作需求要能直接开拍：第一句就是视频的主题/产品名称，后面说清给谁看、讲什么、情绪基调。",
+    "5. 创作需求必须包含这些要素：①前段讲哪个热点并自然过渡到本产品；②后段讲产品价值与明确行动指引；③明确要有真人感口播配音、烧录字幕、温暖治愈风格。",
+    "6. **严禁**在创作需求里写任何操作步骤、命令行、脚本路径或「运行某 mjs」之类的话——那不是创作需求；也**不要**在创作需求里写产品网站地址或参考图链接，产品素材会在出片环节单独提供。",
     "",
     "【输出格式】严格三行，不要任何额外文字、不要 markdown 标题：",
     "选题：<一句话>",
@@ -277,12 +289,11 @@ function parseVideoIdea(text: string, fallback: string): VideoIdea {
 
 async function pickVideoIdea(
   userId: string,
-  prompt: string,
-  siteUrl: string | null
+  prompt: string
 ): Promise<VideoIdea | null> {
   try {
     const result = await openClawClient.sendTask({
-      message: buildVideoIdeaPrompt(prompt, siteUrl),
+      message: buildVideoIdeaPrompt(prompt),
       userId,
       timeoutMs: VIDEO_IDEA_TIMEOUT_MS,
       // 选题独立会话：不污染用户正在聊的会话，也不与视频任务的会话混在一起
@@ -305,6 +316,7 @@ async function runVideoJob(job: {
   prompt: string;
   videoSiteUrl: string | null;
   videoImagesJson: string | null;
+  videoTargetSeconds?: number | null;
 }): Promise<string> {
   let imageUrls: string[] = [];
   try {
@@ -315,8 +327,10 @@ async function runVideoJob(job: {
   }
 
   const conversationId = await resolveVideoConversation(job.userId, job.name);
-  const idea = await pickVideoIdea(job.userId, job.prompt, job.videoSiteUrl || null);
-  const requirement = idea?.requirement || job.prompt;
+  const idea = await pickVideoIdea(job.userId, job.prompt);
+  // 关键：绝不要把整段「操作脚本」prompt 当产品名塞给 DSH（会让出片方向混乱）。
+  // 选题成功用 AI 提炼的创作需求；失败用干净的默认 brief。
+  const requirement = idea?.requirement || DEFAULT_VIDEO_BRIEF;
   const prefixLines = idea
     ? [
         "选题完成…",
@@ -324,7 +338,7 @@ async function runVideoJob(job: {
         `创作需求：${requirement}`,
         ...(idea.reason ? [`理由：${idea.reason}`] : [])
       ]
-    : ["选题步骤未返回结果，直接用任务提示词出片。"];
+    : ["选题步骤未返回结果，用默认创作需求出片。"];
 
   const result = await runHuashuGeneration({
     userId: job.userId,
@@ -336,7 +350,8 @@ async function runVideoJob(job: {
     prefixLines,
     allowNoMaterials: true,
     // 定时视频是「初稿」，改片过程留在这条任务会话里便于回看
-    progressInChat: true
+    progressInChat: true,
+    targetSeconds: job.videoTargetSeconds ?? 20
   });
 
   const duration = result.duration != null ? `${result.duration.toFixed(1)}s` : "时长未知";
@@ -407,7 +422,8 @@ async function runVideoJob(job: {
         name: job.name,
         prompt: job.prompt,
         videoSiteUrl: job.videoSiteUrl ?? null,
-        videoImagesJson: job.videoImagesJson ?? null
+        videoImagesJson: job.videoImagesJson ?? null,
+        videoTargetSeconds: job.videoTargetSeconds
       });
     } else {
       const result = await openClawClient.sendTask({

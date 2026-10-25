@@ -27,8 +27,7 @@ import {
   trimToSeconds
 } from "./huashu";
 
-/** 成片硬上限：产品要求 20 秒。留 0.3s 容差（渲染器按帧对齐，常差一两帧）。 */
-const MAX_SECONDS = 20.3;
+/** 成片硬上限在 runHuashuGeneration 内按 targetSeconds 动态计算（渲染器按帧对齐，常差一两帧，给 0.3s 容差）。 */
 
 /**
  * DSH 写片是重任务（读技能文档 + 反复 check），比确定性渲染慢得多。
@@ -95,6 +94,8 @@ export type HuashuGenerateOptions = {
    * 定时视频任务需要知道这条初稿改了什么，置 true。
    */
   progressInChat?: boolean;
+  /** 目标时长（秒）。默认 20；定时任务可按任务配置（如 30）。裁剪与 DSH 约束都用它。 */
+  targetSeconds?: number;
 };
 
 export type HuashuGenerateResult = {
@@ -187,7 +188,8 @@ export async function runHuashuGeneration(
     title,
     onProgress,
     prefixLines = [],
-    progressInChat = false
+    progressInChat = false,
+    targetSeconds = 20
   } = options;
 
   const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -267,7 +269,8 @@ export async function runHuashuGeneration(
       siteUrl,
       dir,
       imageCount: imageUrls.length,
-      materialSummary: summarizeMaterials(dir)
+      materialSummary: summarizeMaterials(dir),
+      targetSeconds
     });
     const dsResult = await withHardTimeout(
       runDshRender(prompt, {
@@ -300,12 +303,13 @@ export async function runHuashuGeneration(
 
     const duration = await probeDuration(file);
     let finalDuration = duration ?? null;
-    if (duration != null && duration > MAX_SECONDS) {
-      report(`成片 ${duration.toFixed(1)}s 超过 20s 上限，正在裁剪…`);
-      const trimmed = join(dir, "out", "trimmed-20s.mp4");
-      await trimToSeconds(file, 20, trimmed);
+    const maxSeconds = targetSeconds + 0.3; // 渲染按帧对齐常差一两帧，给 0.3s 容差
+    if (duration != null && duration > maxSeconds) {
+      report(`成片 ${duration.toFixed(1)}s 超过 ${targetSeconds}s 上限，正在裁剪…`);
+      const trimmed = join(dir, "out", `trimmed-${targetSeconds}s.mp4`);
+      await trimToSeconds(file, targetSeconds, trimmed);
       file = trimmed;
-      finalDuration = (await probeDuration(file)) ?? 20;
+      finalDuration = (await probeDuration(file)) ?? targetSeconds;
     }
     if (finalDuration != null) report(`成片时长 ${finalDuration.toFixed(1)}s。`);
 

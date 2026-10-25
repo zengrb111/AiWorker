@@ -28,6 +28,7 @@ type JobItem = {
   kind: string | null;
   videoSiteUrl: string | null;
   videoImagesJson: string | null;
+  videoTargetSeconds: number | null;
   lastRunAt: string | null;
   lastStatus: string | null;
   lastError: string | null;
@@ -67,6 +68,8 @@ type Draft = {
   videoSiteUrl: string;
   /** 视频任务：参考图 URL，一行一个 */
   videoImages: string;
+  /** 视频任务：目标时长（秒），null=默认 20 */
+  videoTargetSeconds: number | null;
   freq: Freq;
   time: string;
   weekdays: number[];
@@ -105,6 +108,7 @@ const EMPTY_DRAFT: Draft = {
   kind: "TEXT",
   videoSiteUrl: "",
   videoImages: "",
+  videoTargetSeconds: null,
   freq: "daily",
   time: "09:00",
   weekdays: [1, 2, 3, 4, 5],
@@ -371,6 +375,7 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
           return "";
         }
       })(),
+      videoTargetSeconds: job.videoTargetSeconds ?? null,
       ...parseCron(job.cronExpr),
       runOnce: job.runOnce,
       oneShotAt: isoToLocalInput(job.oneShotAt),
@@ -494,7 +499,8 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
       notifyWechat: draft.notifyWechat,
       kind: draft.kind,
       videoSiteUrl: draft.kind === "VIDEO" ? draft.videoSiteUrl.trim() : "",
-      videoImages: draft.kind === "VIDEO" ? videoImages : []
+      videoImages: draft.kind === "VIDEO" ? videoImages : [],
+      videoTargetSeconds: draft.kind === "VIDEO" ? draft.videoTargetSeconds : null
     };
     if (draft.runOnce) body.oneShotAt = localInputToIso(draft.oneShotAt);
     setSaving(true);
@@ -988,6 +994,23 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
                       onChange={(e) => setDraft({ ...draft, videoSiteUrl: e.target.value })}
                     />
                     <em>AI 会抓这个站的真实截图 / logo / 配色当素材。与参考图至少填一个。</em>
+                  </label>
+                  <label className="sj-field">
+                    <span>目标时长（秒）</span>
+                    <input
+                      type="number"
+                      min={10}
+                      max={60}
+                      value={draft.videoTargetSeconds ?? ""}
+                      placeholder="默认 20"
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          videoTargetSeconds: e.target.value === "" ? null : Number(e.target.value)
+                        })
+                      }
+                    />
+                    <em>10~60 秒，默认 20。DSH 会据此约束节奏并裁剪；想做 30 秒宣传片就填 30。</em>
                   </label>
                   <div className="sj-field">
                     <span>

@@ -400,11 +400,12 @@ export function publishVideo(file: string, token: string, version: number): stri
  * 首次出片的 DSH 指令。
  *
  * 几条硬约束不是「建议」而是验收项：
- * - ≤20s：产品要求（prompt 里写死 20s，渲染后用 ffprobe 再验一次）
+ * - 时长 ≤ targetSeconds（默认 20s；定时任务可配 30s 等）
  * - 1080×1920 竖版
  * - 不提问：DSH 是无头会话，问问题等于卡死
  * - 必须 om check 0 error
  * - 不联网找素材：素材只认 materials/（产品网站已由 om grab 抓下来）
+ * - **必须有真人感口播配音 + 烧录字幕**（之前出过静音/无字幕的片子，根因是没要求）
  */
 export function buildFilmPrompt(input: {
   productName: string;
@@ -412,7 +413,9 @@ export function buildFilmPrompt(input: {
   dir: string;
   imageCount: number;
   materialSummary: string;
+  targetSeconds?: number;
 }): string {
+  const target = input.targetSeconds ?? 20;
   const lines = [
     "你是 huashu-motion 的导演。请直接完成一支商业级产品动效片，不要向我提问，不要等我确认。",
     "",
@@ -424,11 +427,13 @@ export function buildFilmPrompt(input: {
     input.materialSummary ? `6. 已抓到的素材清单（供你判断用什么）：\n${input.materialSummary}` : "",
     "",
     "硬约束（验收项，违反即失败）：",
-    "- 成片时长必须 ≤ 20 秒（按 20s 设计节奏，不要做 30s）。",
+    `- 成片时长必须 ≤ ${target} 秒（按 ${target}s 设计节奏，不要超出）。`,
     "- 画布 1080×1920 竖版。",
     "- 第 0 帧就是海报帧：主体已在画面里，不能是空帧/黑帧。",
     "- 只允许使用 materials/ 里的真实素材；不要联网找图，不要画占位框。",
     "- 帧率 30fps；动画只用 transform（x/y/scale/rotation），禁止 left/top/width 布局动画。",
+    "- **必须有真人感的口播配音**：旁白写成能直接念的口语（短句、少用书面语和生僻词、避免括号与顿号堆叠），由 huashu-motion 在出片时一并合成并对齐，不要留纯画面版本。",
+    "- **必须有烧录字幕**（白字、描边、清晰可读，压在画面安全区），字幕内容跟随旁白，不要靠观众自己听。",
     "- 完成前必须运行 om check 且 0 error；必要时 om still 抽帧自查文字是否被裁切/遮挡。",
     "- 不要运行 om studio、不要 om render（渲染由平台统一执行，避免并发抢 Chrome）。",
     "",

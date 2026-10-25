@@ -22,6 +22,8 @@ type PatchBody = {
   videoSiteUrl?: string | null;
   /** 视频任务：参考图 URL 数组 */
   videoImages?: string[];
+  /** 视频任务：目标时长（秒），10~60 */
+  videoTargetSeconds?: number | null;
 };
 
 async function loadOwnedJob(id: string, userId: string) {
@@ -95,6 +97,15 @@ export async function PATCH(request: Request, { params }: { params: { id: string
       ? body.videoImages.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 6)
       : [];
     data.videoImagesJson = JSON.stringify(images);
+  }
+  if (body.videoTargetSeconds !== undefined) {
+    if (body.videoTargetSeconds === null) {
+      data.videoTargetSeconds = null;
+    } else if (typeof body.videoTargetSeconds === "number" && Number.isFinite(body.videoTargetSeconds)) {
+      data.videoTargetSeconds = Math.min(60, Math.max(10, Math.round(body.videoTargetSeconds)));
+    } else {
+      return jsonError("目标时长需为 10~60 的数字。");
+    }
   }
 
   // 视频任务不再强制要求素材：提示词是主输入，AI 会先选题再出片

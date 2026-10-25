@@ -102,6 +102,8 @@ model ScheduledJob {
   videoSiteUrl String?
   /// 视频任务：参考图 URL 数组（JSON），支持 /uploads/... 与外部 URL
   videoImagesJson String?
+  /// 视频任务：目标时长（秒）。null=沿用默认 20s。huashu 链路会据此约束 DSH 并裁剪。
+  videoTargetSeconds Int?
   /// 迁移溯源：原网关任务 id（可空）
   gatewayJobId String? @unique
   lastRunAt  DateTime?
