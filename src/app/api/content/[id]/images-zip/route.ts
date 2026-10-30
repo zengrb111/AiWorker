@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import os from "node:os";
@@ -21,46 +21,60 @@ async function fetchRemoteBytes(url: string): Promise<Buffer | null> {
 }
 
 /**
- * 把本地 SVG 光栅化成 JPG（项目无图片库，用本机 headless Chrome，复用 scripts/svg-to-jpg.mjs）。
- * 失败返回 null，由调用方回退。
+ * 批量把本地 SVG 光栅化成 JPG。
+ *
+ * 关键：**只启动一次 Chrome**，在同一页面里逐张导航截图。
+ * 早先是「每张各起一次 Chrome」，8 张要 29 秒；批量后 6-8 秒。
+ * 失败由调用方回退（跳过该张，不影响其它张）。
  */
-async function rasterizeSvgToJpg(svgAbsPath: string): Promise<Buffer | null> {
-  const outJpg = path.join(os.tmpdir(), `rewrite-${randomUUID()}.jpg`);
+async function rasterizeSvgBatch(
+  jobs: { src: string; out: string; scale?: number }[]
+): Promise<{ ok: boolean; detail?: string }[]> {
+  if (jobs.length === 0) return [];
+
+  const jobsFile = path.join(os.tmpdir(), `svg-jobs-${randomUUID()}.json`);
   const script = path.join(process.cwd(), "scripts", "svg-to-jpg.mjs");
+  try {
+    await writeFile(jobsFile, JSON.stringify(jobs), "utf8");
+  } catch {
+    return jobs.map(() => ({ ok: false, detail: "任务文件写入失败" }));
+  }
+
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [script, svgAbsPath, outJpg, "2"], {
+    const child = spawn(process.execPath, [script, "--batch", jobsFile], {
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
     let stderr = "";
+    const done = (results: { ok: boolean; detail?: string }[]) => {
+      unlink(jobsFile).catch(() => {});
+      resolve(results);
+    };
+
     child.stdout.on("data", (d) => (stdout += d.toString()));
     child.stderr.on("data", (d) => (stderr += d.toString()));
-    child.on("close", async () => {
+    child.on("close", () => {
+      const last = stdout
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .reverse()
+        .find((l) => l.startsWith("{"));
+      let parsed: { ok?: boolean; results?: { ok?: boolean; detail?: string }[]; detail?: string } | null = null;
       try {
-        const last = stdout
-          .split("\n")
-          .map((l) => l.trim())
-          .filter(Boolean)
-          .reverse()
-          .find((l) => l.startsWith("{"));
-        const parsed = last ? JSON.parse(last) : null;
-        if (parsed?.ok) {
-          const buf = await readFile(outJpg);
-          try {
-            await import("node:fs/promises").then((f) => f.unlink(outJpg));
-          } catch {
-            /* ignore */
-          }
-          resolve(buf);
-        } else {
-          if (stderr.trim()) console.error("[images-zip] svg-to-jpg:", stderr.trim().slice(0, 200));
-          resolve(null);
-        }
+        parsed = last ? JSON.parse(last) : null;
       } catch {
-        resolve(null);
+        parsed = null;
       }
+      if (parsed?.ok && Array.isArray(parsed.results) && parsed.results.length === jobs.length) {
+        done(parsed.results.map((r) => ({ ok: Boolean(r?.ok), detail: r?.detail })));
+        return;
+      }
+      if (stderr.trim()) console.error("[images-zip] svg-to-jpg:", stderr.trim().slice(0, 300));
+      const detail = parsed?.detail || "批量光栅化失败";
+      done(jobs.map(() => ({ ok: false, detail })));
     });
-    child.on("error", () => resolve(null));
+    child.on("error", () => done(jobs.map(() => ({ ok: false, detail: "无法启动光栅化进程" }))));
   });
 }
 
@@ -93,29 +107,47 @@ export async function GET(_request: Request, context: { params: { id: string } }
     return jsonError("该内容还没有可下载的主图。", 404);
   }
 
-  const files: ZipFile[] = [];
+  // 先把图片来源分类：SVG 走一次 Chrome 会话批量光栅化，其余直接取字节
+  const dataByIndex = new Map<number, { data: Buffer; ext: string }>();
+  const svgJobs: { index: number; src: string; out: string }[] = [];
+
   for (let i = 0; i < images.length; i++) {
     const url = images[i];
-    let data: Buffer | null = null;
-    let ext = "jpg";
-
     if (url.startsWith("/uploads/covers/")) {
       const filename = path.basename(url);
       const isSvg = /\.svg$/i.test(filename);
       if (!isSvg && !/^[\w-]+\.(png|jpg|jpeg|webp)$/i.test(filename)) continue;
       const abs = path.join(LOCAL_IMAGES_DIR, filename);
       if (isSvg) {
-        data = await rasterizeSvgToJpg(abs); // 光栅成 JPG，保留圆角
-        ext = "jpg";
+        svgJobs.push({ index: i, src: abs, out: path.join(os.tmpdir(), `rewrite-${randomUUID()}.jpg`) });
       } else {
-        data = await readFile(abs).catch(() => null);
+        const data = await readFile(abs).catch(() => null);
+        if (data) dataByIndex.set(i, { data, ext: filename.split(".").pop()!.toLowerCase() });
       }
     } else if (/^https?:\/\//i.test(url)) {
-      data = await fetchRemoteBytes(url);
+      const data = await fetchRemoteBytes(url);
+      if (data) dataByIndex.set(i, { data, ext: "jpg" });
     }
+  }
 
-    if (!data) continue;
-    files.push({ name: `${String(i + 1).padStart(2, "0")}-主图.${ext}`, data });
+  // 一次 Chrome 会话渲染全部 SVG（原来每张各起一个 Chrome，8 张要 29s）
+  if (svgJobs.length > 0) {
+    const results = await rasterizeSvgBatch(svgJobs.map((j) => ({ src: j.src, out: j.out, scale: 2 })));
+    for (let k = 0; k < svgJobs.length; k++) {
+      const job = svgJobs[k];
+      if (results[k]?.ok) {
+        const data = await readFile(job.out).catch(() => null);
+        if (data) dataByIndex.set(job.index, { data, ext: "jpg" });
+      }
+      await unlink(job.out).catch(() => {});
+    }
+  }
+
+  const files: ZipFile[] = [];
+  for (let i = 0; i < images.length; i++) {
+    const hit = dataByIndex.get(i);
+    if (!hit) continue;
+    files.push({ name: `${String(i + 1).padStart(2, "0")}-主图.${hit.ext}`, data: hit.data });
   }
   if (files.length === 0) {
     return jsonError("主图下载失败，请重试。", 502);

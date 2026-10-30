@@ -9,13 +9,27 @@ import AnalyticsPanel from "./analytics-panel";
 import AccountsPanel from "./accounts-panel";
 import SettingsPanel from "./settings-panel";
 import ScheduledJobsPanel from "./scheduled-jobs-panel";
-import HuashuVideoPanel, { useHuashuVideoPanel } from "./huashu-video-panel";
+import HuashuVideoPanel, { useHuashuVideoPanel, DEFAULT_HUASHU_REQUIREMENT } from "./huashu-video-panel";
 import HuashuVideoActions from "./huashu-video-actions";
 import ModelPicker, { type ModelOption, type CurrentModel } from "./model-picker";
 import WechatConversation from "./wechat-conversation";
+import { DEFAULT_REWRITE_PRESET } from "@/lib/rewrite-preset";
 
 /** 置顶「微信会话」的虚拟会话 id（不存库，仅为前端路由用）。 */
 const WECHAT_CONV_ID = "__wechat__";
+
+/**
+ * 会话快捷入口开关。
+ * 「一键剪视频」「一键复刻爆款视频」两个入口暂时隐藏（2026-10-30 要求）。
+ * 服务端能力与面板组件都完整保留，只是不给入口；改回 true 即恢复。
+ */
+const SHOW_VIDEO_REMAKE_ENTRIES = false;
+
+/**
+ * 热点选题卡片上的「一键生成视频」入口开关。
+ * 暂时隐藏（2026-10-30 要求），生成逻辑 startHotTopicVideo 与视频链路保持完好，改回 true 即恢复。
+ */
+const SHOW_TOPIC_VIDEO_BUTTON = false;
 
 type ApiResponse<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -152,6 +166,12 @@ const navItems: Array<[Section, string, string]> = [
   ["users", "账号管理", "◍"],
   ["profile", "个人中心", "◌"]
 ];
+
+/**
+ * 侧栏暂时隐藏的菜单项（2026-10-30 要求）：发布管理 / 账号管理。
+ * 面板组件与路由全部保留，只是不给入口；从数组里删掉对应 key 即恢复。
+ */
+const HIDDEN_NAV_SECTIONS: Section[] = ["publish", "users"];
 
 const sectionTitles: Record<Section, string> = {
   chat: "对话",
@@ -305,6 +325,15 @@ async function api<T>(path: string, init?: RequestInit, timeoutMs = 15000): Prom
 function formatDate(value?: string | null): string {
   if (!value) return "暂无";
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+/** 秒 → 「1 分 20 秒」/「45 秒」。用于「思考中」与任务进度的已用时展示。 */
+function formatElapsedSeconds(total: number | null | undefined): string {
+  const seconds = Math.max(0, Math.round(total ?? 0));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`;
 }
 
 function parseInlineImages(value: unknown): string[] {
@@ -615,7 +644,8 @@ const DEFAULT_LOOK_EFFECTS = [
 ];
 
 /** 「一键生成视频」创作要求的默认提示词（打开弹窗即预填，重置后也回到这一句）。 */
-const DEFAULT_GEN_VIDEO_REQUIREMENT = "生成ai回忆录宣传片";
+// 与一键生成视频面板共用同一份默认文案（含时长），避免两处各写一套
+const DEFAULT_GEN_VIDEO_REQUIREMENT = DEFAULT_HUASHU_REQUIREMENT;
 const DEFAULT_LOOK_MOTIONS = [
   { value: "auto", label: "跟随分镜（AI 逐镜头挑选）" },
   { value: "ken-burns", label: "缓慢推进" },
@@ -678,6 +708,23 @@ export default function PlatformClient() {
   } | null>(null);
   const [sending, setSending] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
+  /**
+   * 会话里正在跑的后台任务（agent 用 bash 跑视频 CLI 等）的实时进度。
+   *
+   * 视频任务动辄十几分钟，网关在任务期间不发任何事件 —— 只显示「思考中」会让人
+   * 以为卡死了。平台侧把 CLI 写的 `data/video-progress/<userId>.json` 读出来，
+   * 这里轮询展示阶段与百分比；非视频任务拿不到阶段，只显示秒表 + 说明。
+   */
+  const [liveVideoProgress, setLiveVideoProgress] = useState<{
+    /** generate = 出片任务；edit = Studio 改片后重新出片 */
+    kind: "generate" | "edit";
+    stage: string;
+    percent: number;
+    message: string;
+    elapsedSeconds: number | null;
+  } | null>(null);
+  /** 「思考中」已用秒数：没有阶段可显示的任务，至少让用户看到它还在走。 */
+  const [thinkElapsed, setThinkElapsed] = useState(0);
   const [streamingContent, setStreamingContent] = useState("");
   const [toast, setToast] = useState<{ message: string; linkLabel?: string; linkSection?: Section } | null>(null);
   const [lastSavedContent, setLastSavedContent] = useState<ContentItem | null>(null);
@@ -1365,6 +1412,68 @@ export default function PlatformClient() {
       window.clearInterval(timer);
     };
   }, [videoTaskProgress?.token, videoTaskProgress?.terminal, activeConversation?.id]);
+
+  /**
+   * 「思考中」秒表：只要在等回复就每秒跳一次。
+   *
+   * 这是最便宜的「它在动」证据 —— 之前只有一个静止的「思考中...」，跑十几分钟
+   * 视频任务时用户完全无法判断是死是活。
+   */
+  useEffect(() => {
+    if (!sending) {
+      setThinkElapsed(0);
+      return;
+    }
+    const timer = window.setInterval(() => setThinkElapsed((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [sending]);
+
+  /**
+   * 后台任务进度轮询（视频类任务有真实阶段）。
+   *
+   * 只在自己发消息且还没收到任何正文时轮询；收到正文说明模型开始说话了，
+   * 进度卡就没必要再占地方。2.5 秒一次，接口只读一个小 JSON，开销可忽略。
+   */
+  useEffect(() => {
+    if (!sending || !isThinking || streamingContent || !activeConversation) {
+      setLiveVideoProgress(null);
+      return;
+    }
+    const conversationId = activeConversation.id;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const data = await api<{
+          running: boolean;
+          kind?: string;
+          stage?: string;
+          percent?: number;
+          message?: string;
+          elapsedSeconds?: number | null;
+        }>(`/api/conversations/${conversationId}/video-progress`);
+        if (cancelled) return;
+        setLiveVideoProgress(
+          data?.running
+            ? {
+                kind: data.kind === "edit" ? "edit" : "generate",
+                stage: data.stage ?? "",
+                percent: typeof data.percent === "number" ? data.percent : 0,
+                message: data.message ?? "",
+                elapsedSeconds: data.elapsedSeconds ?? null
+              }
+            : null
+        );
+      } catch {
+        // 轮询失败不打扰用户：下一轮会重试。
+      }
+    };
+    void poll();
+    const timer = window.setInterval(poll, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [sending, isThinking, streamingContent, activeConversation?.id]);
 
   /**
    * 后台自动改片时，把会话里的进度消息刷出来。
@@ -2354,7 +2463,7 @@ export default function PlatformClient() {
       setGenVideoPrimaryIndex(0);
       // 面板状态现在常驻在 huashuPanel 钩子里：热点流程备好的需求/配图直接灌进去
       // （配图带的是现成 objectURL，走 setImagesFromFiles，不再让面板从空表单开始）。
-      huashuPanel.reset(prepared.requirement ?? "");
+      huashuPanel.reset(prepared.requirement?.trim() || DEFAULT_HUASHU_REQUIREMENT);
       huashuPanel.setImagesFromFiles(files);
       setGenVideoPanelFor(conversationId);
       setGenVideoPanelOpen(true);
@@ -2866,8 +2975,33 @@ export default function PlatformClient() {
     }
   }
 
-  /** 把当前这篇图文发布到官网「好物推荐」板块（hgwx.aimemory.cafe）。 */
-  async function publishToSite() {
+  /**
+   * 视频详情页「重新生成」（封面区）：换一版封面。
+   *
+   * 后端每次都会换截图位置（按版本号轮换）+ 重新按配文写一句标题，所以连点几次
+   * 会得到几张不同的封面，而不是同一张图重复覆盖。
+   */
+  async function regenerateVideoCover() {
+    if (!activeContent || regeneratingImage) return;
+    setRegeneratingImage("video-cover");
+    setCopiedButton(null);
+    setCopyHint("");
+    try {
+      const data = await api<{ contentItem: ContentItem; coverImageUrl: string; coverTitle: string }>(
+        `/api/content/${activeContent.id}/video-cover`,
+        { method: "POST" }
+      );
+      setActiveContent(data.contentItem);
+      await refreshContent();
+      showCopyHint(`封面已换新${data.coverTitle ? `（标题：${data.coverTitle.replace(/\n/g, " ")}）` : ""}`);
+    } catch (error) {
+      showCopyHint(error instanceof Error ? error.message : "封面生成失败。");
+    } finally {
+      setRegeneratingImage(null);
+    }
+  }
+
+  /** 把当前这篇图文发布到官网「好物推荐」板块（hgwx.aimemory.cafe）。 */  async function publishToSite() {
     if (!activeContent || publishingContent) return;
     setPublishingContent(true);
     setCopiedButton(null);
@@ -3153,7 +3287,7 @@ export default function PlatformClient() {
           <button className="sidebar-toggle" type="button" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "展开左侧菜单" : "收起左侧菜单"} title={sidebarCollapsed ? "展开菜单" : "收起菜单"}>{sidebarCollapsed ? "›" : "‹"}</button>
         </div>
         <nav>
-          {navItems.map(([key, label, icon]) => (
+          {navItems.filter(([key]) => !HIDDEN_NAV_SECTIONS.includes(key)).map(([key, label, icon]) => (
             <button key={key} className={section === key ? "active" : ""} onClick={() => selectSection(key)} title={label}><span className="nav-icon" aria-hidden="true">{icon}</span><span className="nav-label">{label}</span></button>
           ))}
         </nav>
@@ -3278,14 +3412,16 @@ export default function PlatformClient() {
                                         >
                                           公众号创作
                                         </button>
-                                        <button
-                                          type="button"
-                                          className="topic-gen-btn topic-gen-btn-video"
-                                          disabled={sending || videoPreparingTopic !== null}
-                                          onClick={() => void startHotTopicVideo(topic.text)}
-                                        >
-                                          {videoPreparingTopic === topic.text ? "准备中…" : "一键生成视频"}
-                                        </button>
+                                        {SHOW_TOPIC_VIDEO_BUTTON && (
+                                          <button
+                                            type="button"
+                                            className="topic-gen-btn topic-gen-btn-video"
+                                            disabled={sending || videoPreparingTopic !== null}
+                                            onClick={() => void startHotTopicVideo(topic.text)}
+                                          >
+                                            {videoPreparingTopic === topic.text ? "准备中…" : "一键生成视频"}
+                                          </button>
+                                        )}
                                       </div>
                                     </div>
                                   ))}
@@ -3555,14 +3691,50 @@ export default function PlatformClient() {
                         style={{ order: 1000 }}
                       >
                         {isThinking && !streamingContent ? (
-                          <span className="thinking-indicator">
-                            <span className="thinking-dots">
-                              <span className="thinking-dot" />
-                              <span className="thinking-dot" />
-                              <span className="thinking-dot" />
-                            </span>
-                            思考中...
-                          </span>
+                          liveVideoProgress && !videoTaskProgress ? (
+                            /* 后台正在跑视频：显示真实阶段 + 百分比 + 已用时间，别只转圈 */
+                            <div className="task-live-progress">
+                              <div className="task-live-head">
+                                <span className="task-live-title">
+                                  <span className="video-preparing-dot" />
+                                  {liveVideoProgress.kind === "edit" ? "正在改片" : "正在生成视频"} ·{" "}
+                                  {liveVideoProgress.percent}%
+                                </span>
+                                <span className="task-live-elapsed">
+                                  已处理 {formatElapsedSeconds(liveVideoProgress.elapsedSeconds ?? thinkElapsed)}
+                                </span>
+                              </div>
+                              <div className="task-live-bar">
+                                <div
+                                  className="task-live-fill"
+                                  style={{ width: `${Math.min(100, Math.max(4, liveVideoProgress.percent))}%` }}
+                                />
+                              </div>
+                              <p className="task-live-message">{liveVideoProgress.message || "正在执行…"}</p>
+                              <p className="task-live-hint">
+                                {liveVideoProgress.kind === "edit"
+                                  ? "改片通常 3~10 分钟，改完会自动重新出片；可以切走或换会话，进度不会丢。"
+                                  : "视频任务通常 8~20 分钟；可以切走或换会话，进度不会丢。"}
+                              </p>
+                            </div>
+                          ) : (
+                            <>
+                              <span className="thinking-indicator">
+                                <span className="thinking-dots">
+                                  <span className="thinking-dot" />
+                                  <span className="thinking-dot" />
+                                  <span className="thinking-dot" />
+                                </span>
+                                思考中...
+                                <span className="thinking-elapsed">已处理 {formatElapsedSeconds(thinkElapsed)}</span>
+                              </span>
+                              {thinkElapsed >= 20 && (
+                                <p className="thinking-hint">
+                                  正在调用工具执行（不是卡住）。复杂任务可能需要几分钟；可以切走或换会话，回来还能看到进度。
+                                </p>
+                              )}
+                            </>
+                          )
                         ) : (
                           <>
                             <div className="markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(streamingContent) }} />
@@ -3690,10 +3862,14 @@ export default function PlatformClient() {
                     <div className="chat-input-topbar">
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("今日产品热点")}>今日产品热点</button>
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("今日全网热点")}>今日全网热点</button>
-                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => setRewriteUrlModal(true)}>一键仿写爆款</button>
+                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => { setRewriteUrl((current) => (current.trim() ? current : DEFAULT_REWRITE_PRESET.shareText)); setRewriteUrlModal(true); }}>一键仿写爆款</button>
                       <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键生成视频")}>一键生成视频</button>
-                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键剪视频")}>一键剪视频</button>
-                      <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键复刻爆款视频")}>一键复刻爆款视频</button>
+                      {SHOW_VIDEO_REMAKE_ENTRIES && (
+                        <>
+                          <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键剪视频")}>一键剪视频</button>
+                          <button type="button" className="quick-action-btn" disabled={sending} onClick={() => void sendChatContent("一键复刻爆款视频")}>一键复刻爆款视频</button>
+                        </>
+                      )}
                     </div>
                     <div className="chat-input-wrap">
                       <textarea
@@ -3786,36 +3962,33 @@ export default function PlatformClient() {
               <button className="back-to-library-float" onClick={exitContentDetail} title="返回内容库列表">
                 <span aria-hidden="true">←</span> 返回
               </button>
-              <div className="detail-title-row">
-                {editingContent === "title" ? (
-                  <input
-                    className="title-edit-input"
-                    value={editingTitle}
-                    onChange={(e) => setEditingTitle(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
+              <div className="detail-header">
+                <div className="detail-title-row">
+                  {editingContent === "title" ? (
+                    <input
+                      className="title-edit-input"
+                      value={editingTitle}
+                      onChange={(e) => setEditingTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          if (!contentSaving) saveContentEdit();
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          cancelEditContent();
+                        }
+                      }}
+                      onBlur={() => {
                         if (!contentSaving) saveContentEdit();
-                      } else if (e.key === "Escape") {
-                        e.preventDefault();
-                        cancelEditContent();
-                      }
-                    }}
-                    onBlur={() => {
-                      if (!contentSaving) saveContentEdit();
-                    }}
-                    autoFocus
-                  />
-                ) : (
-                  <h1>{activeContent.title}</h1>
-                )}
-                <div className="detail-title-actions">
-                  <button
-                    className={copiedButton === "title" ? "copied-button" : ""}
-                    onClick={() => copyText(activeContent.title, "title")}
-                  >
-                    {copiedButton === "title" ? "已复制" : "复制"}
-                  </button>
+                      }}
+                      autoFocus
+                    />
+                  ) : (
+                    <h1>{activeContent.title}</h1>
+                  )}
+                  <span className="detail-date">{formatDate(activeContent.createdAt)}</span>
+                </div>
+                <div className="detail-toolbar">
                   <button
                     className="publish-site-button"
                     disabled={publishingContent}
@@ -3836,16 +4009,6 @@ export default function PlatformClient() {
                   >
                     {publishingHealing ? (activeContent.videoUrl ? "上传中..." : "推送中...") : "推送心灵驿站"}
                   </button>
-                  {huashuTokenOf(activeContent.videoUrl) && (
-                    <button
-                      className="publish-site-button"
-                      disabled={studioOpening}
-                      onClick={() => void openStudioForContent()}
-                      title="在 Studio 里点画面提修改，AI 自动改片并出新版；改完可再「推送心灵驿站」覆盖线上同一条"
-                    >
-                      {studioOpening ? "启动中..." : "去 Studio 修改"}
-                    </button>
-                  )}
                   <button
                     className="publish-site-button publish-frontier-button"
                     disabled={publishingFrontier}
@@ -3854,19 +4017,77 @@ export default function PlatformClient() {
                   >
                     {publishingFrontier ? "推送中..." : "推送 AI最前沿"}
                   </button>
+                  <button
+                    className={copiedButton === "title" ? "copied-button toolbar-btn" : "toolbar-btn"}
+                    onClick={() => copyText(activeContent.title, "title")}
+                  >
+                    {copiedButton === "title" ? "已复制" : "复制"}
+                  </button>
                   {editingContent === "title" ? (
-                    <button onClick={saveContentEdit} disabled={contentSaving}>{contentSaving ? "保存中..." : "保存"}</button>
+                    <button className="toolbar-btn" onClick={saveContentEdit} disabled={contentSaving}>{contentSaving ? "保存中..." : "保存"}</button>
                   ) : (
-                    <button onClick={() => startEditContent("title")}>编辑</button>
+                    <button className="toolbar-btn" onClick={() => startEditContent("title")}>编辑</button>
                   )}
                 </div>
               </div>
-              <span>{formatDate(activeContent.createdAt)}</span>
 
               {activeContent.videoUrl ? (
-                /* 视频内容：居中放大展示 */
+                /* 视频内容：左侧封面图（可复制/换一版），右侧成片 */
                 <div className="detail-video-block">
+                  <div className="detail-video-cover">
+                    {activeContent.coverImageUrl ? (
+                      <img
+                        className="detail-video-cover-img"
+                        src={activeContent.coverImageUrl}
+                        alt="视频封面"
+                        onClick={() => setLightboxIndex(0)}
+                      />
+                    ) : (
+                      <div className="detail-video-cover-empty">还没有封面图</div>
+                    )}
+                    <div className="detail-video-cover-actions">
+                      {activeContent.coverImageUrl ? (
+                        <a
+                          className="cover-download-btn"
+                          href={activeContent.coverImageUrl}
+                          download={`${(activeContent.title || "视频封面")
+                            .replace(/[\\/:*?"<>|\n\r]/g, "-")
+                            .trim()
+                            .slice(0, 24)}-封面.jpg`}
+                          title="下载这张封面图到本地"
+                        >
+                          下载
+                        </a>
+                      ) : (
+                        <button type="button" disabled title="还没有封面图">
+                          下载
+                        </button>
+                      )}
+                      <button
+                        className="regen-image-button"
+                        disabled={regeneratingImage === "video-cover"}
+                        onClick={() => void regenerateVideoCover()}
+                        title="每次换一个视频画面位置，标题也重新按配文写一句"
+                      >
+                        {regeneratingImage === "video-cover" ? "生成中..." : "重新生成"}
+                      </button>
+                    </div>
+                    {regeneratingImage === "video-cover" && (
+                      <p className="detail-image-progress">正在换一版封面（重新截图 + 写标题）...</p>
+                    )}
+                    <p className="detail-video-cover-hint">这张图就是内容库列表里的封面</p>
+                  </div>
                   <video key={activeContent.videoUrl} controls src={activeContent.videoUrl} className="detail-video-player" />
+                  {huashuTokenOf(activeContent.videoUrl) && (
+                    <button
+                      className="detail-video-studio"
+                      disabled={studioOpening}
+                      onClick={() => void openStudioForContent()}
+                      title="在 Studio 里点画面提修改，AI 自动改片并出新版；改完可再「推送心灵驿站」覆盖线上同一条"
+                    >
+                      {studioOpening ? "启动中..." : "去 Studio 修改"}
+                    </button>
+                  )}
                 </div>
               ) : (
                 <>
@@ -4216,12 +4437,12 @@ export default function PlatformClient() {
               </div>
             </div>
             <div className="humanizer-modal-body">
-              <p>粘贴要仿写的爆款内容链接（小红书 / 公众号 / 抖音等），确认后系统会先拆解该爆款结构，再结合你的产品知识与账号定位仿写一篇全新内容并自动保存到内容库。</p>
+              <p>已内置一条爆款样本（《{DEFAULT_REWRITE_PRESET.label}》），直接点「确认仿写」即可；也可以把它替换成你自己的爆款链接（小红书 / 公众号 / 抖音等）。系统会先拆解结构，再结合你的产品知识与账号定位仿写一篇全新内容并自动保存到内容库。</p>
               <label className="rewrite-url-label">爆款链接
                 <textarea
                   className="rewrite-url-input"
                   rows={4}
-                  placeholder="可粘贴整段平台分享文案，系统会自动提取其中的链接（小红书 / 抖音 / 公众号等）"
+                  placeholder="默认已填入内置样本，可直接仿写；也可粘贴整段平台分享文案，系统会自动提取其中的链接（小红书 / 抖音 / 公众号等）"
                   value={rewriteUrl}
                   onChange={(event) => setRewriteUrl(event.target.value)}
                   onKeyDown={(event) => {

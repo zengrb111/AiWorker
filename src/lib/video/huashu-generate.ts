@@ -13,7 +13,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { prisma } from "@/lib/prisma";
 import { runDshRender } from "@/lib/dsh";
-import { extractVideoPoster } from "@/lib/video/poster";
+import { generateVideoCover } from "@/lib/video/cover";
 import {
   buildFilmPrompt,
   omCheck,
@@ -94,8 +94,12 @@ export type HuashuGenerateOptions = {
    * 定时视频任务需要知道这条初稿改了什么，置 true。
    */
   progressInChat?: boolean;
-  /** 目标时长（秒）。默认 20；定时任务可按任务配置（如 30）。裁剪与 DSH 约束都用它。 */
-  targetSeconds?: number;
+  /**
+   * 目标时长（秒）。默认不限制（null）：对话「一键生成视频」走这条 —— 提示词写了
+   * 时长就用它，没写就让 DSH 按内容自然展开。定时任务按任务配置显式传值（如 30）。
+   * 仅当它非 null 时才会约束 DSH 并裁剪超长成片。
+   */
+  targetSeconds?: number | null;
 };
 
 export type HuashuGenerateResult = {
@@ -189,7 +193,7 @@ export async function runHuashuGeneration(
     onProgress,
     prefixLines = [],
     progressInChat = false,
-    targetSeconds = 20
+    targetSeconds = null
   } = options;
 
   const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -211,7 +215,8 @@ export async function runHuashuGeneration(
       productName: requirement,
       projectDir: dir,
       status: "BUILDING",
-      progressInChat
+      progressInChat,
+      targetSeconds: targetSeconds ?? null
     }
   });
 
@@ -303,15 +308,25 @@ export async function runHuashuGeneration(
 
     const duration = await probeDuration(file);
     let finalDuration = duration ?? null;
-    const maxSeconds = targetSeconds + 0.3; // 渲染按帧对齐常差一两帧，给 0.3s 容差
-    if (duration != null && duration > maxSeconds) {
-      report(`成片 ${duration.toFixed(1)}s 超过 ${targetSeconds}s 上限，正在裁剪…`);
-      const trimmed = join(dir, "out", `trimmed-${targetSeconds}s.mp4`);
-      await trimToSeconds(file, targetSeconds, trimmed);
-      file = trimmed;
-      finalDuration = (await probeDuration(file)) ?? targetSeconds;
+    // 仅当显式指定了目标时长才裁剪：对话「一键生成视频」不写时长时走 null，
+    // 表示「按提示词要求、不限制」，DSH 自然多长就留多长，绝不硬砍。
+    if (targetSeconds != null) {
+      const maxSeconds = targetSeconds + 0.3; // 渲染按帧对齐常差一两帧，给 0.3s 容差
+      if (duration != null && duration > maxSeconds) {
+        report(`成片 ${duration.toFixed(1)}s 超过 ${targetSeconds}s 上限，正在裁剪…`);
+        const trimmed = join(dir, "out", `trimmed-${targetSeconds}s.mp4`);
+        await trimToSeconds(file, targetSeconds, trimmed);
+        file = trimmed;
+        finalDuration = (await probeDuration(file)) ?? targetSeconds;
+      }
     }
-    if (finalDuration != null) report(`成片时长 ${finalDuration.toFixed(1)}s。`);
+    if (finalDuration != null) {
+      report(
+        targetSeconds != null
+          ? `成片时长 ${finalDuration.toFixed(1)}s（目标 ${targetSeconds}s）。`
+          : `成片时长 ${finalDuration.toFixed(1)}s（按内容自然展开，未设上限）。`
+      );
+    }
 
     const videoUrl = publishVideo(file, token, 1);
     await prisma.videoMotionProject.update({
@@ -356,11 +371,19 @@ export async function runHuashuGeneration(
       }
     });
 
-    // 抽首帧当内容库封面：视频条目以前只能显示通用占位图
-    const poster = await extractVideoPoster(videoUrl, `huashu-${token}-v1`);
-    if (poster) {
+    // 内容库封面：从成片截一帧 + 按配文写一句黄色居中标语压在画面正中。
+    // 生成失败（字体/模型/ffmpeg 任一环节）内部会退化成纯抽帧，不会影响出片结果。
+    const cover = await generateVideoCover({
+      videoUrl,
+      userId,
+      name: `huashu-${token}-v1`,
+      title: title || requirement,
+      body: "",
+      variant: 0
+    }).catch(() => null);
+    if (cover) {
       await prisma.contentItem
-        .update({ where: { id: item.id }, data: { coverImageUrl: poster } })
+        .update({ where: { id: item.id }, data: { coverImageUrl: cover.url } })
         .catch(() => undefined);
     }
 

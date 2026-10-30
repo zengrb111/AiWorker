@@ -404,12 +404,29 @@ function runBridge(
   credential: ResolvedModelConfig
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
+    // DSH 运行时（deepseek-harness-sdk-runtime）会读取 HTTPS_PROXY/HTTP_PROXY
+    // 并据此走代理。本机 DeepSeek API 可直接连通（无需代理），但若环境里残留了
+    // 指向 127.0.0.1:7890（Clash）等「已关闭」代理的变量，运行时会因 TRANSPORT
+    // 失败而拿不到任何内容 —— 表现为「DSH 未返回内容（finish_reason='completed'）」。
+    // 平台其余模型调用走 Node fetch（undici 默认忽略代理、直连可用），这里让 DSH
+    // 也直连，保持行为一致。仅清掉代理变量，其余环境原样继承。
+    const childEnv: Record<string, string | undefined> = { ...process.env };
+    for (const k of [
+      "HTTPS_PROXY",
+      "HTTP_PROXY",
+      "https_proxy",
+      "http_proxy",
+      "ALL_PROXY",
+      "all_proxy",
+    ]) {
+      delete childEnv[k];
+    }
     const child = spawn(python, [join(bridgeDir(), "main.py")], {
       cwd: process.cwd(),
       windowsHide: true,
       shell: false,
       env: {
-        ...process.env,
+        ...childEnv,
         // 密钥来自该用户自己的「分镜规划」配置；baseUrl 缺省才回落到部署级 env。
         DEEPSEEK_API_KEY: credential.apiKey,
         DEEPSEEK_BASE_URL: credential.baseUrl || readEnv("DEEPSEEK_BASE_URL") || undefined,
@@ -420,6 +437,7 @@ function runBridge(
         NODE_OPTIONS: "",
         PYTHONIOENCODING: "utf-8",
         PYTHONUTF8: "1",
+        NODE_ENV: process.env.NODE_ENV ?? "production",
       },
     });
 

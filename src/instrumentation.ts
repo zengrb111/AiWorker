@@ -7,6 +7,8 @@
  * 调用，真正的调度逻辑放在 /api/scheduler/tick 路由里（普通服务端路由，编译环境正常）。
  */
 const TICK_INTERVAL_MS = 30_000;
+/** Studio 评论接单单独用更短的间隔：用户改完片就在等效果，30 秒空窗体感很差。 */
+const MOTION_TICK_INTERVAL_MS = 10_000;
 const FIRST_DELAY_MS = 15_000;
 
 export async function register() {
@@ -41,8 +43,10 @@ export async function register() {
   const tick = () => {
     post(url, "scheduler");
     post(collectUrl, "collectors");
-    post(motionUrl, "motion-inbox");
   };
+  // Studio 评论接单一轮可能要跑十几分钟；路由里有 ticking 重入保护，
+  // 轮询期间再来一轮会直接返回 skipped，所以 10 秒一次不会堆积。
+  const motionTick = () => post(motionUrl, "motion-inbox");
 
   // 重启后自愈微信通道：网关重启会打断到微信服务端的长连接，插件也可能清掉历史 bot 凭据，
   // 导致「昨天正常、今天重启后微信显示暂无法连接」。这里只做一次本机 HTTP 调用（不 import
@@ -64,11 +68,15 @@ export async function register() {
   };
 
   const timer = setInterval(tick, TICK_INTERVAL_MS);
-  if (typeof timer.unref === "function") timer.unref();
+  const motionTimer = setInterval(motionTick, MOTION_TICK_INTERVAL_MS);
+  for (const t of [timer, motionTimer]) {
+    if (typeof t.unref === "function") t.unref();
+  }
   setTimeout(tick, FIRST_DELAY_MS);
+  setTimeout(motionTick, FIRST_DELAY_MS);
   // 启动后延时自愈一次（等平台路由与网关就绪），再补跑一次兜底「网关启动慢于平台」的情况。
   setTimeout(selfHeal, 20_000);
   setTimeout(selfHeal, 90_000);
-  console.log(`[scheduler] 平台定时任务调度器已启动（每 ${TICK_INTERVAL_MS / 1000}s 触发一次 /api/scheduler/tick + /api/collectors/tick）`);
+  console.log(`[scheduler] 平台定时任务调度器已启动（每 ${TICK_INTERVAL_MS / 1000}s 触发 /api/scheduler/tick + /api/collectors/tick；每 ${MOTION_TICK_INTERVAL_MS / 1000}s 触发 Studio 评论接单）`);
   console.log("[self-heal] 微信通道自愈已排期（启动后 20s / 90s 各一次）");
 }

@@ -91,6 +91,8 @@ model ScheduledJob {
   oneShotAt  DateTime?
   /// 结果是否推送到本人微信（关=只执行不通知，参照 WorkBuddy 的「消息推送到企业微信」开关）
   notifyWechat Boolean @default(true)
+  /// 每天只跑一次：当天已成功执行过就不再被重复触发（防同一时点被调度两次而产出重复内容）
+  oncePerDay Boolean   @default(false)
   /// 标准 5 段 cron：分 时 日 月 周（支持通配、单值、逗号列表、区间、步进 /n）
   cronExpr   String
   timezone   String    @default("Asia/Shanghai")
@@ -263,6 +265,8 @@ model VideoMotionProject {
   /// Studio 改片过程是否写进会话。手动出片的会话里不展示（用户只要成片，不要刷屏）；
   /// 定时视频任务需要看到「这条初稿改了什么」，置 true。
   progressInChat Boolean  @default(false)
+  /// 成片目标时长（秒）；Studio 改片重出片时据此约束节奏与裁剪。null=按 20s 旧默认处理。
+  targetSeconds  Int?
   error          String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt

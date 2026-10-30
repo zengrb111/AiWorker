@@ -48,3 +48,20 @@ public/videos/
 # 不以 submodule 纳入主仓库：github.com 直连在此环境被限，且原 .gitmodules 已缺失。
 # 重新获取与初始化见 scripts/fetch-openmontage.ps1
 /OpenMontage/
+
+# 部署临时产物（含密钥包，禁止提交）
+.deploy/
+
+# 本地临时 / 运维 / 敏感残留（禁止提交）
+scripts/_*
+scripts/__pycache__/
+*.state.json
+/dev.db
+/exports/
+/logslice.txt
+/restart-gateway.cmd
+/restart-gateway.ps1
+/restart-platform.cmd
+/restart-platform.ps1
+/tmp-*
+*.bak-*

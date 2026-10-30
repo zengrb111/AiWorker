@@ -4,12 +4,13 @@
  * 真正的出片流程在 `lib/video/huashu-generate.ts`（定时任务也用同一套），
  * 这里只负责：鉴权、解析表单（含参考图文件）、把进度用 SSE 转给前端。
  *
- * 约束（产品定的）：竖版 1080×1920、成片 ≤20s、网站与参考图至少有一个。
+ * 约束：竖版 1080×1920、网站与参考图至少有一个。成片时长由创作需求决定
+ *（提示词写了「N 秒 / N 分钟」就用它，没写则不限制，DSH 按内容自然展开）。
  */
 import { jsonError } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
-import { huashuAvailable } from "@/lib/video/huashu";
+import { huashuAvailable, parseHuashuDuration } from "@/lib/video/huashu";
 import { runHuashuGeneration, type HuashuImageInput } from "@/lib/video/huashu-generate";
 
 export const dynamic = "force-dynamic";
@@ -48,6 +49,10 @@ export async function POST(request: Request, context: { params: { id: string } }
     images.push({ filename: file.name, data: Buffer.from(await file.arrayBuffer()) });
   }
 
+  // 对话「一键生成视频」：时长完全交给提示词。提示词里写了「30秒 / 1分钟」就用它，
+  // 没写就传 null（不限制，DSH 按内容自然展开），取代原先固定的 20s 上限。
+  const targetSeconds = parseHuashuDuration(requirement);
+
   const stream = new ReadableStream({
     async start(controller) {
       let closed = false;
@@ -68,6 +73,7 @@ export async function POST(request: Request, context: { params: { id: string } }
           requirement,
           siteUrl: siteUrl || null,
           images,
+          targetSeconds,
           onProgress: (text) => safeEnqueue({ type: "delta", text: `${text}\n` })
         });
 

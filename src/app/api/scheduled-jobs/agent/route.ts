@@ -22,7 +22,11 @@ export const dynamic = "force-dynamic";
  *     action: "list" | "create" | "update" | "delete" | "run",
  *     userId? | sessionKey? | phone?,   // 归属账号（必填，不接受静默兜底）
  *     id?,                              // update/delete/run 用
- *     name?, cronExpr?, timezone?, prompt?, enabled?
+ *     name?, cronExpr?, timezone?, prompt?, enabled?,
+ *     kind?,                            // TEXT（默认）| VIDEO（走 huashu-motion 直接出片）
+ *     videoSiteUrl?,                    // 视频任务：产品网站
+ *     videoImages?,                     // 视频任务：参考图 URL 数组（最多 6 张）
+ *     videoTargetSeconds?               // 视频任务：目标时长 10~60 秒
  *   }
  * 返回 { jobs } 或 { job } 或 { deleted } 或 { triggered }。
  */
@@ -37,7 +41,31 @@ type AgentBody = {
   timezone?: string;
   prompt?: string;
   enabled?: boolean;
+  kind?: string;
+  videoSiteUrl?: string;
+  videoImages?: string[];
+  videoTargetSeconds?: number | null;
 };
+
+/**
+ * 视频字段归一化：与网页端 POST /api/scheduled-jobs 共用同一套规则，
+ * 避免 agent 建出来的视频任务与界面建的行为不一致。
+ */
+function normalizeVideoFields(body: AgentBody) {
+  const kind = (body.kind || "").trim().toUpperCase() === "VIDEO" ? "VIDEO" : "TEXT";
+  const siteUrl = (body.videoSiteUrl || "").trim();
+  const images = Array.isArray(body.videoImages)
+    ? body.videoImages.map((u) => String(u || "").trim()).filter(Boolean).slice(0, 6)
+    : [];
+  let targetSeconds: number | null = null;
+  if (typeof body.videoTargetSeconds === "number" && Number.isFinite(body.videoTargetSeconds)) {
+    targetSeconds = Math.min(60, Math.max(10, Math.round(body.videoTargetSeconds)));
+  }
+  if (siteUrl && !/^https?:\/\//i.test(siteUrl)) {
+    return { error: "videoSiteUrl 需以 http:// 或 https:// 开头。", kind, siteUrl, images, targetSeconds };
+  }
+  return { error: null, kind, siteUrl, images, targetSeconds };
+}
 
 function extractToken(request: NextRequest): string {
   const header = request.headers.get("authorization") || "";
@@ -91,8 +119,21 @@ export async function POST(request: NextRequest) {
       if (!name) return jsonError("缺少 name。");
       if (!isValidCronExpr(cronExpr)) return jsonError("cronExpr 不合法（5 段：分 时 日 月 周）。");
       if (!prompt) return jsonError("缺少 prompt（到点要执行的内容）。");
+      const video = normalizeVideoFields(body);
+      if (video.error) return jsonError(video.error);
       const job = await prisma.scheduledJob.create({
-        data: { userId: user.id, name, cronExpr, timezone, prompt, enabled: body.enabled !== false }
+        data: {
+          userId: user.id,
+          name,
+          cronExpr,
+          timezone,
+          prompt,
+          enabled: body.enabled !== false,
+          kind: video.kind,
+          videoSiteUrl: video.kind === "VIDEO" ? video.siteUrl || null : null,
+          videoImagesJson: video.kind === "VIDEO" ? JSON.stringify(video.images) : null,
+          videoTargetSeconds: video.kind === "VIDEO" ? video.targetSeconds : null
+        }
       });
       return jsonOk({ account: user.phone, job });
     }
@@ -117,6 +158,30 @@ export async function POST(request: NextRequest) {
         data.prompt = prompt;
       }
       if (body.enabled !== undefined) data.enabled = body.enabled !== false;
+      // 视频相关字段：只带其中任意一个就按视频规则校验并整组落库，
+      // 这样 agent 既能「只改时长」，也能「只换官网」，不用每次都补齐全部字段。
+      if (
+        body.kind !== undefined ||
+        body.videoSiteUrl !== undefined ||
+        body.videoImages !== undefined ||
+        body.videoTargetSeconds !== undefined
+      ) {
+        const video = normalizeVideoFields(body);
+        // 部分字段时可以沿用已有任务的取值
+        const kind = body.kind !== undefined ? video.kind : ((job.kind || "TEXT").toUpperCase() === "VIDEO" ? "VIDEO" : "TEXT");
+        const siteUrl = body.videoSiteUrl !== undefined ? video.siteUrl : (kind === "VIDEO" ? job.videoSiteUrl || "" : "");
+        if (video.error && body.videoSiteUrl !== undefined) return jsonError(video.error);
+        const images = body.videoImages !== undefined
+          ? video.images
+          : (job.videoImagesJson ? (JSON.parse(job.videoImagesJson) as string[]) : []);
+        const targetSeconds = body.videoTargetSeconds !== undefined
+          ? video.targetSeconds
+          : job.videoTargetSeconds;
+        data.kind = kind;
+        data.videoSiteUrl = kind === "VIDEO" ? siteUrl || null : null;
+        data.videoImagesJson = kind === "VIDEO" ? JSON.stringify(images) : null;
+        data.videoTargetSeconds = kind === "VIDEO" ? targetSeconds ?? null : null;
+      }
       if (Object.keys(data).length === 0) return jsonError("没有需要修改的字段。");
       const updated = await prisma.scheduledJob.update({ where: { id: job.id }, data });
       return jsonOk({ account: user.phone, job: updated });

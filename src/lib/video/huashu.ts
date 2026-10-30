@@ -17,6 +17,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { agentTokenFilePath } from "@/lib/platform-config";
 
 /** huashu-motion 仓库根目录；可用 HUASHU_MOTION_ROOT 覆盖（换机器只改 env）。 */
 export function huashuRoot(): string {
@@ -288,7 +289,16 @@ export async function ensureStudio(
       detached: true,
       windowsHide: true,
       stdio: "ignore",
-      env: { ...process.env, NODE_OPTIONS: "", NO_COLOR: "1" }
+      env: {
+        ...process.env,
+        NODE_OPTIONS: "",
+        NO_COLOR: "1",
+        // Studio 的「同步修改到内容库」按钮由 Studio 服务端代理回平台（见 cli/lib/server.js）。
+        // 平台端口/令牌/根目录都从环境传过去，避免 Studio 去猜。
+        AIWORKER_BASE: `http://127.0.0.1:${(process.env.PORT || "3000").trim()}`,
+        AIWORKER_TOKEN_FILE: agentTokenFilePath(),
+        AIWORKER_ROOT: process.cwd()
+      }
     });
     child.unref();
 
@@ -413,9 +423,9 @@ export function buildFilmPrompt(input: {
   dir: string;
   imageCount: number;
   materialSummary: string;
-  targetSeconds?: number;
+  targetSeconds?: number | null;
 }): string {
-  const target = input.targetSeconds ?? 20;
+  const target = input.targetSeconds ?? null;
   const lines = [
     "你是 huashu-motion 的导演。请直接完成一支商业级产品动效片，不要向我提问，不要等我确认。",
     "",
@@ -427,7 +437,9 @@ export function buildFilmPrompt(input: {
     input.materialSummary ? `6. 已抓到的素材清单（供你判断用什么）：\n${input.materialSummary}` : "",
     "",
     "硬约束（验收项，违反即失败）：",
-    `- 成片时长必须 ≤ ${target} 秒（按 ${target}s 设计节奏，不要超出）。`,
+    target != null
+      ? `- 成片时长必须 ≤ ${target} 秒（按 ${target}s 设计节奏，不要超出）。`
+      : "- 成片时长按内容自然展开：需要多少讲多少，不要为了凑时长硬加空镜或强行压缩，也不要冗长拖沓。",
     "- 画布 1080×1920 竖版。",
     "- 第 0 帧就是海报帧：主体已在画面里，不能是空帧/黑帧。",
     "- 只允许使用 materials/ 里的真实素材；不要联网找图，不要画占位框。",
@@ -443,6 +455,29 @@ export function buildFilmPrompt(input: {
 }
 
 /**
+ * 从「创作需求」里解析用户显式指定的成片时长（秒）。
+ *
+ * 支持「30秒 / 30 秒 / 1分钟 / 2 分钟」；未写则返回 null。
+ * 对话「一键生成视频」用它取代固定 20s 上限：提示词写了时长就照办，
+ * 没写就不限制，交给 DSH 按内容自然展开。上限 600s 只是防止把分钟数
+ * 误写成离谱值，正常需求远不会触顶。
+ */
+export function parseHuashuDuration(requirement: string): number | null {
+  if (!requirement) return null;
+  const minute = requirement.match(/(\d{1,3})\s*分钟/);
+  if (minute) {
+    const m = Number.parseInt(minute[1], 10);
+    if (Number.isFinite(m) && m >= 1) return Math.min(600, m * 60);
+  }
+  const second = requirement.match(/(\d{1,3})\s*(?:秒|s(?:ec(?:onds?)?)?)(?![a-z0-9])/i);
+  if (second) {
+    const s = Number.parseInt(second[1], 10);
+    if (Number.isFinite(s) && s >= 1) return Math.min(600, s);
+  }
+  return null;
+}
+
+/**
  * Studio 评论的修改指令。
  *
  * 刻意要求「先看再看」：om look 会给那一帧和点选区域的放大图，
@@ -452,7 +487,9 @@ export function buildEditPrompt(input: {
   dir: string;
   comment: MotionComment;
   lookOutput: string;
+  targetSeconds?: number | null;
 }): string {
+  const target = input.targetSeconds ?? null;
   return [
     "你在修改一支已经完成的 huashu-motion 片子，只改用户点出来的那一处，不要重做整片。",
     "",
@@ -469,7 +506,9 @@ export function buildEditPrompt(input: {
     "- 先看 frame.png（那一帧整体）和 zoom.png（点中区域特写），确认用户指的是什么。",
     "- 只改 index.html 里对应的那一处；不要顺手改别的场景、不要换整体风格。",
     "- **文案类修改必须全局查重**：同一句文案常被复用在多个场景（封面 / 工作区 / 结尾）。先 grep index.html 里用户引用的原句或关键词，把所有出现同一句的位置都改成一致的新文案；只改点中的一处会导致「视频里还是旧文案」。",
-    "- 改完保持 1080×1920、总时长 ≤20s、只用 transform 动画。",
+    target != null
+      ? `- 改完保持 1080×1920、总时长 ≤ ${target}s、只用 transform 动画。`
+      : "- 改完保持 1080×1920、只用 transform 动画（只改点出来的那一处，不要为了改一处而整体拉长或压缩时长）。",
     "- 改完运行 om check，0 error 才算完成；不要运行 om render。",
     "- 最后用一句话说明改了什么（多处同时改就逐处列出）。"
   ]

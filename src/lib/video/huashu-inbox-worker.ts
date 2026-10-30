@@ -34,8 +34,8 @@ import {
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { extractVideoPoster } from "@/lib/video/poster";
+import { writeVideoProgress } from "@/lib/video/progress-file";
 
-const MAX_SECONDS = 20.3;
 const MAX_PROJECTS_PER_TICK = 2;
 /** 每轮最多检查多少个项目的 inbox（纯读文件，很便宜） */
 const MAX_SCAN_PER_TICK = 400;
@@ -52,6 +52,8 @@ type ProjectLike = {
   projectDir: string;
   videoUrl: string | null;
   versionsJson: string;
+  /** 成片目标时长（秒）；Studio 改片据此约束节奏与裁剪。null=按 20s 旧默认。 */
+  targetSeconds: number | null;
 };
 
 type VersionRecord = {
@@ -178,9 +180,21 @@ export async function appendProgressLine(messageId: string | null, line: string)
  */
 export async function processPendingComments(
   project: ProjectLike,
-  options: { limit?: number; onProgress?: (text: string) => void } = {}
+  options: {
+    limit?: number;
+    onProgress?: (text: string) => void;
+    /**
+     * 是否把进度写进平台会话（默认跟 project.progressInChat）。
+     *
+     * 2026-10-27 起自动 tick 传 false：Studio 改片的进展只在 **Studio 顶部状态区** 显示，
+     * 平台会话里不再刷「## Studio 修改」这类消息（用户明确要求）。手动从会话里点「立即处理」
+     * 的入口仍传 true —— 那本来就是用户主动要看的流式进度。
+     */
+    chatProgress?: boolean;
+  } = {}
 ): Promise<ProcessOutcome> {
   const limit = options.limit ?? MAX_COMMENTS_PER_PROJECT;
+  const chatProgress = options.chatProgress ?? project.progressInChat;
 
   if (processing.has(project.id)) {
     return { busy: true, processed: [], remaining: 0, progressMessageId: null };
@@ -209,7 +223,7 @@ export async function processPendingComments(
 
     // 会话里的进度消息：用户切走了也能回来看到「AI 在做什么、改到第几条」。
     // 1 小时内复用同一条（3 条评论 = 3 轮 tick，不该刷出 3 条独立消息）。
-    if (project.conversationId && project.progressInChat) {
+    if (project.conversationId && chatProgress) {
       const cached = progressMessages.get(project.id);
       const reusable =
         cached && Date.now() - cached.at < PROGRESS_REUSE_MS && cached.lines.length < PROGRESS_MAX_LINES;
@@ -268,14 +282,44 @@ export async function processPendingComments(
       // 避免同一条评论被改两遍（实测发生过，重复出片也浪费模型调用）。
       const comment = await omInboxClaim(project.projectDir, 2);
       if (!comment) break;
+      // 会话里的实时进度卡：改片动辄十几分钟，只显示「思考中」用户没法判断死活。
+      // 这里按 project 的归属用户/会话写，前端轮询 /video-progress 读。
+      writeVideoProgress({
+        userId: project.userId,
+        conversationId: project.conversationId,
+        kind: "edit",
+          token: project.token,
+        stage: "queued",
+        percent: 8,
+        message: `已接单：正在定位「${comment.text.slice(0, 16)}」那一帧…`,
+        start: index === 0
+      });
       try {
         await report(
           `正在看「${comment.text.slice(0, 24)}」那一帧（${comment.t != null ? comment.t.toFixed(1) + "s" : "无时间点"}）…`
         );
         const look = await omLook(comment.id, project.projectDir);
+        writeVideoProgress({
+          userId: project.userId,
+          conversationId: project.conversationId,
+          kind: "edit",
+          token: project.token,
+          stage: "editing",
+          percent: 25,
+          message: "AI 正在按你的评论改这一处（通常 3~10 分钟）…"
+        });
         await report("帧图已生成，AI 正在只改这一处…");
         const reply = await withHardTimeout(
-          runDshRender(buildEditPrompt({ dir: project.projectDir, comment, lookOutput: look }), {
+          runDshRender(
+            buildEditPrompt({
+              dir: project.projectDir,
+              comment,
+              lookOutput: look,
+              // 原始就没设目标时长（对话一键生成未写时长）则传 null：改片不强行压回 20s，
+              // 只改用户点出来的那一处，整体长度保持原样。
+              targetSeconds: project.targetSeconds
+            }),
+            {
             userId: project.userId,
             timeoutMs: 900_000,
             sessionId: `huashu-edit-${project.token}`,
@@ -287,6 +331,15 @@ export async function processPendingComments(
         const note =
           (reply || "已按要求修改。").trim().split(/\r?\n/).filter(Boolean).slice(-1)[0] || "已按要求修改。";
         await omDone(comment.id, project.projectDir, note.slice(0, 200));
+        writeVideoProgress({
+          userId: project.userId,
+          conversationId: project.conversationId,
+          kind: "edit",
+          token: project.token,
+          stage: "edited",
+          percent: 60,
+          message: "这一处已改好，准备重新出片"
+        });
         processed.push({ id: comment.id, text: comment.text, note });
         retryAttempts.delete(comment.id);
         await report(`已改完：${note}`);
@@ -297,6 +350,19 @@ export async function processPendingComments(
 
         // 关键：认领后失败如果不管，这条评论会停在 working，之后永远扫不到 ——
         // 用户看到的就是「大部分改过来了、有一条没过来」。这里退回待处理，下一轮重试。
+        writeVideoProgress({
+          userId: project.userId,
+          conversationId: project.conversationId,
+          kind: "edit",
+          token: project.token,
+          stage: attempt <= MAX_RETRY ? "retry" : "failed",
+          percent: attempt <= MAX_RETRY ? 20 : 100,
+          message:
+            attempt <= MAX_RETRY
+              ? `改片失败，正在自动重试（第 ${attempt} 次）…`
+              : `改片失败（已重试 ${attempt} 次）：${reason.split(/\r?\n/)[0].slice(0, 80)}`,
+          terminal: attempt > MAX_RETRY
+        });
         if (attempt <= MAX_RETRY) {
           await omInboxReopen(
             project.projectDir,
@@ -374,21 +440,41 @@ async function withRenderLock<T>(project: ProjectLike, fn: () => Promise<T>): Pr
   }
 }
 
-/** 重新出片并更新项目/内容库，返回新版本信息。手动按钮与自动 tick 共用。 */
+/**
+ * 重新出片并更新**项目记录**，返回新版本信息。手动按钮与自动 tick 共用。
+ *
+ * 2026-10-26 起这里**不再**顺带回写内容库与会话里的视频消息：
+ * 改片是「在工作副本上试」，用户可能连改几版才满意，自动回写会把已发布内容
+ * 和聊天里那条消息一起刷成半成品。回写统一走 `syncProjectTargets()`（手动按钮触发）。
+ */
 export async function rerenderProject(project: ProjectLike): Promise<{
   videoUrl: string;
   version: number;
   duration: number | null;
 }> {
   return withRenderLock(project, async () => {
+    writeVideoProgress({
+      userId: project.userId,
+      conversationId: project.conversationId,
+      kind: "edit",
+          token: project.token,
+      stage: "rendering",
+      percent: 72,
+      message: "正在重新出片（1080×1920 逐帧渲染，约 1~4 分钟）…"
+    });
     const rendered = await omRender(project.projectDir);
     let file = rendered.file;
     let duration = await probeDuration(file);
-    if (duration != null && duration > MAX_SECONDS) {
-      const trimmed = join(project.projectDir, "out", "trimmed-20s.mp4");
-      await trimToSeconds(file, 20, trimmed);
+    // 按项目目标时长裁剪：DSH 偶尔会超长，超了再兜底裁。
+    // 项目未设目标时长（null，即对话「一键生成视频」未写时长时）则不裁剪，
+    // 保留 DSH 自然展开的成片长度，避免把无上限的片子硬砍回 20s。
+    const targetSeconds = project.targetSeconds;
+    if (targetSeconds != null && duration != null && duration > targetSeconds + 0.3) {
+      const maxSeconds = targetSeconds + 0.3; // 渲染按帧对齐常差一两帧，给 0.3s 容差
+      const trimmed = join(project.projectDir, "out", `trimmed-${targetSeconds}s.mp4`);
+      await trimToSeconds(file, targetSeconds, trimmed);
       file = trimmed;
-      duration = (await probeDuration(file)) ?? 20;
+      duration = (await probeDuration(file)) ?? targetSeconds;
     }
 
     // 版本号取「数据库记录」与「已经在 public/videos 里的文件」两者最大值 +1：
@@ -420,49 +506,104 @@ export async function rerenderProject(project: ProjectLike): Promise<{
       }
     });
 
-    if (project.videoUrl) {
-      // 内容库同样按 token 匹配：只按「上一版 URL」精确更新会漏（历史跳号时那条记录永远停在旧版）。
-      const contentMarker = `/videos/huashu-${project.token}-v`;
-      const linked = await prisma.contentItem
-        .findMany({ where: { userId: project.userId, videoUrl: { contains: contentMarker } }, select: { id: true } })
-        .catch(() => [] as Array<{ id: string }>);
-      if (linked.length) {
-        await prisma.contentItem
-          .updateMany({ where: { id: { in: linked.map((item) => item.id) } }, data: { videoUrl } })
-          .catch(() => undefined);
-
-        // 新版可能换了开场画面，封面帧跟着重抽一次（失败就保留旧封面）
-        const poster = await extractVideoPoster(videoUrl, `huashu-${project.token}-v${version}`);
-        if (poster) {
-          await prisma.contentItem
-            .updateMany({
-              where: { id: { in: linked.map((item) => item.id) } },
-              data: { coverImageUrl: poster }
-            })
-            .catch(() => undefined);
-        }
-      }
-
-      // 会话里那条「视频已生成」消息也一起指向新版。
-      //
-      // 不能按「上一版 URL」精确匹配：历史版本可能跳号（比如手动出过 v2 但当时没回写消息，
-      // 消息里还是 v1），精确替换就会漏。按 token 把所有 huashu-<token>-vN 都换掉才可靠。
-      const marker = `/videos/huashu-${project.token}-v`;
-      const versionRe = new RegExp(`/videos/huashu-${project.token}-v\\d+\\.mp4`, "g");
-      const stale = await prisma.message
-        .findMany({ where: { content: { contains: marker } }, select: { id: true, content: true } })
-        .catch(() => [] as Array<{ id: string; content: string }>);
-      for (const message of stale) {
-        const next = message.content.replace(versionRe, videoUrl);
-        if (next === message.content) continue;
-        await prisma.message
-          .update({ where: { id: message.id }, data: { content: next } })
-          .catch(() => undefined);
-      }
-    }
+    writeVideoProgress({
+      userId: project.userId,
+      conversationId: project.conversationId,
+      kind: "edit",
+          token: project.token,
+      stage: "done",
+      percent: 100,
+      message: `已出片 v${version}${duration ? `（${duration.toFixed(1)}s）` : ""}`,
+      terminal: true
+    });
 
     return { videoUrl, version, duration };
   });
+}
+
+/** 同步目标：内容库条目 / 会话里那条视频消息。 */
+export type SyncTarget = "content" | "conversation";
+
+export type SyncResult = {
+  videoUrl: string;
+  version: number | null;
+  /** 内容库里匹配到的条目数（0 = 这条片子没入库，比如手动出片的） */
+  contentFound: number;
+  contentUpdated: number;
+  /** 会话里引用了这条视频的消息数（0 = 没有对话记录） */
+  messagesFound: number;
+  messagesUpdated: number;
+};
+
+/**
+ * 把项目**当前版本**（VideoMotionProject.videoUrl）回写到指定目标。
+ *
+ * 只在用户显式点按钮时调用：改片自动出片只更新项目本身，内容库/会话保持旧版，
+ * 直到用户确认「这版可以了」再同步过去。
+ *
+ * 匹配一律按 token，不按上一版 URL 精确匹配 —— 历史版本可能跳号
+ * （手动出过 v2 但当时没回写），精确替换会漏。
+ */
+export async function syncProjectTargets(
+  token: string,
+  targets: SyncTarget[],
+  options: { userId?: string } = {}
+): Promise<SyncResult> {
+  const project = await prisma.videoMotionProject.findFirst({ where: { token } });
+  if (!project) throw new Error("视频项目不存在。");
+  if (options.userId && project.userId !== options.userId) throw new Error("无权操作这个视频。");
+  const videoUrl = project.videoUrl;
+  if (!videoUrl) throw new Error("这个视频还没有出过片，没有可同步的版本。");
+
+  const versionHit = new RegExp(`/huashu-${project.token}-v(\\d+)\\.mp4$`).exec(videoUrl);
+  const version = versionHit ? Number(versionHit[1]) : null;
+
+  let contentFound = 0;
+  let contentUpdated = 0;
+  let messagesFound = 0;
+  let messagesUpdated = 0;
+
+  if (targets.includes("content")) {
+    const contentMarker = `/videos/huashu-${project.token}-v`;
+    const linked = await prisma.contentItem
+      .findMany({ where: { userId: project.userId, videoUrl: { contains: contentMarker } }, select: { id: true } })
+      .catch(() => [] as Array<{ id: string }>);
+    contentFound = linked.length;
+    if (linked.length) {
+      const ids = linked.map((item) => item.id);
+      await prisma.contentItem
+        .updateMany({ where: { id: { in: ids } }, data: { videoUrl } })
+        .catch(() => undefined);
+      contentUpdated = ids.length;
+
+      // 新版可能换了开场画面，封面帧跟着重抽一次（失败就保留旧封面）
+      const poster = await extractVideoPoster(videoUrl, `huashu-${project.token}-v${version ?? "x"}`);
+      if (poster) {
+        await prisma.contentItem
+          .updateMany({ where: { id: { in: ids } }, data: { coverImageUrl: poster } })
+          .catch(() => undefined);
+      }
+    }
+  }
+
+  if (targets.includes("conversation")) {
+    const marker = `/videos/huashu-${project.token}-v`;
+    const versionRe = new RegExp(`/videos/huashu-${project.token}-v\\d+\\.mp4`, "g");
+    const stale = await prisma.message
+      .findMany({ where: { content: { contains: marker } }, select: { id: true, content: true } })
+      .catch(() => [] as Array<{ id: string; content: string }>);
+    messagesFound = stale.length;
+    for (const message of stale) {
+      const next = message.content.replace(versionRe, videoUrl);
+      if (next === message.content) continue;
+      await prisma.message
+        .update({ where: { id: message.id }, data: { content: next } })
+        .catch(() => undefined);
+      messagesUpdated += 1;
+    }
+  }
+
+  return { videoUrl, version, contentFound, contentUpdated, messagesFound, messagesUpdated };
 }
 
 let ticking = false;
@@ -513,14 +654,16 @@ export async function runHuashuInboxTick(): Promise<TickResult> {
       notes.push(`${project.token}: 收到 ${pendingCount} 条评论`);
       const outcome = await processPendingComments(project, {
         limit: MAX_COMMENTS_PER_PROJECT,
+        // Studio 触发的改片不往平台会话里刷进度（进展只在 Studio 顶部状态区显示）
+        chatProgress: false,
         onProgress: (text) => notes.push(`${project.token}: ${text}`)
       });
       claimedThisTick += 1;
       edited += outcome.processed.length;
       if (!outcome.processed.length) continue;
 
-      // 改完直接出新版：用户在平台里看到的视频立刻是改后的样子，
-      // 不用再回去点「重新出片」。
+      // 改完直接出新版（只更新项目本身）。内容库与会话里的视频**不自动变**：
+      // 用户确认这版可以后，自己去点「同步修改到内容库 / 视频」。
       try {
         await appendProgressLine(outcome.progressMessageId, "正在重新出片…");
         const next = await rerenderProject(project);
@@ -528,10 +671,21 @@ export async function runHuashuInboxTick(): Promise<TickResult> {
         notes.push(`${project.token}: 已自动出片 v${next.version}`);
         await appendProgressLine(
           outcome.progressMessageId,
-          `已自动出片 v${next.version}${next.duration ? `（${next.duration.toFixed(1)}s）` : ""}，上方视频已更新为新版。`
+          `已出片 v${next.version}${next.duration ? `（${next.duration.toFixed(1)}s）` : ""}。` +
+            `内容库与会话视频没有自动更新——确认这版可以后，在 Studio 点「同步修改到内容库」，或在视频面板点「同步修改到视频」。`
         );
       } catch (renderError) {
         const reason = renderError instanceof Error ? renderError.message : String(renderError);
+        writeVideoProgress({
+          userId: project.userId,
+          conversationId: project.conversationId,
+          kind: "edit",
+          token: project.token,
+          stage: "failed",
+          percent: 100,
+          message: `出片失败：${reason.split(/\r?\n/)[0].slice(0, 80)}`,
+          terminal: true
+        });
         notes.push(`${project.token}: 修改完成但自动出片失败（${reason}）`);
         await appendProgressLine(outcome.progressMessageId, `自动出片失败：${reason}`);
       }

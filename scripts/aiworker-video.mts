@@ -36,6 +36,7 @@ import {
 } from "../src/lib/video/pipeline";
 import { ModelConfigError, resolveCapabilityConfig } from "../src/lib/model-credentials";
 import { parseLookFromFlags } from "../src/lib/video/plan-params";
+import { writeVideoProgress } from "../src/lib/video/progress-file";
 
 // ---------------------------------------------------------------------------
 // 参数解析
@@ -51,6 +52,8 @@ type CliArgs = {
   token?: string;
   skipPlan: boolean;
   ttsProvider?: string;
+  /** 归属会话（可选）：带上之后进度只在该会话里展示，避免跨会话串台。 */
+  conversationId?: string;
 };
 
 class UsageError extends Error {}
@@ -121,6 +124,9 @@ function parseArgs(argv: string[]): CliArgs {
       case "--token":
         args.token = value.trim() || undefined;
         break;
+      case "--conversation-id":
+        args.conversationId = value.trim() || undefined;
+        break;
       case "--tts-provider":
         args.ttsProvider = value.trim() || undefined;
         break;
@@ -181,10 +187,15 @@ const STAGE_PERCENT: Record<Stage, number> = {
 class ProgressWriter {
   private lastWrite = 0;
   private lastKey = "";
+  private isFirstWrite = true;
 
   constructor(
     private readonly workDir: string,
-    private readonly token: string
+    private readonly token: string,
+    /** 平台用户 id：另外写一份「该用户最新一次出片进度」，前端不用知道 token 也能看到进度。 */
+    private readonly userId: string,
+    /** 归属会话（可选）：带上之后进度只在该会话里展示。 */
+    private readonly conversationId?: string
   ) {
     mkdirSync(workDir, { recursive: true });
   }
@@ -216,6 +227,23 @@ class ProgressWriter {
       );
     } catch {
       // 进度写盘失败不影响出片，静默跳过（前端只会看到进度停住）。
+    }
+    // 再落一份「按用户的最新进度」。agent 用 bash 跑本脚本时平台拿不到 token
+    // （token 是这里随机生成的），会话里就只能看到一个「思考中」转圈十几分钟。
+    // /api/conversations/<id>/video-progress 读这个文件，按登录用户取值。
+    if (this.userId) {
+      writeVideoProgress({
+        userId: this.userId,
+        conversationId: this.conversationId ?? null,
+        kind: "generate",
+        stage,
+        percent: payload.percent,
+        message: text,
+        token: this.token,
+        terminal,
+        start: this.isFirstWrite
+      });
+      this.isFirstWrite = false;
     }
   }
 }
@@ -270,7 +298,7 @@ async function main(): Promise<void> {
 
   const token = args.token ?? `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const workDir = join(process.cwd(), "public", "uploads", "gen-video-work", token);
-  const progress = new ProgressWriter(workDir, token);
+  const progress = new ProgressWriter(workDir, token, args.userId, args.conversationId);
 
   const baseInput = {
     mode: "generate" as const,

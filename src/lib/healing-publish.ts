@@ -6,7 +6,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { prisma } from "@/lib/prisma";
 import { generateCoverImage, coverPlatformOf } from "@/lib/image-gen";
 import { loadHealingCredential } from "@/lib/platform-sync";
-import { buildSummary, mdToPlainText } from "@/lib/hgwx-publish";
+import { buildSummary } from "@/lib/hgwx-publish";
+import { renderMarkdown } from "@/lib/markdown";
 
 /**
  * AI回忆录官网「心灵驿站」频道推送链路（aimemory.cafe）。
@@ -326,7 +327,10 @@ export async function publishContentToHealing(
       summary: isVideo
         ? buildSummary(item.body || "", 140) || "AI 回忆录 · 竖版短片"
         : buildSummary(item.body || "", 140),
-      content: mdToPlainText(item.body || ""),
+      // 正文保留格式：用与内容库详情页相同的 markdown→HTML 渲染（加粗 / 标题层级 / 列表），
+      // 而不是压成纯文本。频道详情页 healing.js 现已识别并直接 innerHTML 这段 HTML。
+      // renderMarkdown 会先转义源文本再做行内强调，来源是本平台 AI 生成内容，可信、无 XSS 风险。
+      content: renderMarkdown(item.body || ""),
       cover,
       images,
       category: healingCategory(item.category, options.category),

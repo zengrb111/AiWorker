@@ -98,8 +98,16 @@ def main() -> int:
 
         final_response = (getattr(result, "final_response", None) or "").strip()
         if not final_response:
+            fr = getattr(result, "finish_reason", None)
+            if fr == "error":
+                # 多半是 DeepSeek API 连接/鉴权/限流失败（见上面的 TRANSPORT 重试日志），
+                # 不是「模型没写东西」，给出能直接定位的文案。
+                raise RuntimeError(
+                    "DSH 调用失败：DeepSeek API 请求未成功（连接/鉴权/限流）。"
+                    "请确认网络可直连 api.deepseek.com，且「系统配置」里的 API Key 有效。"
+                )
             raise RuntimeError(
-                f"DSH 未返回内容（finish_reason={getattr(result, 'finish_reason', None)!r}）"
+                f"DSH 未返回内容（finish_reason={fr!r}）：模型本轮没有输出文本，可能被截断或返回了空消息。"
             )
 
         sys.stdout = real_stdout

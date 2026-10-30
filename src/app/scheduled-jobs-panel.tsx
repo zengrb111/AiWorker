@@ -1067,6 +1067,7 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
                   <em className="sj-count">{draft.prompt.length} 字</em>
                 </span>
                 <textarea
+                  className="sj-prompt"
                   value={draft.prompt}
                   placeholder={
                     draft.kind === "VIDEO"

@@ -17,6 +17,44 @@ const TICK_MS = 30_000;
 /** 正在执行中的任务 id（防止同一任务并发执行）。 */
 const inFlight = new Set<string>();
 
+/**
+ * 跨进程 / 跨重启的「同一分钟只准跑一次」锁。
+ *
+ * 2026-10-26 实测事故：17:30 的图文任务在 31 秒内被触发了两次（17:30:15、17:30:46），
+ * 两轮各自生成 2 篇并各自入库，选题还顺延到了第二条热点 —— 同一时点产出翻倍。
+ * 原因：inFlight 只是模块变量，dev 模式 HMR 重建模块或未来多进程都会各持一份；
+ * 「同一分钟只跑一次」原先只靠 lastRunAt 判断，而 lastRunAt 要任务**跑完**才写，
+ * 长任务跑的那几十秒里再来一次 tick 就会重复触发。
+ * 改为在**开跑前**就抢占该分钟：抢到的进程才执行，抢不到的直接跳过。
+ */
+declare global {
+  // eslint-disable-next-line no-var
+  var __openclawSchedulerLocks: Map<string, number> | undefined;
+}
+const minuteLocks: Map<string, number> =
+  (globalThis as unknown as { __openclawSchedulerLocks?: Map<string, number> })
+    .__openclawSchedulerLocks ??
+  ((globalThis as unknown as { __openclawSchedulerLocks?: Map<string, number> })
+    .__openclawSchedulerLocks = new Map<string, number>());
+
+/** 抢占「本分钟」的执行权：true 表示本进程拿到锁，可以执行。 */
+async function claimMinute(jobId: string, key: string): Promise<boolean> {
+  const memo = `${jobId}@${key}`;
+  const local = minuteLocks.get(memo);
+  if (typeof local === "number" && Date.now() - local < 120_000) return false;
+  minuteLocks.set(memo, Date.now());
+  if (minuteLocks.size > 200) {
+    const cutoff = Date.now() - 600_000;
+    for (const [k, v] of minuteLocks) if (v < cutoff) minuteLocks.delete(k);
+  }
+  // 数据库层再兜一次：lastRunAt 已落在本分钟，说明这个时点已经跑过（可能是别的进程跑的）。
+  const job = await prisma.scheduledJob
+    .findUnique({ where: { id: jobId }, select: { lastRunAt: true, timezone: true } })
+    .catch(() => null);
+  if (job?.lastRunAt && minuteKey(job.lastRunAt, job.timezone || "Asia/Shanghai") === key) return false;
+  return true;
+}
+
 let timer: ReturnType<typeof setInterval> | null = null;
 let started = false;
 
@@ -239,7 +277,10 @@ type VideoIdea = { topic: string | null; requirement: string; reason: string | n
  * 选题失败时用这条与产品解耦的兜底 brief——产品细节由 om grab 抓下的官网素材推断。
  */
 const DEFAULT_VIDEO_BRIEF =
-  "结合今日与产品相关的热点做一支产品宣传片：前段把热点讲清楚、讲到位，并自然过渡到本产品（把父母的故事/照片做成一本可导出 PDF/长图的实体书）；后段集中讲产品价值与明确行动指引。温暖治愈风格、经典白字烧录字幕、带真人感口播配音，总时长约 30 秒。";
+  "结合今日与产品相关的热点做一支产品宣传片：前段把热点讲清楚、讲到位，并自然过渡到本产品；" +
+  "后段集中讲清这个产品替谁解决了什么、怎么开始用，并给出明确行动指引（去官网免费开始）。" +
+  "产品是什么、卖点有哪些，一律以出片环节抓到的官网素材为准，不要自行假设。" +
+  "信息密度高、节奏快、真人感口播配音、经典白字烧录字幕，总时长 25 秒左右。";
 
 function buildVideoIdeaPrompt(prompt: string): string {
   return [
@@ -501,12 +542,46 @@ async function runVideoJob(job: {
   }
 }
 
-/** 一次轮询：找出"本分钟应当执行"的任务并触发。 */
+/**
+ * 当天是否已经成功跑过一次（按任务自己的时区算日历日）。
+ *
+ * 给「每天一次」类任务兜底：即使同一分钟锁被绕过（自动化脚本自己再触发一次，
+ * 或手动执行完又恰好到点），同一天也不会产出第二批内容。
+ * 只看 SCHEDULE 触发的成功记录，手动执行不受影响。
+ */
+async function alreadyRanToday(jobId: string, timeZone: string, now: Date): Promise<boolean> {
+  const today = localParts(now, timeZone);
+  const since = new Date(now.getTime() - 26 * 60 * 60 * 1000);
+  const sameDay = (d: Date) => {
+    const p = localParts(d, timeZone);
+    return p.year === today.year && p.month === today.month && p.day === today.day;
+  };
+  const runs = await prisma.scheduledJobRun
+    .findMany({
+      where: { jobId, status: "SUCCEEDED", trigger: "SCHEDULE", startedAt: { gte: since } },
+      select: { startedAt: true },
+      orderBy: { startedAt: "desc" },
+      take: 20
+    })
+    .catch(() => [] as Array<{ startedAt: Date }>);
+  if (runs.some((r) => sameDay(r.startedAt))) return true;
+  // 运行记录被裁剪（每个任务只留最近 50 条）时，回退看 lastRunAt。
+  const job = await prisma.scheduledJob
+    .findUnique({ where: { id: jobId }, select: { lastRunAt: true, lastStatus: true } })
+    .catch(() => null);
+  return Boolean(job?.lastRunAt && job.lastStatus === "SUCCEEDED" && sameDay(job.lastRunAt));
+}
+
+/**
+ * 一次轮询：找出「本分钟应当执行」的任务并触发。
+ */
+
 export async function tickScheduler(now = new Date()): Promise<string[]> {
   const jobs = await prisma.scheduledJob.findMany({ where: { enabled: true } });
   const fired: string[] = [];
   for (const job of jobs) {
     if (inFlight.has(job.id)) continue;
+    const oncePerDayEnabled = (job as unknown as { oncePerDay?: boolean }).oncePerDay === true;
 
     // 一次性任务：到 oneShotAt 时间点执行一次后由 runScheduledJob 自动禁用。
     // 已执行过（lastRunAt 有值，无论成败）永久跳过；未到计划时间也跳过。
@@ -523,9 +598,14 @@ export async function tickScheduler(now = new Date()): Promise<string[]> {
     }
 
     const key = minuteKey(now, job.timezone);
-    // 同一分钟只跑一次（重启后靠 lastRunAt 去重）
+    // 同一分钟只跑一次（开跑前还会用 claimMinute 抢占，覆盖长任务未写完 lastRunAt 的窗口）
     if (job.lastRunAt && minuteKey(job.lastRunAt, job.timezone) === key) continue;
     if (!matchCron(job.cronExpr, localParts(now, job.timezone))) continue;
+    // 同一分钟只允许一个执行者：抢不到锁就跳过（跨进程 / HMR / 重启都靠这一层兜住）。
+    if (!(await claimMinute(job.id, key))) continue;
+    // 每天一次类任务：当天已经成功跑过就不再跑第二遍（防同一时点被重复触发）。
+    // 用户可以随时把任务的 oncePerDay 关掉，改回纯 cron 语义。
+    if (oncePerDayEnabled && (await alreadyRanToday(job.id, job.timezone || "Asia/Shanghai", now))) continue;
     fired.push(job.id);
     // 不 await：长任务不应阻塞本轮其它任务
     void runScheduledJob(job.id).catch((error) => {

@@ -45,10 +45,17 @@ export type HuashuPanelController = {
   preview: string | null;
   setPreview: (value: string | null) => void;
   canSubmit: boolean;
+  /** 手动同步：把项目当前版本回写到会话里的视频 / 内容库。 */
+  syncTo: (targets: HuashuSyncTarget[]) => Promise<void>;
+  syncing: "" | HuashuSyncTarget;
+  syncNotice: string;
   // 动作
   submit: () => Promise<void>;
   openStudio: () => Promise<void>;
 };
+
+/** 同步目标：会话里那条视频消息 / 内容库条目。 */
+export type HuashuSyncTarget = "conversation" | "content";
 
 /**
  * 面板状态钩子。必须在常驻组件（platform-client）顶层调用。
@@ -56,12 +63,20 @@ export type HuashuPanelController = {
  * getConversationId 用 getter 是故意的：提交那一刻才解析归属会话
  * （platform-client 里它是 genVideoPanelFor，会随「在哪个会话点开」变化）。
  */
+/**
+ * 面板默认值：打开就能直接点「开始生成」（2026-10-30 要求）。
+ * 用户仍可随时改；改过之后按用户输入走，不会每次重置。
+ * 导出供 platform-client 复用，避免两处各写一套默认文案。
+ */
+export const DEFAULT_HUASHU_SITE_URL = "https://aimemory.cafe/";
+export const DEFAULT_HUASHU_REQUIREMENT = "生成ai回忆录宣传片，5s";
+
 export function useHuashuVideoPanel(options: {
   getConversationId: () => string | null;
   onSaved?: () => void | Promise<void>;
 }): HuashuPanelController {
-  const [siteUrl, setSiteUrl] = useState("");
-  const [requirement, setRequirement] = useState("");
+  const [siteUrl, setSiteUrl] = useState(DEFAULT_HUASHU_SITE_URL);
+  const [requirement, setRequirement] = useState(DEFAULT_HUASHU_REQUIREMENT);
   const [images, setImages] = useState<HuashuPanelImage[]>([]);
   const [phase, setPhase] = useState<Phase>("form");
   const [progress, setProgress] = useState<string[]>([]);
@@ -75,6 +90,8 @@ export function useHuashuVideoPanel(options: {
   const [studioUrl, setStudioUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState<"" | "studio">("");
   const [notice, setNotice] = useState("");
+  const [syncing, setSyncing] = useState<"" | HuashuSyncTarget>("");
+  const [syncNotice, setSyncNotice] = useState("");
 
   // options 用 ref 存：回调体在调用时才解引用，避免渲染期 TDZ / 闭包过期。
   const optionsRef = useRef(options);
@@ -103,10 +120,11 @@ export function useHuashuVideoPanel(options: {
     });
   }
 
-  function reset(nextRequirement = "") {
+  function reset(nextRequirement = DEFAULT_HUASHU_REQUIREMENT) {
     for (const item of images) URL.revokeObjectURL(item.url);
     setImages([]);
-    setSiteUrl("");
+    // 重置回默认值（而不是清空）：出片后再次打开面板依然能直接点「开始生成」
+    setSiteUrl(DEFAULT_HUASHU_SITE_URL);
     setRequirement(nextRequirement);
     setPhase("form");
     setProgress([]);
@@ -117,6 +135,8 @@ export function useHuashuVideoPanel(options: {
     setStudioUrl(null);
     setBusy("");
     setNotice("");
+    setSyncing("");
+    setSyncNotice("");
     setPreview(null);
   }
 
@@ -131,6 +151,7 @@ export function useHuashuVideoPanel(options: {
     setDuration(null);
     setStudioUrl(null);
     setNotice("");
+    setSyncNotice("");
 
     // 兜底：上一条流还挂着（理论上 running 期间进不来）就掐掉，避免两条流互写状态。
     abortRef.current?.abort();
@@ -229,13 +250,72 @@ export function useHuashuVideoPanel(options: {
     }
   }
 
+  /**
+   * 把「项目当前版本」同步到会话里的视频 / 内容库。
+   *
+   * 为什么要手动：Studio 改片会自动出新版，但那只是工作副本。用户可能连改几版才满意，
+   * 自动回写会把聊天里那条视频和已发布的内容库条目一起刷成半成品。
+   */
+  async function syncTo(targets: HuashuSyncTarget[]) {
+    if (!projectToken || syncing) return;
+    setSyncing(targets[0]);
+    setSyncNotice("");
+    try {
+      const res = await fetch(`/api/video-motion/${projectToken}/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targets })
+      });
+      const payload = (await res.json()) as {
+        ok?: boolean;
+        error?: string;
+        data?: {
+          videoUrl?: string;
+          version?: number | null;
+          contentFound?: number;
+          contentUpdated?: number;
+          messagesFound?: number;
+          messagesUpdated?: number;
+        };
+      };
+      if (!res.ok || !payload?.ok || !payload.data) throw new Error(payload?.error || "同步失败。");
+      const data = payload.data;
+      const label = data.version ? `v${data.version}` : "当前版本";
+      if (data.videoUrl) setVideoUrl(data.videoUrl);
+      if (targets.includes("conversation")) {
+        if (!data.messagesFound) {
+          setSyncNotice("会话里没找到这条视频的消息——它可能是手动出片的，没有对应的对话记录。");
+        } else if (!data.messagesUpdated) {
+          setSyncNotice(`会话里的视频已经是最新版（${label}），不用再同步。`);
+        } else {
+          setSyncNotice(`已把 ${label} 同步到会话里的视频（${data.messagesUpdated} 条消息）。`);
+        }
+      }
+      if (targets.includes("content")) {
+        if (!data.contentFound) {
+          setSyncNotice("内容库里没有这条视频的条目——只有从对话里一键生成、自动入库的片子才有。");
+        } else if (!data.contentUpdated) {
+          setSyncNotice(`内容库已经是最新版（${label}），不用再同步。`);
+        } else {
+          setSyncNotice(`已把 ${label} 同步到内容库（${data.contentUpdated} 条），封面按新开场重抽了。`);
+        }
+      }
+      void optionsRef.current.onSaved?.();
+    } catch (syncError) {
+      setSyncNotice(syncError instanceof Error ? syncError.message : "同步失败。");
+    } finally {
+      setSyncing("");
+    }
+  }
+
   return {
     siteUrl, setSiteUrl,
     requirement, setRequirement,
     images, addImages, removeImage, setImagesFromFiles, reset,
     phase, progress, error, videoUrl, projectToken, duration,
     studioUrl, busy, notice, preview, setPreview, canSubmit,
-    submit, openStudio
+    syncing, syncNotice,
+    submit, openStudio, syncTo
   };
 }
 
@@ -248,7 +328,7 @@ export default function HuashuVideoPanel({ panel, onClose }: PanelProps) {
   const {
     siteUrl, setSiteUrl, requirement, setRequirement, images, addImages, removeImage,
     phase, progress, error, videoUrl, duration, studioUrl, busy, notice, preview,
-    setPreview, canSubmit, submit, openStudio
+    setPreview, canSubmit, submit, openStudio, syncing, syncNotice, syncTo
   } = panel;
 
   return (
@@ -256,7 +336,8 @@ export default function HuashuVideoPanel({ panel, onClose }: PanelProps) {
       <div className="viral-remake-title">一键生成视频</div>
       <p>
         填产品网站让 AI 抓真实素材，也可以只传参考图。点生成后由 AI 直接写片、配乐、渲染，
-        成片竖版 1080×1920、20 秒以内；不满意可以打开 Studio 点着画面改。
+        成片竖版 1080×1920；时长按你的创作需求来（提示词里写「30 秒」「1 分钟」就用它，
+        不写就不限制，AI 按内容自然展开），不满意可以打开 Studio 点着画面改。
       </p>
 
       <label className="viral-remake-file" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
@@ -319,7 +400,7 @@ export default function HuashuVideoPanel({ panel, onClose }: PanelProps) {
         />
       </label>
 
-      <div className="gen-video-engine-hint">成片固定竖版 1080×1920、时长 20 秒以内；风格与配乐由 AI 按产品调性自选。</div>
+      <div className="gen-video-engine-hint">成片固定竖版 1080×1920；时长以创作需求为准（不写时长 AI 按内容自然展开），风格与配乐由 AI 按产品调性自选。</div>
 
       {phase === "running" && (
         <div className="gen-video-plan-loading" style={{ marginTop: 10 }}>
@@ -358,10 +439,19 @@ export default function HuashuVideoPanel({ panel, onClose }: PanelProps) {
             <button type="button" onClick={() => void openStudio()} disabled={busy !== ""}>
               {busy === "studio" ? "正在启动 Studio…" : studioUrl ? "再次打开 Studio" : "在 Studio 里修改"}
             </button>
+            <button type="button" onClick={() => void syncTo(["conversation"])} disabled={syncing !== ""}>
+              {syncing === "conversation" ? "同步中…" : "同步修改到视频"}
+            </button>
+            <button type="button" onClick={() => void syncTo(["content"])} disabled={syncing !== ""}>
+              {syncing === "content" ? "同步中…" : "同步修改到内容库"}
+            </button>
           </div>
           {notice && <div className="viral-remake-summary">{notice}</div>}
+          {syncNotice && <div className="viral-remake-summary">{syncNotice}</div>}
           <div className="gen-video-engine-hint">
-            Studio 里提交的评论会<strong>自动</strong>改片并出新版（约 30 秒内接单），进度会显示在会话里，不用回来点按钮。
+            Studio 里提交的评论会<strong>自动改片出新版</strong>（约 30 秒内接单，进度显示在会话里），
+            但<strong>不会</strong>自动改会话里的视频和内容库——确认这版可以后，点上面
+            「同步修改到视频」/「同步修改到内容库」再发布出去。
           </div>
         </div>
       )}

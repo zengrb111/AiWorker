@@ -1258,6 +1258,83 @@ textarea:focus {
   animation-delay: 0.4s;
 }
 
+/* 「思考中」的已用时间 + 长任务说明：静止的转圈看不出死活，加个秒表最省事 */
+.thinking-elapsed {
+  margin-left: 2px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(43, 124, 255, 0.1);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.thinking-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* 后台任务（视频生成）实时进度：阶段 + 百分比 + 已用时间 */
+.task-live-progress {
+  display: grid;
+  gap: 7px;
+  min-width: 240px;
+  max-width: 420px;
+}
+
+.task-live-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.task-live-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent-dark, #155bd4);
+}
+
+.task-live-elapsed {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-live-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(43, 124, 255, 0.14);
+  overflow: hidden;
+}
+
+.task-live-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #2b7cff, #17d5ff);
+  transition: width 0.6s ease;
+}
+
+.task-live-message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #1f2933;
+}
+
+.task-live-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
 /* 规划阶段实时进展：SSE 把「识图 / 风格 / 旁白 / 配音 / DSH 分镜」逐条推到会话里，
    用竖向时间线展示，避免用户盯着灰掉的「生成方案」按钮干等。 */
 .plan-progress {
@@ -3096,7 +3173,6 @@ textarea:focus {
   min-height: 0;
 }
 
-.detail-title-row,
 .detail-body-row {
   display: flex;
   align-items: center;
@@ -3104,10 +3180,69 @@ textarea:focus {
   gap: 14px;
 }
 
-.detail-title-row,
+/* 详情页头部：标题 + 日期一行，下方独立操作工具栏（不再和按钮挤在一行） */
+.detail-header {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.detail-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.detail-title-row h1 {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 19px;
+  line-height: 1.45;
+  font-weight: 700;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.detail-date {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  font-size: 13px;
+  color: var(--text-muted, #888);
+  white-space: nowrap;
+  padding-top: 3px;
+}
+
+.detail-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+/* 工具栏里的「复制 / 编辑 / 保存」：统一种描边按钮样式，与发布按钮视觉一致 */
+.detail-toolbar .toolbar-btn {
+  min-height: 38px;
+  border-radius: 8px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 700;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+
+.detail-toolbar .toolbar-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .detail-body-row,
 .content-detail > .detail-image-block,
-.content-detail > span,
 .content-detail > .article-body,
 .content-detail > .content-edit-area,
 .content-detail > .ghost-button,
@@ -3115,19 +3250,10 @@ textarea:focus {
   grid-column: 1 / -1;
 }
 
-.detail-title-row h1,
 .detail-body-row h2 {
   margin: 0;
   min-width: 0;
   font-size: 16px;
-}
-
-.detail-title-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-left: auto;
 }
 
 .detail-image-block {
@@ -3768,6 +3894,40 @@ textarea:focus {
 .detail-video-block {
   margin-top: 8px;
   padding: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  position: relative;
+}
+
+/* 视频右上角的「去 Studio 修改」浮动按钮（对应详情页红框位置） */
+.detail-video-studio {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 3;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(21, 32, 54, 0.25);
+  transition: background 120ms ease, opacity 120ms ease;
+}
+
+.detail-video-studio:hover:not(:disabled) {
+  background: var(--accent-strong, #2a6bff);
+}
+
+.detail-video-studio:disabled {
+  opacity: 0.7;
+  cursor: progress;
 }
 
 .detail-video-player {
@@ -3777,6 +3937,104 @@ textarea:focus {
   border-radius: 10px;
   background: #000;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+
+/* 视频详情页左侧的封面图（截图 + 黄色标题）：可复制、可一键换一版 */
+.detail-video-cover {
+  flex: 0 0 auto;
+  width: 230px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detail-video-cover-img {
+  display: block;
+  width: 100%;
+  border-radius: 10px;
+  background: #0b0b0b;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  cursor: zoom-in;
+}
+
+.detail-video-cover-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  font-size: 12px;
+  color: var(--text-muted, #888);
+}
+
+.detail-video-cover-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.detail-video-cover-actions > button,
+.detail-video-cover-actions > a {
+  flex: 1 1 0;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  border: 1px solid var(--line);
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.detail-video-cover-actions > button:hover:not(:disabled),
+.detail-video-cover-actions > a:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.detail-video-cover-actions > button:disabled {
+  opacity: 0.62;
+  cursor: progress;
+}
+
+/* 「生成封面图」自带 align-self:start（图文详情页用的），这里要跟「下载」等高 */
+.detail-video-cover-actions > .regen-image-button {
+  align-self: stretch;
+}
+
+.detail-video-cover-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted, #888);
+}
+
+@media (max-width: 720px) {
+  .detail-video-block {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .detail-video-cover {
+    width: 100%;
+    max-width: 280px;
+  }
+
+  .detail-video-studio {
+    position: static;
+    margin: 2px auto 0;
+  }
 }
 
 /* ===== Video detail page: centered large video ===== */
@@ -3859,41 +4117,71 @@ textarea:focus {
   gap: 10px;
 }
 
-/* In video mode: back button goes to top-left, title centered */
+/* In video mode: back button goes to top-left, header + toolbar centered */
 .content-detail--video .back-to-library-btn {
   align-self: flex-start;
   margin-bottom: 2px;
 }
 
+.content-detail--video .detail-header {
+  align-items: center;
+  text-align: center;
+}
+
 .content-detail--video .detail-title-row {
   width: 100%;
-  max-width: 900px;
+  max-width: 960px;
   justify-content: center;
+  gap: 12px;
 }
 
 .content-detail--video .detail-title-row h1 {
-  font-size: 16px !important;
+  font-size: 18px;
   font-weight: 700;
 }
 
-.content-detail--video > span {
-  text-align: center;
-  font-size: 13px;
-  color: var(--text-muted, #888);
+.content-detail--video .detail-toolbar {
+  justify-content: center;
 }
 
 .content-detail--video .detail-video-block {
-  width: fit-content;
-  max-width: 100%;
-  margin-top: 4px;
+  width: 100%;
+  max-width: 960px;
+  margin: 4px auto 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 20px;
+  flex-wrap: nowrap;
+}
+
+.content-detail--video .detail-video-cover {
+  width: 220px;
 }
 
 .content-detail--video .detail-video-player {
   width: auto;
-  max-width: 100%;
+  max-width: calc(100% - 218px);
+  min-width: 0;
   max-height: 78vh;
   border-radius: 12px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2);
+}
+
+@media (max-width: 720px) {
+  .content-detail--video .detail-video-block {
+    flex-direction: column;
+    flex-wrap: wrap;
+  }
+
+  .content-detail--video .detail-video-cover {
+    width: 100%;
+    max-width: 260px;
+  }
+
+  .content-detail--video .detail-video-player {
+    max-width: 100%;
+  }
 }
 
 /* ==========================================================================
@@ -6461,16 +6749,18 @@ a.pub-row-title:hover {
 
 .sj-drawer {
   position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 520px;
-  max-width: 94vw;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(760px, 94vw);
+  max-height: 92vh;
   background: var(--panel);
   z-index: 41;
   display: flex;
   flex-direction: column;
-  box-shadow: -20px 0 60px rgba(21, 32, 54, 0.16);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(21, 32, 54, 0.28);
+  overflow: hidden;
 }
 
 .sj-drawer-head {
@@ -6483,6 +6773,7 @@ a.pub-row-title:hover {
 .sj-drawer-head h2 {
   margin: 0;
   font-size: 16px;
+  font-weight: 500;
   color: var(--ink);
 }
 
@@ -6542,6 +6833,18 @@ a.pub-row-title:hover {
   min-height: 104px;
   resize: vertical;
   line-height: 1.65;
+}
+
+/* 编辑定时任务：执行内容 / 提示词区域尽量放大，方便查看长文 */
+.sj-field textarea.sj-prompt {
+  min-height: 260px;
+  font-size: 14.5px;
+  line-height: 1.7;
+}
+
+/* 弹窗内不使用粗体 */
+.sj-drawer strong {
+  font-weight: 500;
 }
 
 .sj-field em {

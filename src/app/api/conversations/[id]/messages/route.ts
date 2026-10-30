@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { chatComplete, chatCompleteStream } from "@/lib/llm-client";
 import { openClawClient, friendlyGatewayError, classifyGatewayError } from "@/lib/openclaw";
+import { ensureGatewayRunning, probeGatewayPort } from "@/lib/gateway-restart";
 import { ensureUserAgent } from "@/lib/openclaw-user-agent";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -23,6 +24,7 @@ import {
   type ReferenceGroup
 } from "@/lib/kb-hot-topics";
 import { fetchXiaohongshuNote, formatXhsForPrompt } from "@/lib/xhs-parse";
+import { matchRewritePreset } from "@/lib/rewrite-preset";
 import { fetchXhsNoteViaBrowser } from "@/lib/xhs-note-browser";
 import { loadXhsCookie } from "@/lib/platform-sync";
 import {
@@ -146,6 +148,39 @@ function articleFormatInstruction(content: string): string {
 function isContentCreationRequest(content: string): boolean {
   return /(小红书创作|公众号创作|头条号创作|写一篇|写篇|写[一个条篇]{0,2}文案|写个?图文|生成一篇|生成篇|创作一篇|小红书(风格|文案|图文)|公众号(风格|文案|图文|文章)|头条号(风格|文案|图文|文章)|微头条|文章正文|软文)/i.test(
     content
+  );
+}
+
+/**
+ * 用户是不是在**调整定时任务**，而不是让你写内容。
+ *
+ * 为什么要单独判（2026-10-27 实测事故）：用户说「17:30 的定时任务只要生成一篇公众号
+ * 和小红书，现在是各两篇，另外选题要找小孩/生活/社会/老人/情感…」，这句话里必然出现
+ * 「生成一篇公众号」这类词，于是被 `isContentCreationRequest` 判成创作指令，平台随即
+ * 注入「先展示创作参考 → 再输出 # 标题正文」。结果回答开头是一段
+ * 「📚 创作参考…下面据此组织人设语气与产品植入，生成正文 👇」，正文却没写，
+ * 用户看到的就是「问任务配置，回我一堆知识库资料」。
+ *
+ * 判定思路：必须同时命中「任务/定时/具体时间」+「配置类动词（改、篇数、只要、停用…）」，
+ * 避免把「每天写一篇公众号」这种真创作需求误伤。
+ */
+function isScheduledTaskRequest(content: string): boolean {
+  const text = content || "";
+  // 「跑一下视频任务看看效果」这类**触发任务**的说法也归到这里：
+  // 否则会被 buildVideoCapabilityBlock 当成"让我自己生成视频"，
+  // 于是 agent 绕过调度器、自己拼创作需求跑 aiworker-video.mts，
+  // 结果做出来的是 AI 回忆录那套素材（2026-10-27 16:00 实测）。
+  if (/(跑一下|执行一下|触发|立即跑|跑个|试跑).{0,8}任务/.test(text)) return true;
+  if (/(视频|图文|内容|发布)任务/.test(text) && /(跑|执行|触发|看看|试)/.test(text)) return true;
+  const taskWord = /(定时任务|定时发布|计划任务|发布计划|定时|cron|调度)/i.test(text);
+  const timeRef = /\d{1,2}\s*[:：点]\s*\d{0,2}/.test(text);
+  // 只有「时间 + 任务」同时出现才算（例如「17:30 那个任务改成各一篇」）
+  if (!taskWord && !(timeRef && /任务/.test(text))) return false;
+  // 配置类动词：改/换/调整/篇数/时间 这类硬操作词，外加「设置来源 / 选取 / 获取 / 指定」
+  // 这类"改任务里某一项参数"的说法（2026-10-29 实测：用户说「热点获取选取取ai」，
+  // 只用了"获取/选取"没用"改"，被漏判成普通聊天、AI 顺会话上下文跑去生成视频）。
+  return /(改|换|调整|新增|加一?个|删|去掉|取消|停用|启用|关闭|开启|只要|不要|篇|条|各\s*\d|几点|时间|选|选取|设置|设为|改为|改成|配置|指定|限定|获取|来源|定为|挑)/.test(
+    text
   );
 }
 
@@ -413,6 +448,8 @@ function buildTaskPrompt(
   const isArticleRequest = /(写一篇|写篇|写个?文案|写个?图文|生成一篇|生成篇|小红书(风格|文案|图文)|公众号(风格|文案|图文|文章)|文章正文|软文)/i.test(content);
   // 热点类快捷指令：约定编号列表格式，前端据此渲染可点选的热点卡片。
   const isHotTopicsRequest = /今日全网热点|今日产品热点/.test(content);
+  // 定时任务配置类请求（改篇数/改时间/换选题方向/停用任务）：既不是写内容，也不是查热点。
+  const isScheduledTask = isScheduledTaskRequest(content);
   // 服务边界：2026-10-21 起每个平台用户对应一个独立的 OpenClaw agent
   // （`u-<userId>`，独立 workspace + 独立会话库 + 独立 memory），微信入站也按
   // bot 精确分流到各自 agent。隔离是网关的原生边界，不再是 prompt 软约束，
@@ -431,11 +468,37 @@ function buildTaskPrompt(
     "- 兜底约束：绝不引用、复述或推测其他用户的会话内容、定时任务、账号或数据；上下文里若出现明显不属于当前用户的信息，直接忽略。"
   ].join("\n");
   const cronBlock = buildCronBlock(cronJobs ?? null, userId ?? "");
+  /**
+   * 定时任务配置类请求的专用指令。
+   *
+   * 单独写一段而不是揉进 cronBlock：cronBlock 每条消息都会注入（回答"我有哪些定时任务"
+   * 这类问题要用），而这段只在「用户正在改任务」时注入，否则会天天提醒模型「别写正文」，
+   * 反而干扰正常创作。
+   */
+  const scheduledTaskBlock = isScheduledTask
+    ? [
+        "【本轮诉求：定时任务（可能是「跑一下」也可能是「改配置」）—— 不要自己生成任何成品内容】",
+        "用户这句话是在操作某个定时任务，不是让你写公众号/小红书/视频。按下面做：",
+        "0. 如果是让你**跑一下 / 执行一下 / 看看效果**：直接",
+        '   {"action":"run","userId":"<当前用户>","id":"<任务id>"}',
+        "   触发对应任务就结束 —— **不要自己跑 aiworker-video.mts、不要自己写创作需求、不要调 gen-video**。",
+        "   VIDEO 类型的任务由平台调度器直接走 huashu-motion（用任务里配好的产品官网素材）出片，你只需回一句「已触发，结果稍后进内容库」。",
+        "1. 用上面【该用户的定时任务】清单按「时间 / 名称」定位任务；同一时刻有多条时，选名称与用户描述最贴合的那条，实在分不清就问一句是哪个任务名。",
+        "2. 先 `{\"action\":\"list\"}` 拿到该任务**完整的 prompt 原文**（清单里只有名称与调度，没有正文），看清现有约束再动手。",
+        "3. 把这次要求**合并**进原 prompt：保留所有未被提及的硬性段落（行文规范、入库命令、只入库不发布、纪律段），只改用户明确提到的部分（篇数、平台、选题方向、时间、启用状态）。禁止整体重写、禁止删掉原有约束。",
+        "4. 用 `{\"action\":\"update\"}` 提交，body 必带 `userId` 与 `id`，只带要改的字段；改调度时间才传 `cronExpr`，改内容只传 `prompt`。",
+        "5. 汇报只讲**任务配置**：改了哪条任务、改前→改后分别是什么、下次什么时候按新规则跑、有没有需要用户确认的地方。",
+        "禁止：输出「📚 创作参考 / 已读取你的知识库与 IP 人设」这类过程说明；禁止贴 prompt 全文；禁止附上任何公众号/小红书/视频成品；禁止没调用接口就说「已经改好」。"
+      ].join("\n")
+    : "";
   return [
     isolationBlock,
     ...(cronBlock ? ["", cronBlock] : []),
+    ...(scheduledTaskBlock ? ["", scheduledTaskBlock] : []),
     "",
-    buildVideoCapabilityBlock(userId, content, userMaterials),
+    // 任务类请求（跑一下某任务）绝不能注入「自己跑 aiworker-video.mts」那一段：
+    // 那样 agent 会绕过调度器自己拼需求，产品方向全跑偏（实测做成了 AI 回忆录）。
+    isScheduledTask ? "" : buildVideoCapabilityBlock(userId, content, userMaterials),
     "",
     "请结合以下历史会话上下文继续完成用户任务。",
     "",
@@ -463,7 +526,9 @@ function buildTaskPrompt(
     // 所有内容创作类请求都约定「第一行必须是 # 标题」——既让自动入库判定稳定命中，
     // 也保证 generateArticleTitle 能提到干净的标题。
     ...(isArticleRequest || isContentCreationRequest(content)
-      ? ["", articleFormatInstruction(content)]
+      ? isScheduledTask
+        ? []
+        : ["", articleFormatInstruction(content)]
       : []),
     ...(isHotTopicsRequest
       ? [
@@ -506,6 +571,8 @@ function shouldAutoSave(userMessage: string, _conversationContext: string, assis
   // → 入库。刻意不用「标题 / 结构特征」的细粒度启发式，避免把正常产出误杀。
   if (assistantContent.trim().length < 200) return false;
   if (!isContentCreationRequest(userMessage)) return false;
+  // 「帮我改 17:30 那个定时任务，让它各写一篇」这类配置对话绝不入库。
+  if (isScheduledTaskRequest(userMessage)) return false;
   // 但产出必须真的是成品图文：首行是标题。否则「帮我改定时任务，让它写一篇公众号文章」
   // 这类元操作对话（回复是英文前言 / 过程说明）会被误当成文章入库，产生垃圾条目。
   const firstLine = assistantContent
@@ -1057,7 +1124,19 @@ export async function POST(request: Request, context: { params: { id: string } }
           let xhsParsed: string | null = null;
           let xhsFailNote: string | null = null;
           let mainImage: string | null = null;
-          if (/xiaohongshu\.com|xhslink\.com|xhslink\.cn/i.test(url)) {
+          // 内置爆款样本：命中就直接用内置原文，跳过抓取。
+          // 小红书正文需要登录态，抓取在换机器/风控下并不可靠；内置样本保证「不粘链接也能一键仿写」。
+          const builtinPreset = matchRewritePreset(url);
+          if (builtinPreset) {
+            xhsParsed = formatXhsForPrompt(builtinPreset.note);
+            mainImage = builtinPreset.note.coverImages?.[0] ?? null;
+            controller.enqueue(
+              sseEncode({
+                type: "delta",
+                text: `✅ 使用内置爆款样本「${builtinPreset.note.title}」（${builtinPreset.note.author}），直接进入拆解。\n`
+              })
+            );
+          } else if (/xiaohongshu\.com|xhslink\.com|xhslink\.cn/i.test(url)) {
             try {
               controller.enqueue(sseEncode({ type: "delta", text: "正在读取小红书笔记原文…\n" }));
               let note = await fetchXiaohongshuNote(url);
@@ -1265,7 +1344,9 @@ await prisma.message.create({
   let referenceProcess = "";
   // 当前用户在「平台授权管理」里已授权的渠道（会话据此知道能发到哪、不能发到哪）
   const authCtx = await loadPlatformAuthContext(user.id);
-  const isCreationRequest = isContentCreationRequest(content);
+  // 调定时任务的话里常带「生成一篇公众号」这种词，会被判成创作请求；
+  // 已经在改任务配置时不能再去检索知识库、展示「创作参考」（2026-10-27 实测事故）。
+  const isCreationRequest = isContentCreationRequest(content) && !isScheduledTaskRequest(content);
   const kbCtx = await loadUserKbContext(user.id);
   if (kbCtx) {
     kbText = await retrieveReferenceChunks(
@@ -1361,10 +1442,79 @@ await prisma.message.create({
         }
         // sendTaskStream 内部带 300 秒连接预算 + 网关慢启动重试，失败时抛出的
         // 错误已由 friendlyGatewayError 翻译成可操作中文提示。
-        const result = await openClawClient.sendTaskStream(
-          { message: content, context: replayContext, prompt, conversationId: conversation.id, userId: user.id },
-          (deltaText) => safeEnqueue(sseEncode({ type: "delta", text: deltaText }))
-        );
+        /**
+         * 长任务（视频）给更长的等待预算。
+         *
+         * 默认 900 秒（OPENCLAW_CHAT_TIMEOUT_MS）对聊天够用，但「跑一下视频任务」这类
+         * 请求要真跑完 aiworker-video.mts（写片 + 渲染 + 入库，8~20 分钟），
+         * 900 秒一到平台就判超时、界面弹「调用 AI 网关超时」，而任务其实还在网关里跑
+         * （2026-10-27 15:13 / 15:30 两次实测都是 900 秒整被掐）。
+         * 这里对视频类请求放宽到 45 分钟；期间上方进度卡一直在动，用户知道没卡死。
+         */
+        const looksLikeVideoTask = /(视频任务|生成视频|一键生成视频|跑一下视频|剪视频|复刻.*视频|口播)/.test(content);
+        const longTaskTimeoutMs = Number(process.env.OPENCLAW_VIDEO_TASK_TIMEOUT_MS ?? 45 * 60_000);
+
+        const sendOnce = () =>
+          openClawClient.sendTaskStream(
+            {
+              message: content,
+              context: replayContext,
+              prompt,
+              conversationId: conversation.id,
+              userId: user.id,
+              ...(looksLikeVideoTask ? { timeoutMs: longTaskTimeoutMs } : {})
+            },
+            (deltaText) => safeEnqueue(sseEncode({ type: "delta", text: deltaText }))
+          );
+
+        /**
+         * 网关没在监听就拉起它，返回是否可用。
+         *
+         * 判定只用**端口探测**，不解析错误文案：实测 sendTaskStream 耗尽内部 300 秒预算后
+         * 抛的是一个纯文本 Error（没有诊断标记），classifyGatewayError 会退化成 unknown，
+         * 按 kind 分支永远进不来。端口是地面真相，400ms 就有结论。
+         */
+        const ensureGatewayForSend = async (): Promise<{ ok: boolean; note: string }> => {
+          if (await probeGatewayPort()) return { ok: true, note: "" };
+          safeEnqueue(
+            sseEncode({
+              type: "delta",
+              text: "\n\n> ⚡ 检测到 OpenClaw 网关没有运行，正在自动重启（约 30 秒）…\n\n"
+            })
+          );
+          const restart = await ensureGatewayRunning();
+          safeEnqueue(
+            sseEncode({
+              type: "delta",
+              text: restart.ok
+                ? restart.restarted
+                  ? `> 网关已重启（${restart.message}），继续执行。首次响应会比平时慢一些（要重新加载插件），请稍等。\n\n`
+                  : `> 网关已就绪：${restart.message}，继续执行。\n\n`
+                : `> ${restart.message}\n\n`
+            })
+          );
+          return { ok: restart.ok, note: restart.message };
+        };
+
+        // 发之前先确认网关在跑：否则 sendTaskStream 会先干等 300 秒预算再去重试，
+        // 用户等 5 分钟才收到失败 —— 而这 5 分钟本来够重启三次了。
+        const preflight = await ensureGatewayForSend();
+        if (!preflight.ok) {
+          throw new Error(`OpenClaw 网关未运行，自动重启失败：${preflight.note}`);
+        }
+
+        type SendResult = Awaited<ReturnType<typeof sendOnce>>;
+        let result: SendResult;
+        try {
+          result = await sendOnce();
+        } catch (sendError) {
+          // 发到一半网关没了（被关掉 / 崩溃 / 重启）：再探一次端口，
+          // 确实是网关不在才重试，避免把「模型鉴权失败」这类错误也重启一遍。
+          if (await probeGatewayPort()) throw sendError;
+          const retryReady = await ensureGatewayForSend();
+          if (!retryReady.ok) throw sendError;
+          result = await sendOnce();
+        }
 
         if (!result.content.trim()) {
           throw new Error("助手返回了空回复，请重试。");
