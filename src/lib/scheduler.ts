@@ -211,6 +211,25 @@ async function resolveWechatTarget(userId: string): Promise<{ to: string; accoun
 }
 
 /**
+ * 从 agent 终稿里抽取「审核提醒」干净摘要块。
+ *
+ * 背景：定时图文任务（daily-content-gen）由 agent 跑，其终稿往往夹带大量
+ * 选题核对 / 字数实测 / 重写过程等自言自语；但 ingest.mjs 会在末尾打印一段
+ * 「----- 微信提醒文案 ----- … 【审核提醒】内容已存入内容库，共 N 篇 … 请打开内容库审核 -----」
+ * 这才是能直接给用户看的摘要。这里只取从「【审核提醒】」开始到结尾的那一段，
+ * 避免把 agent 的执行思考 dump 到微信（实测曾把 1300 字思考全发到用户微信）。
+ * 抽不到（agent 没按约定输出）就返回 null，由调用方退回干净兜底文案。
+ */
+function extractAuditNotice(text: string): string | null {
+  if (!text) return null;
+  const start = text.indexOf("【审核提醒】");
+  if (start === -1) return null;
+  const picked = text.slice(start).trim();
+  // 防止把「请打开内容库审核」之后的平台内部尾巴也带进来（理论上不会有）
+  return picked.length > 0 ? picked : null;
+}
+
+/**
  * 把定时任务的结果通过微信推给该用户本人。
  *
  * 走**确定性投递**（平台直接持机器人 token 调 `ilink/bot/sendmessage`），
@@ -470,6 +489,10 @@ async function runVideoJob(job: {
       const result = await openClawClient.sendTask({
         message: job.prompt,
         userId: job.userId,
+        // 定时任务跑在**独立隔离会话**，绝不用用户的 main/微信会话：
+        // 否则 agent 的执行过程（选题核对、自查重写…）会顺着默认会话泄漏到微信，
+        // 且会污染用户日常对话上下文。隔离会话每次都是干净的，符合「后台自治任务」语义。
+        sessionKey: `agent:u-${job.userId}:scheduled-job`,
         // 定时任务常是多步长流程（抓热点/生成/入库），120s 默认超时必掐断；放宽到 10 分钟。
         timeoutMs: Number(process.env.SCHEDULE_TASK_TIMEOUT_MS ?? 600_000),
         // 空文本自动重跑 = 整个任务再执行一遍（重复入库/发布），对有副作用的任务绝不允许。
@@ -497,7 +520,11 @@ async function runVideoJob(job: {
     // 投递结果回写到 lastResult，避免「任务成功却收不到通知」的不可见问题。
     // notifyWechat=false 的任务只执行不通知（参照 WorkBuddy 的「消息推送到企业微信」开关）。
     if (target && job.notifyWechat !== false) {
-      const notifyText = content || "定时任务已执行完成（无文本结果）。";
+      // 只把「审核提醒」干净摘要推给用户；抽不到就退回不啰嗦的兜底文案，
+      // 绝不把 agent 的执行思考整段发到微信。
+      const notifyText =
+        extractAuditNotice(content) ||
+        `定时任务「${job.name}」已执行完成，结果已入库，请打开「内容库」审核。`;
       try {
         await deliverJobResultToWechat(job.name, job.userId, target, notifyText);
         await prisma.scheduledJob
