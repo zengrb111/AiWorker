@@ -19,7 +19,7 @@ const APP = "http://127.0.0.1:3000/";
 const USER_ID = "cmu939ge0000b265q7aniwqav"; // 内容归属用户
 const SHOT_DIR = join(process.cwd(), ".workbuddy", "tmp");
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const ITEM_TITLE_PREFIX = "生成ai回忆录宣传片，5s";
+const ITEM_TITLE_PREFIX = "生成ai回忆录宣传片";
 
 function touch(cmd) {
   return execFileSync("node", ["scripts/tmp-content-video-touch.mjs", cmd], { encoding: "utf8" }).trim();

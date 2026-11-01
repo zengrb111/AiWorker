@@ -67,9 +67,19 @@ export type HuashuSyncTarget = "conversation" | "content";
  * 面板默认值：打开就能直接点「开始生成」（2026-10-30 要求）。
  * 用户仍可随时改；改过之后按用户输入走，不会每次重置。
  * 导出供 platform-client 复用，避免两处各写一套默认文案。
+ *
+ * 2026-11-01：本地与线上区分
+ * - 线上（生产构建）维持「5s」短版：官网演示要秒开的短样片，长片会拖慢演示节奏。
+ * - 本地开发（next dev）不写时长：targetSeconds=null，DSH 按内容自然展开，方便调长片。
+ * 判定用 NODE_ENV：`next dev` = development，`next build` 产物 = production。
+ * 二者都会被构建期替换成字面量 true/false（不会在浏览器里访问 process），所以安全。
  */
+const DEFAULT_REQUIREMENT_PROD = "生成ai回忆录宣传片，5s";
+const DEFAULT_REQUIREMENT_DEV = "生成ai回忆录宣传片";
+
 export const DEFAULT_HUASHU_SITE_URL = "https://aimemory.cafe/";
-export const DEFAULT_HUASHU_REQUIREMENT = "生成ai回忆录宣传片，5s";
+export const DEFAULT_HUASHU_REQUIREMENT =
+  process.env.NODE_ENV === "production" ? DEFAULT_REQUIREMENT_PROD : DEFAULT_REQUIREMENT_DEV;
 
 export function useHuashuVideoPanel(options: {
   getConversationId: () => string | null;

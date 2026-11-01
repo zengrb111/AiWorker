@@ -455,21 +455,38 @@ export function buildFilmPrompt(input: {
 }
 
 /**
- * 从「创作需求」里解析用户显式指定的成片时长（秒）。
+ * 从「创作需求」里解析用户显式指定的**整片**时长（秒）。
  *
  * 支持「30秒 / 30 秒 / 1分钟 / 2 分钟」；未写则返回 null。
  * 对话「一键生成视频」用它取代固定 20s 上限：提示词写了时长就照办，
  * 没写就不限制，交给 DSH 按内容自然展开。上限 600s 只是防止把分钟数
  * 误写成离谱值，正常需求远不会触顶。
+ *
+ * 关键：必须区分「整片时长」与「分镜时间范围」。用户常直接贴分镜脚本，例如
+ *   `0–5s（钩子） … 5–22s（三条红线） … 22–35s（判断+钩子）`
+ * 旧实现会命中第一个 `0–5s` 里的 `5s`，把整片硬裁到 5 秒（实测就是这么出的 4.9s）。
+ * 现在先把这类范围剔掉再解析；并识别「时间不限 / 不限时长」为显式不限制。
  */
 export function parseHuashuDuration(requirement: string): number | null {
   if (!requirement) return null;
-  const minute = requirement.match(/(\d{1,3})\s*分钟/);
+
+  // 显式声明不限制：正文里即使有「0–5s」这类分镜时间，也不设整片上限。
+  if (/(?:时间|时长)\s*不限|不限\s*(?:时间|时长)|不限制\s*(?:时间|时长)/.test(requirement)) return null;
+
+  // 剔除分镜时间范围（0–5s / 5-22s / 22~35s / 5秒至22秒 / 5s～22s），它们不是整片时长。
+  const cleaned = requirement
+    .replace(/\d{1,3}\s*[–—\-~～至到]\s*\d{1,3}\s*(?:秒|s(?:ec(?:onds?)?)?)/gi, " ")
+    .replace(
+      /\d{1,3}\s*(?:秒|s(?:ec(?:onds?)?)?)\s*[–—\-~～至到]\s*\d{1,3}(?:\s*(?:秒|s(?:ec(?:onds?)?)?))?/gi,
+      " "
+    );
+
+  const minute = cleaned.match(/(\d{1,3})\s*分钟/);
   if (minute) {
     const m = Number.parseInt(minute[1], 10);
     if (Number.isFinite(m) && m >= 1) return Math.min(600, m * 60);
   }
-  const second = requirement.match(/(\d{1,3})\s*(?:秒|s(?:ec(?:onds?)?)?)(?![a-z0-9])/i);
+  const second = cleaned.match(/(\d{1,3})\s*(?:秒|s(?:ec(?:onds?)?)?)(?![a-z0-9])/i);
   if (second) {
     const s = Number.parseInt(second[1], 10);
     if (Number.isFinite(s) && s >= 1) return Math.min(600, s);
