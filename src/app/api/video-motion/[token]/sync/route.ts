@@ -17,6 +17,7 @@ import { getAgentToken } from "@/lib/platform-config";
 import { readSessionUserId } from "@/lib/session";
 import { syncProjectTargets, type SyncTarget } from "@/lib/video/huashu-inbox-worker";
 import { prisma } from "@/lib/prisma";
+import { basename } from "node:path";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
@@ -46,17 +47,52 @@ export async function POST(request: Request, { params }: { params: { token: stri
   const body = await readJson<{ targets?: unknown }>(request);
   const targets = normalizeTargets(body?.targets);
 
-  const project = await prisma.videoMotionProject.findFirst({
-    where: { token: params.token },
-    select: { id: true, userId: true, videoUrl: true }
-  });
+  const project = await findProject(params.token);
   if (!project) return jsonError("视频项目不存在。", 404);
   if (!internal && project.userId !== userId) return jsonError("无权操作这个视频。", 403);
 
   try {
-    const result = await syncProjectTargets(params.token, targets, { userId: internal ? undefined : userId ?? undefined });
-    return jsonOk({ ...result, targets });
+    // ⚠️ 一定要用 project.token（而不是路径里的 params.token）继续：
+    // Studio 回调时传的是**项目目录名**，命中的可能是 projectDir 反查出来的项目。
+    const result = await syncProjectTargets(project.token, targets, {
+      userId: internal ? undefined : userId ?? undefined
+    });
+    return jsonOk({ ...result, token: project.token, targets });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "同步失败。", 500);
   }
+}
+
+/**
+ * 按 token 找项目；找不到再按**项目目录名**反查。
+ *
+ * 为什么需要反查：huashu Studio 的「同步修改到内容库」由它的服务端代理回调平台，
+ * 而它拿的 token 是 `project.root.split(sep).pop()` —— 也就是**目录名**
+ * （见 huashu-motion `cli/lib/server.js::syncToPlatform`）。
+ * 早期/外部建的 om 项目目录名往往不等于平台 token（如 `/opt/huashu-motion/workspace/my-video`），
+ * 只按 token 查会 404，用户看到的就是「点了同步、内容库没变」。
+ */
+async function findProject(rawToken: string) {
+  // App Router 的 params 通常已解码；再解一次要防含 % 的目录名抛 URIError。
+  let want = (rawToken || "").trim();
+  try {
+    want = decodeURIComponent(want).trim();
+  } catch {
+    /* 已经是解码后的值，保持原样 */
+  }
+  if (!want) return null;
+  const select = { id: true, token: true, userId: true, videoUrl: true, projectDir: true } as const;
+
+  const byToken = await prisma.videoMotionProject.findFirst({ where: { token: want }, select });
+  if (byToken) return byToken;
+
+  // 目录名兜底：只认「最后一段目录名完全相等」，避免 my-video 命中 my-video-2。
+  // 必须唯一命中才认 —— 多个项目共用一个目录名（如都叫 proj）时不能瞎猜，
+  // 否则会把内容库同步到别人的项目上。
+  const candidates = await prisma.videoMotionProject.findMany({
+    where: { projectDir: { contains: want } },
+    select
+  });
+  const matched = candidates.filter((item) => basename(item.projectDir || "") === want);
+  return matched.length === 1 ? matched[0] : null;
 }

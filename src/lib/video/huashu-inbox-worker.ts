@@ -521,6 +521,80 @@ export async function rerenderProject(project: ProjectLike): Promise<{
   });
 }
 
+/**
+ * 采纳 Studio 自己导出的新片。
+ *
+ * 背景：Studio 顶部有个「导出」按钮，走的是 om 自己的渲染（`/api/render`），
+ * 产物只写进项目目录的 `out/`，**平台库里的 videoUrl 不会跟着变**。
+ * 用户导出后点「同步到内容库」，平台推过去的还是旧版 —— 表现出来就是
+ * 「点了同步，内容库没变」。这里在同步前扫一次 out/，发现比已发布版本更新的
+ * 成片就先按版本链发布成新版本，再走同步。
+ *
+ * 保守起见：只有 mtime 比已发布文件新 1 秒以上才采纳，避免把 out/ 里的
+ * 历史产物反复当新片发。
+ */
+async function adoptNewestRender(project: ProjectLike): Promise<string> {
+  const current = project.videoUrl || "";
+  const outDir = join(project.projectDir, "out");
+  if (!existsSync(outDir)) return current;
+
+  let newest: { file: string; mtime: number } | null = null;
+  for (const name of readdirSync(outDir)) {
+    if (!/\.mp4$/i.test(name)) continue;
+    const abs = join(outDir, name);
+    try {
+      const info = statSync(abs);
+      if (!info.isFile() || info.size < 1024) continue;
+      if (!newest || info.mtimeMs > newest.mtime) newest = { file: abs, mtime: info.mtimeMs };
+    } catch {
+      /* 读不到的跳过 */
+    }
+  }
+  if (!newest) return current;
+
+  let publishedMtime = 0;
+  if (current.startsWith("/videos/")) {
+    try {
+      publishedMtime = statSync(join(process.cwd(), "public", current.replace(/^\//, ""))).mtimeMs;
+    } catch {
+      /* 已发布文件不在本机：按需要采纳处理 */
+    }
+  }
+  if (newest.mtime <= publishedMtime + 1000) return current;
+
+  const versions = (JSON.parse(project.versionsJson || "[]") as VersionRecord[]) || [];
+  const inDir = readdirSync(join(process.cwd(), "public", "videos"))
+    .map((name) => {
+      const hit = new RegExp(`^huashu-${project.token}-v(\\d+)\\.mp4$`).exec(name);
+      return hit ? Number(hit[1]) : 0;
+    })
+    .filter(Boolean);
+  const version = Math.max(versions.length, ...inDir, 0) + 1;
+  const videoUrl = publishVideo(newest.file, project.token, version);
+  const duration = await probeDuration(join(process.cwd(), "public", videoUrl.replace(/^\//, "")));
+
+  await prisma.videoMotionProject.update({
+    where: { id: project.id },
+    data: {
+      videoUrl,
+      versionsJson: JSON.stringify([
+        ...versions,
+        {
+          version,
+          videoUrl,
+          duration,
+          createdAt: new Date().toISOString(),
+          note: "Studio 导出后同步采纳"
+        } satisfies VersionRecord
+      ]),
+      status: "READY",
+      error: null
+    }
+  });
+
+  return videoUrl;
+}
+
 /** 同步目标：内容库条目 / 会话里那条视频消息。 */
 export type SyncTarget = "content" | "conversation";
 
@@ -552,8 +626,10 @@ export async function syncProjectTargets(
   const project = await prisma.videoMotionProject.findFirst({ where: { token } });
   if (!project) throw new Error("视频项目不存在。");
   if (options.userId && project.userId !== options.userId) throw new Error("无权操作这个视频。");
-  const videoUrl = project.videoUrl;
-  if (!videoUrl) throw new Error("这个视频还没有出过片，没有可同步的版本。");
+  if (!project.videoUrl) throw new Error("这个视频还没有出过片，没有可同步的版本。");
+  // Studio 自己的「导出」只写 out/，平台库不知道；同步前先把新片采纳成新版本，
+  // 否则用户导出完点同步，推过去的还是旧片（表现为「点了没变」）。
+  const videoUrl = await adoptNewestRender(project);
 
   const versionHit = new RegExp(`/huashu-${project.token}-v(\\d+)\\.mp4$`).exec(videoUrl);
   const version = versionHit ? Number(versionHit[1]) : null;
@@ -566,11 +642,18 @@ export async function syncProjectTargets(
   if (targets.includes("content")) {
     const contentMarker = `/videos/huashu-${project.token}-v`;
     const linked = await prisma.contentItem
-      .findMany({ where: { userId: project.userId, videoUrl: { contains: contentMarker } }, select: { id: true } })
-      .catch(() => [] as Array<{ id: string }>);
+      .findMany({
+        where: { userId: project.userId, videoUrl: { contains: contentMarker } },
+        select: { id: true, videoUrl: true }
+      })
+      .catch(() => [] as Array<{ id: string; videoUrl: string | null }>);
     contentFound = linked.length;
-    if (linked.length) {
-      const ids = linked.map((item) => item.id);
+
+    // 只更新**还停在旧版**的条目：否则每次点同步都会返回 contentUpdated>0，
+    // Studio 就永远提示「已同步」，用户在内容库看不到任何变化，会以为同步失效。
+    const stale = linked.filter((item) => item.videoUrl !== videoUrl);
+    if (stale.length) {
+      const ids = stale.map((item) => item.id);
       await prisma.contentItem
         .updateMany({ where: { id: { in: ids } }, data: { videoUrl } })
         .catch(() => undefined);

@@ -48,8 +48,8 @@ type AgentBody = {
 };
 
 /**
- * 视频字段归一化：与网页端 POST /api/scheduled-jobs 共用同一套规则，
- * 避免 agent 建出来的视频任务与界面建的行为不一致。
+ * 视频字段归一化：与平台历史网页端曾用的同一套校验规则保持一致，
+ * 避免 agent 建出来的视频任务和平台原有逻辑行为不一致。
  */
 function normalizeVideoFields(body: AgentBody) {
   const kind = (body.kind || "").trim().toUpperCase() === "VIDEO" ? "VIDEO" : "TEXT";
@@ -128,6 +128,9 @@ export async function POST(request: NextRequest) {
           cronExpr,
           timezone,
           prompt,
+          // 来源标记为「龙虾（网关 agent）经微信创建」。平台侧定时任务模块是纯查看器，
+          // 只展示 source=AGENT 的任务；平台网页端创建逻辑已废弃。
+          source: "AGENT",
           enabled: body.enabled !== false,
           kind: video.kind,
           videoSiteUrl: video.kind === "VIDEO" ? video.siteUrl || null : null,

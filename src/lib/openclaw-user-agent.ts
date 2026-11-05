@@ -205,12 +205,15 @@ const OWN_MEMORY_RULE = [
  *
  * 令牌只写「去读哪个文件」，绝不写明文：明文会随文件被复制/截图外泄，轮换后还会失效。
  */
+// 龙虾（网关 agent）调平台用的基础地址：线上平台跑在 127.0.0.1:3100（3000 被 AIMemory 后端占），
+// 本地开发是 3000。用 AIWORKER_BASE_URL 区分环境，避免把请求错打到别的进程导致任务建不进平台库。
+const PLATFORM_BASE_URL = (process.env.AIWORKER_BASE_URL || "http://127.0.0.1:3000").replace(/\/$/, "");
 function buildPlatformApiSection(userId: string, tokenFile: string): string {
   const uid = JSON.stringify(userId);
   return [
-    "## 🔌 平台接口（定时任务 · 随时可用）",
+    "## 🔌 平台接口（定时任务 · 视频入库 · 随时可用）",
     "",
-    "平台跑在本机 `http://127.0.0.1:3000`。**令牌不要跟用户索要，也不要凭记忆复抄**，",
+    `平台地址是 \`${PLATFORM_BASE_URL}\`（本机开发为 3000，线上为 3100）。**令牌不要跟用户索要，也不要凭记忆复抄**`,
     "用命令现场取（读不到就说明平台没启动或还没生成令牌）：",
     "",
     "```bash",
@@ -222,7 +225,7 @@ function buildPlatformApiSection(userId: string, tokenFile: string): string {
     "",
     "### 定时任务：查 / 建 / 改 / 删 / 立即跑",
     "",
-    "`POST http://127.0.0.1:3000/api/scheduled-jobs/agent`",
+    `\`POST ${PLATFORM_BASE_URL}/api/scheduled-jobs/agent\``,
     "",
     "| 想做什么 | body |",
     "| --- | --- |",
@@ -243,6 +246,105 @@ function buildPlatformApiSection(userId: string, tokenFile: string): string {
     "3. 建完把任务名、时间、下一次执行时间复述给他确认；他说要改，就用 `list` 拿到 id 再 `update`。",
     "4. **不要用 `openclaw cron` 回答「我有哪些定时任务」**：那是网关的系统任务（心跳、记忆整理），",
     "   和用户任务完全不是一回事，读它只会读到别人的任务名。",
+    "",
+    "### 停止正在运行的任务（含视频生成等后台任务）",
+    "",
+    "当用户说「停一下」「别生成了」「把刚才那个视频取消掉」，或你自己判断需要中止当前会话里",
+    "正在跑的 run / 后台子任务时，调这个接口中止（等价于前端那个「停止」按钮，但你能主动调）：",
+    "",
+    `\`POST ${PLATFORM_BASE_URL}/api/openclaw/task/stop/agent\``,
+    "",
+    "鉴权和上面定时任务一样：`-H \"Authorization: Bearer $TOKEN\"`，body 里**必须**带归属账号",
+    `（userId: ${uid}，或 sessionKey / phone）。`,
+    "",
+    "| 想做什么 | body |",
+    "| --- | --- |",
+    `| 停掉「我当前会话」正在跑的任务 | \`{"userId":${uid},"conversationId":"<会话id>"}\` |`,
+    `| 停掉我指定的某个会话 | \`{"userId":${uid},"sessionKey":"agent:u-${userId}:c<会话id>"}\` |`,
+    `| 精确取消某个 run（如视频渲染子任务） | \`{"userId":${uid},"sessionKey":"<后台任务的sessionKey>","runId":"<runId>"}\` |`,
+    "",
+    "**注意：**",
+    "",
+    "1. `sessionKey` 必须以 `agent:u-" + userId + ":` 开头 —— 你只能停**自己这位用户**的任务，",
+    "   平台会直接拒绝跨用户的停止请求（403）。",
+    "2. 不传 `sessionKey` 也不传 `conversationId` 时无法定位要停的会话，接口会返回 stopped:false，",
+    "   所以至少给一个；最常用的是「带 userId + 当前 conversationId」。",
+    `3. 返回 \`{"stopped":true}\` 表示已向网关发出中止信号；返回 \`{"stopped":false}\` 多半是任务已经跑完了，`,
+    "   不是失败，不用重试。",
+    "",
+    "### 保存视频到内容库（你已经出好片了）",
+    "",
+    "当你自己用 huashu-motion / ffmpeg 等做出了一支 MP4，想让它出现在平台「内容库」里给用户看、",
+    "能播放、能改片、能发布时，调这个接口。**这里只保存成片，不会重新生成视频**。",
+    "",
+    `\`POST ${PLATFORM_BASE_URL}/api/content/ingest/video\``,
+    "",
+    "鉴权同样是 `-H \"Authorization: Bearer $TOKEN\"`，请求里**必须**带归属账号",
+    `（\`"userId": ${uid}\`，或 phone）。以下三种传法任选其一：`,
+    "",
+    "| 场景 | 怎么传 |",
+    "| --- | --- |",
+    "| 最通用：直接把文件传上来 | multipart `-F \"file=@/abs/path/out.mp4\"` |",
+    `| 视频就在同机磁盘上 | JSON \`{"filePath":"/opt/huashu-motion/.../out.mp4"}\` |`,
+    `| 平台已有 / 远程地址 | JSON \`{"videoUrl":"/videos/xxx.mp4"}\` 或 \`{"videoUrl":"https://.../a.mp4"}\` |`,
+    "",
+    "常用完整例子（multipart，推荐）：",
+    "",
+    "```bash",
+    `curl -s -X POST ${PLATFORM_BASE_URL}/api/content/ingest/video \\`,
+    `  -H \"Authorization: Bearer $TOKEN\" \\`,
+    `  -F \"userId=${userId}\" \\`,
+    `  -F \"file=@/abs/path/to/video.mp4\" \\`,
+    `  -F \"title=今日 AI 热点速览\" \\`,
+    `  -F \"body=视频脚本 / 配文，可留空\"`,
+    "```",
+    "",
+    "可选字段：`category`（默认「视频」）、`coverImageUrl`（不传则自动从成片抽一帧）、",
+    "`contentId`（传给已有内容条目，把成片挂上去而不是新建一条）。",
+    "",
+    "**注意：**",
+    "",
+    "1. 只支持 mp4 / mov / webm / m4v，单个 ≤100MB。`filePath` 只认平台 public、huashu-motion 仓库、",
+    "   你的 workspace 目录（要加别的目录让管理员设 `AGENT_VIDEO_IMPORT_DIRS`）。",
+    "2. 返回的 `videoUrl` 是站内路径（如 `/videos/agent-xxx.mp4`），回给用户时**拼上平台域名**再发；",
+    "   别把服务器本地绝对路径发给他，那是打不开的。",
+    "3. 同一天同一账号重复保存同一支片子会复用已有条目（`reused:true`），不会灌出重复内容。",
+    `4. **别用 \`/api/content/ingest\` 存视频**：那边要求正文 ≥200 字，还会另起一支新片。`,
+    "",
+    "### 这支片子是 DSH 调 huashu-motion 出的 → 存成「可去 Studio 修改」",
+    "",
+    "如果你是用 DSH 驱动 huashu-motion（`om new` 建项目 → DSH 写片 → `om render` 出片）做的视频，",
+    "**保存时务必带上生产这支片子的项目根目录（projectDir）**，这样用户能在内容库里点「去 Studio 修改」继续改片、",
+    "平台后台会自动接单改片并出新版。只传视频文件不带这些字段 = 一支普通视频，改不了。",
+    "",
+    "在原来的请求里多加两个字段（multipart 用 `-F`，JSON 直接写）：",
+    "",
+    "| 字段 | 说明 |",
+    "| --- | --- |",
+    "| `projectDir` | **必填**，`om new` 建出来的**项目根目录绝对路径**（含 `.om/` 和 `index.html`），不是 out 目录。**只要传了它，平台就自动按 Studio 模式处理** |",
+    "| `studio` | 可选，显式写 `true` 也行（等价于传了 projectDir）；漏传不会失效 |",
+    "| `token` | 可选；不传平台自动生成一个。只能用字母/数字/连字符 |",
+    "| `productName` / `siteUrl` / `targetSeconds` / `duration` | 可选，项目元数据 |",
+    "| `copyProject` | 可选，默认 `false`；设 `true` 会把项目目录复制进平台托管目录（项目在临时目录、可能被清理时用） |",
+    "",
+    "JSON 完整例子（`filePath` 指向 out 里的成片）：",
+    "",
+    "```bash",
+    `curl -s -X POST ${PLATFORM_BASE_URL}/api/content/ingest/video \\`,
+    `  -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" \\`,
+    `  -d '{\"userId\":\"${userId}\",`,
+    `      \"projectDir\":\"/opt/huashu-motion/workspace/my-video\",`,
+    `      \"filePath\":\"/opt/huashu-motion/workspace/my-video/out/final.mp4\",`,
+    `      \"title\":\"今日 AI 热点速览\",\"targetSeconds\":20}'`,
+    "```",
+    "",
+    "保存成功后返回的 `studio` 里有 `token` / `projectDir` / `version` / `studioPath`。",
+    "**成片必须叫 `/videos/huashu-<token>-v1.mp4` 这种名字**，平台会自动按这个规范落盘 ——",
+    "前端就是靠 URL 里的 `huashu-<token>-vN.mp4` 认出「这支片子能进 Studio」的，",
+    "所以别自己改文件名，也别事后用别的接口把它改名。",
+    "",
+    "注意：studio 模式成片必须是 `.mp4`；`projectDir` 必须在允许目录内",
+    "（huashu-motion 仓库、OpenClaw workspace、平台 public，或让管理员加 `AGENT_VIDEO_IMPORT_DIRS`）。",
     "",
     ""
   ].join("\n");
@@ -412,7 +514,7 @@ const TOOLS_LIBRARY_SECTION = `## AIWorker 内容库（稿件约定）
 - 文章不在约定目录也能入库：\`ingest.mjs "<文件.md>"\` 或 \`ingest.mjs --dir="<目录>"\`；
   加 \`--no-publish\` 只入库不发布，加 \`--category=小红书|公众号文章|头条号|视频\` 指定分类。
 - 入库校验：单次最多 20 条；正文少于 200 字会被跳过；同一天 + 同账号 + 同标题去重跳过。
-- 脚本连不上 \`http://127.0.0.1:3000\` 时会提示「请先启动 AIWorker 平台」——平台没启动时入库和发布都无法完成。
+- 脚本连不上 \`${PLATFORM_BASE_URL}\` 时会提示「请先启动 AIWorker 平台」——平台没启动时入库和发布都无法完成。
 
 `;
 
@@ -590,7 +692,13 @@ export function isUserAgentKnown(userId: string): boolean {
  *
  * 每个用户绑定的 bot 账号互不相同（`WechatBinding.wechatOpenId` 去 `@im.bot`
  * 后缀即是），所以可以按 `accountId` 精确把每个 bot 的入站消息路由到该用户
- * 自己的 `u-<id>` agent；保留一条 `accountId:"*"` → main 的兜底。
+ * 自己的 `u-<id>` agent。
+ *
+ * 🔴 **不保留 `accountId:"*"` → main 兜底**：`main` 就是平台运营者主账号
+ * （138001）的私有 workspace，任何未显式映射到具体用户 agent 的 bot 一旦落回
+ * `*`，消息就会进 138001 的记忆 —— 这是真实的跨账号泄露（2026-11-03 串号事故）。
+ * 所以未绑定 / 已解绑 / 无本地凭据的 bot **没有路由**，消息不投递，这才是安全的
+ * fail-safe。所有真正生效的绑定都由 `refreshWeixinAgentBindings` 显式建出映射。
  *
  * `bindings` 属于热加载字段（不需要重启网关），失败只记日志不影响调用方。
  */
@@ -607,11 +715,11 @@ export async function syncWeixinAgentBindings(
 
   return serialize(() => {
     const cfg = readConfig(configPath);
-    const next = [
-      ...concrete,
-      // 兜底：没匹配到具体 bot 的（老凭据已失效/未映射）仍走 main，保持现状。
-      { agentId: "main", match: { channel: "openclaw-weixin", accountId: "*" } }
-    ];
+    // 🔴 不追加 `accountId:"*"` → main 兜底：未显式映射到具体用户 agent 的 bot
+    // 一律不作路由（fail-safe），杜绝已解绑 / 无凭据的 bot 静默落回 main（138001）
+    // 造成跨账号记忆泄露。只有 refreshWeixinAgentBindings 依据 DB 里 status=BOUND
+    // 且有本地凭据的 bot 才会进入 `concrete`。
+    const next = [...concrete];
     const before = JSON.stringify(cfg.bindings ?? null);
     const after = JSON.stringify(next);
     if (before === after) return { changed: false, bindings: next.length };
@@ -619,7 +727,7 @@ export async function syncWeixinAgentBindings(
     cfg.bindings = next;
     writeConfigAtomic(configPath, cfg);
     console.log(
-      `[user-agent] 微信入站分流已更新：${concrete.length} 个 bot → 各自 agent（+main 兜底）`
+      `[user-agent] 微信入站分流已更新：${concrete.length} 个 bot → 各自 agent（无 * 兜底）`
     );
     return { changed: true, bindings: next.length };
   });

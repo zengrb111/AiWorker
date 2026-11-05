@@ -2,6 +2,7 @@ import { jsonError, jsonOk } from "@/lib/http";
 import { openClawClient } from "@/lib/openclaw";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
+import { refreshWeixinAgentBindings } from "@/lib/weixin-bindings";
 
 export async function DELETE() {
   try {
@@ -49,7 +50,27 @@ export async function DELETE() {
         return [] as string[];
       });
 
-    return jsonOk({ unbound: true, prunedOrphans });
+    // 🔴 解绑后必须同步刷新网关路由表：否则旧的 `bot → 用户 agent` 映射会残留在
+    // bindings 里，已解绑的 bot 仍会把消息路由到原账号（或落回 * → main 造成串号，
+    // 见 2026-11-03 事故）。refreshWeixinAgentBindings 只按 DB 里 status=BOUND
+    // 且有本地凭据的 bot 重建映射，所以这个刚解绑的 bot 不会再出现。
+    const routeSync = await refreshWeixinAgentBindings()
+      .then((r) => ({ changed: r.changed, mappings: r.mappings }))
+      .catch((error) => {
+        console.warn(
+          `[wechat/binding] 解绑后刷新微信路由失败（不影响解绑结果）：${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        return null;
+      });
+
+    return jsonOk({
+      unbound: true,
+      prunedOrphans,
+      routeSynced: routeSync ? routeSync.changed : null,
+      routeMappings: routeSync ? routeSync.mappings : null
+    });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "解除微信绑定失败。", 502);
   }

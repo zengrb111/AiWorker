@@ -1520,6 +1520,27 @@ await prisma.message.create({
           throw new Error("助手返回了空回复，请重试。");
         }
 
+        // 网关 run 被用户/外部 abort（点「停止」）：前端已自行把已收到的内容保存为
+        // 「**已停止**」消息，这里不再重复写 assistant message，避免 DB 里出现两条
+        // 相同 partial。仅把任务标记为终态并收尾 SSE（若前端还在读，会收到 stopped final）。
+        if (result.aborted) {
+          await prisma.openClawTask.update({
+            where: { id: task.id },
+            data: { status: "SUCCEEDED" }
+          }).catch(() => {});
+          safeEnqueue(sseEncode({
+            type: "final",
+            stopped: true,
+            message: {
+              id: "__aborted__",
+              role: "ASSISTANT",
+              content: result.content,
+              createdAt: new Date().toISOString()
+            }
+          }));
+          return;
+        }
+
         // 本轮成功即视为种子完成：后续回合依赖龙虾自己的会话记录，不再重放历史。
         seededConversations.add(conversation.id);
 

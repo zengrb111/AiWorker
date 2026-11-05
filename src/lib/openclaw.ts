@@ -43,6 +43,8 @@ export type OpenClawTaskResult = {
   coverImageUrl?: string;
   inlineImages?: string[];
   raw: unknown;
+  /** 网关侧 run 是否被主动 abort（用户点「停止」→ chat.abort）。 */
+  aborted?: boolean;
 };
 
 export type OpenClawQr = {
@@ -1285,7 +1287,7 @@ async function requestGatewayChat(
   timeoutMs?: number,
   onDelta?: (deltaText: string) => void,
   sessionKeyOverride?: string
-): Promise<{ runId: string; content: string; raw: unknown }> {
+): Promise<{ runId: string; content: string; raw: unknown; aborted?: boolean }> {
   const effectiveTimeout =
     timeoutMs ?? Number(process.env.OPENCLAW_CHAT_TIMEOUT_MS ?? 120000);
 
@@ -1335,6 +1337,9 @@ async function requestGatewayChat(
     // Track accumulated deltas so timeouts / empty finals can still
     // return the partial streamed content instead of losing it.
     let deltaAccum = "";
+    // 网关侧 run 被主动 abort（用户点「停止」→ 平台 chat.abort）时置 true，
+    // 透传给调用方：此时不应再新增 assistant message（前端已自行保存「已停止」）。
+    let wasAborted = false;
     const content = await new Promise<string>((resolve, reject) => {
       const fail = (message: string, code?: string) => {
         const err = new Error(message) as Error & { partialContent?: string; code?: string };
@@ -1382,6 +1387,7 @@ async function requestGatewayChat(
         // 用户/系统主动中止（如 /stop）。已有部分输出就交付，不当作错误。
         if (p.state === "aborted" && p.runId === runId) {
           clearTimeout(timer);
+          wasAborted = true;
           resolve(deltaAccum);
           return;
         }
@@ -1398,7 +1404,7 @@ async function requestGatewayChat(
       });
     });
 
-    return { runId, content, raw: sendResult };
+    return { runId, content, raw: sendResult, aborted: wasAborted };
   } finally {
     conn.close();
   }
@@ -1987,7 +1993,8 @@ export const openClawClient = {
     return {
       taskId: result.runId,
       content: result.content,
-      raw: result.raw
+      raw: result.raw,
+      aborted: result.aborted
     };
   },
 
@@ -2051,5 +2058,51 @@ export const openClawClient = {
           sessionKey: j.sessionKey ?? ""
         };
       });
+  },
+
+  /**
+   * 中止 OpenClaw 网关里正在运行的任务（agent run）。
+   *
+   * 网关协议里有 `chat.abort`：
+   *   - `chat.abort({ sessionKey })`（不带 runId）→ 中止该会话授权的活跃 runs
+   *     （以及排队的后续轮次），用于「停止当前正在跑的回复/任务」；
+   *   - `chat.abort({ runId })` → 精确取消某一个还在跑的 run，用于「停掉某个
+   *     具体的后台子任务」（如视频渲染，独立 sessionKey）。
+   *
+   * 平台侧以 operator.admin 身份连接网关，天然有权 abort 任意会话的 run，
+   * 包括龙虾（对话 agent）自己启动的后台子任务。
+   *
+   * 入参优先级：显式 sessionKey > 由 userId+conversationId 派生的隔离会话 key。
+   * 没有活跃 run（任务已结束 / 会话不存在）时网关会报错，这里不当作致命错误，
+   * 返回 aborted:false，让调用方（前端停止按钮 / agent 工具）无副作用地兜底。
+   */
+  async stopTask(input: {
+    sessionKey?: string;
+    runId?: string;
+    userId?: string;
+    conversationId?: string;
+  }): Promise<{ aborted: boolean; error?: string }> {
+    const sessionKey =
+      input.sessionKey?.trim() ||
+      deriveUserSessionKey(input.userId, input.conversationId);
+    if (!sessionKey) {
+      return {
+        aborted: false,
+        error: "缺少 sessionKey 或 userId/conversationId，无法确定要中止的会话。"
+      };
+    }
+
+    const params: Record<string, unknown> = { sessionKey };
+    if (input.runId?.trim()) params.runId = input.runId.trim();
+
+    try {
+      await requestGateway("chat.abort", params, 15000);
+      return { aborted: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // 没有活跃 run / 会话不存在等属于「本来就没在跑」，不报错。
+      console.warn(`[openclaw] chat.abort 未命中活跃 run（可能已结束）：${message}`);
+      return { aborted: false, error: message };
+    }
   }
 };

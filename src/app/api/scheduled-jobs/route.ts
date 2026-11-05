@@ -1,45 +1,23 @@
-import { jsonError, jsonOk, readJson } from "@/lib/http";
+import { jsonError, jsonOk } from "@/lib/http";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
-import { isValidCronExpr, nextRunAt } from "@/lib/scheduler";
-import { sanitizeScheduledPrompt } from "@/lib/scheduled-job-prompt";
+import { nextRunAt } from "@/lib/scheduler";
 
 export const dynamic = "force-dynamic";
 
 /**
- * GET  /api/scheduled-jobs —— 当前登录用户的定时任务列表
- * POST /api/scheduled-jobs —— 新建定时任务
+ * GET /api/scheduled-jobs —— 当前登录用户的定时任务列表（**只读**）。
  *
- * 平台自持调度：任务存在本库，到点由 src/lib/scheduler 在该用户专属会话里执行。
- * 不再往网关注册 cron（网关 cron 是全平台共享的，会造成跨用户泄露）。
+ * 平台侧「定时任务」模块是纯查看器：只展示由龙虾（OpenClaw 网关 agent）经微信创建的任务
+ * （source = "AGENT"）。新建 / 编辑 / 删除 / 立即执行一律在微信里跟龙虾聊，平台不再提供写操作。
+ *
+ * 到点执行与微信推送仍由 src/lib/scheduler 走 Prisma 直接完成，与本接口的只读化互不干扰。
  */
-type CreateBody = {
-  name?: string;
-  cronExpr?: string;
-  timezone?: string;
-  prompt?: string;
-  enabled?: boolean;
-  runOnce?: boolean;
-  oneShotAt?: string;
-  notifyWechat?: boolean;
-  /** TEXT（默认，走 agent）| VIDEO（走 huashu-motion 直接出片） */
-  kind?: string;
-  /** 视频任务：产品网站（与参考图至少一个） */
-  videoSiteUrl?: string;
-  /** 视频任务：参考图 URL 数组 */
-  videoImages?: string[];
-  /** 视频任务：目标时长（秒），10~60，默认 20。null 表示沿用默认。 */
-  videoTargetSeconds?: number;
-};
-
-/** 一次性任务的占位 cron（runOnce 不按 cron 触发，仅用于占位，避免空字段）。 */
-const ONESHOT_PLACEHOLDER_CRON = "0 0 1 1 *";
-
 export async function GET() {
   const user = await requireUser();
   if (!user) return jsonError("未登录。", 401);
   const jobs = await prisma.scheduledJob.findMany({
-    where: { userId: user.id },
+    where: { userId: user.id, source: "AGENT" },
     orderBy: { createdAt: "asc" }
   });
   // 下次执行时间由服务端算：cron 解析逻辑只放在这边一份，前端不做重复实现。
@@ -56,69 +34,4 @@ export async function GET() {
         : null
     }))
   });
-}
-
-export async function POST(request: Request) {
-  const user = await requireUser();
-  if (!user) return jsonError("未登录。", 401);
-
-  const body = await readJson<CreateBody>(request);
-  const name = (body.name || "").trim();
-  const cronExprRaw = (body.cronExpr || "").trim();
-  const prompt = sanitizeScheduledPrompt(body.prompt || "");
-  const timezone = (body.timezone || "Asia/Shanghai").trim() || "Asia/Shanghai";
-  const runOnce = body.runOnce === true;
-  const oneShotAt = body.oneShotAt ? new Date(body.oneShotAt) : null;
-  const notifyWechat = body.notifyWechat !== false;
-  const kind = (body.kind || "").trim().toUpperCase() === "VIDEO" ? "VIDEO" : "TEXT";
-  const videoSiteUrl = (body.videoSiteUrl || "").trim();
-  const videoImages = Array.isArray(body.videoImages)
-    ? body.videoImages.map((u) => String(u || "").trim()).filter(Boolean).slice(0, 6)
-    : [];
-  let videoTargetSeconds: number | null = null;
-  if (typeof body.videoTargetSeconds === "number" && Number.isFinite(body.videoTargetSeconds)) {
-    videoTargetSeconds = Math.min(60, Math.max(10, Math.round(body.videoTargetSeconds)));
-  }
-
-  if (!name) return jsonError("缺少任务名。");
-  if (!prompt) return jsonError("缺少执行内容（prompt）。");
-
-  let cronExpr = cronExprRaw;
-  if (runOnce) {
-    if (!oneShotAt || Number.isNaN(oneShotAt.getTime())) {
-      return jsonError("一次性任务需要有效的执行时间。");
-    }
-    if (oneShotAt.getTime() <= Date.now()) {
-      return jsonError("一次性任务的执行时间必须晚于当前时间。");
-    }
-    cronExpr = ONESHOT_PLACEHOLDER_CRON;
-  } else if (!isValidCronExpr(cronExpr)) {
-    return jsonError("cron 表达式不合法（需 5 段：分 时 日 月 周，如 `30 17 * * *`）。");
-  }
-
-  if (kind === "VIDEO") {
-    if (videoSiteUrl && !/^https?:\/\//i.test(videoSiteUrl)) {
-      return jsonError("产品网站需以 http:// 或 https:// 开头。");
-    }
-    // 没有网站/参考图也可以：提示词是主输入，AI 会按选题自己设计画面
-  }
-
-  const job = await prisma.scheduledJob.create({
-    data: {
-      userId: user.id,
-      name,
-      cronExpr,
-      timezone,
-      prompt,
-      enabled: body.enabled !== false,
-      runOnce,
-      oneShotAt,
-      notifyWechat,
-      kind,
-      videoSiteUrl: kind === "VIDEO" ? videoSiteUrl || null : null,
-      videoImagesJson: kind === "VIDEO" ? JSON.stringify(videoImages) : null,
-      videoTargetSeconds: kind === "VIDEO" ? videoTargetSeconds : null
-    }
-  });
-  return jsonOk({ job });
 }

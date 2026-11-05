@@ -295,7 +295,11 @@ export async function ensureStudio(
         NO_COLOR: "1",
         // Studio 的「同步修改到内容库」按钮由 Studio 服务端代理回平台（见 cli/lib/server.js）。
         // 平台端口/令牌/根目录都从环境传过去，避免 Studio 去猜。
-        AIWORKER_BASE: `http://127.0.0.1:${(process.env.PORT || "3000").trim()}`,
+        // 优先用部署时显式配的 AIWORKER_BASE_URL（线上平台在 3100，3000 被 AIMemory 后端占）；
+        // 没配才回落 PORT/3000（本地开发）。Studio 的「同步修改到内容库」靠这个地址回调平台，
+        // 指错端口会静默同步失败。
+        AIWORKER_BASE: (process.env.AIWORKER_BASE_URL || "").trim().replace(/\/$/, "") ||
+          `http://127.0.0.1:${(process.env.PORT || "3000").trim()}`,
         AIWORKER_TOKEN_FILE: agentTokenFilePath(),
         AIWORKER_ROOT: process.cwd()
       }

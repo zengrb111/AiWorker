@@ -3057,6 +3057,7 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   height: 100%;
+  position: relative;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -3070,6 +3071,37 @@ textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 10px 24px rgba(21, 32, 54, 0.14);
   transform: translateY(-2px);
+}
+
+/* 内容库卡片右上角：huashu 成片的 Studio 改片快捷入口（卡片点击仍然是进详情） */
+.content-card-studio {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 9px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: background 120ms ease, opacity 120ms ease;
+}
+
+.content-card-studio:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.content-card-studio:disabled {
+  opacity: 0.75;
+  cursor: default;
 }
 
 /* 统一封面比例，卡片高度才对齐 */
@@ -3900,6 +3932,11 @@ textarea:focus {
   gap: 18px;
   flex-wrap: wrap;
   position: relative;
+  /* 宽度收到内容本身：否则 absolute 的「去 Studio 修改」会被推到整行最右，离视频很远 */
+  width: fit-content;
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 /* 视频右上角的「去 Studio 修改」浮动按钮（对应详情页红框位置） */
@@ -4145,8 +4182,10 @@ textarea:focus {
 }
 
 .content-detail--video .detail-video-block {
-  width: 100%;
-  max-width: 960px;
+  /* 收拢到内容宽度：absolute 的「去 Studio 修改」才会贴着视频右上角，
+     不然会被推到 960px 行宽的最右边，看起来像不见了 */
+  width: fit-content;
+  max-width: 100%;
   margin: 4px auto 0;
   display: flex;
   align-items: flex-start;

@@ -83,6 +83,9 @@ model ScheduledJob {
   id         String    @id @default(cuid())
   userId     String
   user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// 任务来源：AGENT=龙虾（OpenClaw 网关 agent）经微信创建 / PLATFORM=平台网页端创建（已废弃）。
+  /// 平台侧定时任务模块是纯查看器，只展示 source=AGENT 的任务；新建/编辑/删除一律在微信里跟龙虾聊。
+  source     String    @default("PLATFORM")
   name       String
   enabled    Boolean   @default(true)
   /// 仅执行一次：到 oneShotAt 时间点执行一次后自动停止（不按 cron 循环）
@@ -120,6 +123,7 @@ model ScheduledJob {
 
   @@index([userId])
   @@index([enabled])
+  @@index([source])
 }
 
 /// 每次执行的记录。用于任务卡片里展开「运行记录」（只保留最近若干条）。

@@ -222,7 +222,7 @@ async function resolveWechatTarget(userId: string): Promise<{ to: string; accoun
  */
 function extractAuditNotice(text: string): string | null {
   if (!text) return null;
-  const start = text.indexOf("【审核提醒】");
+  const start = text.startsWith("【选题台账】") ? 0 : text.indexOf("【审核提醒】");
   if (start === -1) return null;
   const picked = text.slice(start).trim();
   // 防止把「请打开内容库审核」之后的平台内部尾巴也带进来（理论上不会有）
@@ -295,12 +295,64 @@ type VideoIdea = { topic: string | null; requirement: string; reason: string | n
  * 所以那个 prompt 绝不能当产品名塞给 DSH（会变成一整面操作指令，出片方向全乱）。
  * 选题失败时用这条与产品解耦的兜底 brief——产品细节由 om grab 抓下的官网素材推断。
  */
+/**
+ * 台账模式标记：任务提示词里带这串文字，调度器就只做「到点提醒 + 写记录」，
+ * 不再由平台调用 huashu-motion / agent 去执行，避免与网关侧 agent 重复执行、重复烧钱。
+ */
+export const LEDGER_ONLY_MARKER = "[LEDGER_ONLY]";
 const DEFAULT_VIDEO_BRIEF =
   "结合今日与产品相关的热点做一支产品宣传片：前段把热点讲清楚、讲到位，并自然过渡到本产品；" +
   "后段集中讲清这个产品替谁解决了什么、怎么开始用，并给出明确行动指引（去官网免费开始）。" +
   "产品是什么、卖点有哪些，一律以出片环节抓到的官网素材为准，不要自行假设。" +
   "信息密度高、节奏快、真人感口播配音、经典白字烧录字幕，总时长 25 秒左右。";
 
+/**
+ * 选题台账：到点让 agent 现搜当天 AI 热点，只出 TOP5 选题清单发给用户。
+ *
+ * 与视频出片彻底解耦：不写脚本、不调 huashu-motion、不入库。
+ * 用户挑一条之后，再由会话里的 agent 写脚本、确认、出片。
+ */
+const TOPIC_LEDGER_PROMPT = [
+  "请完成「每日 AI 热点选题台账」，只做一件事：给我 5 个今天可以拍短视频的 AI 选题。",
+  "",
+  "【必须真联网搜索】",
+  "- 联网查今天（当天）AI 领域传播最广、讨论度最高的新闻/事件/数据。",
+  "- 方向：AI 大模型发布、AI 应用与工具、AI Agent、AI 融资与公司动态、企业用 AI 降本增效赚钱的真实案例、AI 对就业影响、AI 政策监管。",
+  "- 搜索失败就换关键词重试，最多 3 次；仍失败就如实说「今日搜索不可用」，**绝对不许凭记忆编新闻**。",
+  "- 每条都要能追溯到真实来源（媒体名 + 大致日期）。",
+  "",
+  "【输出格式，直接输出下面这段，不要额外解释】",
+  "【选题台账】🗞 今日 AI 热点 TOP5（日期）",
+  "1. 标题（20字内，带具体企业或数字）",
+  "   来源：媒体名 · 日期",
+  "   热度：传播量/讨论度（查不到写「未见公开数据」）",
+  "   与老板的关系：一句话",
+  "（2~5 同样格式）",
+  "最后一行：回复编号（1~5）我写分镜脚本。",
+  "",
+  "【禁止】",
+  "- 不要写口播文案、不要分镜、不要生成视频、不要调 huashu-motion、不要入库。",
+  "- 不要出现网址、产品名、品牌名、二维码。",
+].join("\n");
+
+async function runTopicLedgerJob(job: { userId: string; name: string }): Promise<string> {
+  try {
+    const result = await openClawClient.sendTask({
+      message: TOPIC_LEDGER_PROMPT,
+      userId: job.userId,
+      sessionKey: `agent:u-${job.userId}:topic-ledger`,
+      timeoutMs: Number(process.env.TOPIC_LEDGER_TIMEOUT_MS ?? 480_000),
+      retryOnEmpty: false,
+    });
+    const text = (result.content || "").trim();
+    if (!text) return "【选题台账】本次未返回内容，请稍后重试。";
+    return text;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[scheduler] 选题台账失败：", message);
+    return `【选题台账】生成失败：${message.slice(0, 300)}`;
+  }
+}
 function buildVideoIdeaPrompt(prompt: string): string {
   return [
     "你是竖版短视频的选题策划。请根据下面的任务要求，先选题，再写出一条可以直接开拍的创作需求。",
@@ -475,8 +527,25 @@ async function runVideoJob(job: {
     // 视频任务不走 agent：直接跑 huashu-motion 出片（一条 15~25 分钟），
     // 成片写进内容库并在这条任务专属会话里留进度，方便之后去 Studio 改。
     const isVideoJob = (job.kind || "TEXT").toUpperCase() === "VIDEO";
+    const isLedgerOnly = (job.prompt || "").includes(LEDGER_ONLY_MARKER);
     let content = "";
-    if (isVideoJob) {
+    if (isLedgerOnly) {
+      // 台账任务里的「选题台账」：到点由 agent 现搜 TOP5 选题，只出清单、不写脚本不出片。
+      if (job.kind === "TEXT" && !isVideoJob) {
+        // 图文台账：到点直接选一个当天 AI 热点，写 3 篇图文（公众号/小红书/头条号）并入库，
+        // 公众号那篇发布到官网；与原有平台定时任务行为一致，不再只提醒。
+        const result = await openClawClient.sendTask({
+          message: job.prompt,
+          userId: job.userId,
+          sessionKey: `agent:u-${job.userId}:scheduled-job`,
+          timeoutMs: Number(process.env.SCHEDULE_TASK_TIMEOUT_MS ?? 1_800_000),
+          retryOnEmpty: false,
+        });
+        content = (result.content || "").trim();
+      } else {
+        content = `【提醒】${job.name} 到点了。本条任务只做提醒与记录，真正的执行由 agent 承接。`;
+      }
+    } else if (isVideoJob) {
       content = await runVideoJob({
         userId: job.userId,
         name: job.name,
@@ -524,7 +593,11 @@ async function runVideoJob(job: {
       // 绝不把 agent 的执行思考整段发到微信。
       const notifyText =
         extractAuditNotice(content) ||
-        `定时任务「${job.name}」已执行完成，结果已入库，请打开「内容库」审核。`;
+        (isLedgerOnly
+          ? (content && content.startsWith("【选题台账】")
+              ? content
+              : `⏰ 提醒：${job.name} 到点了。\n本条任务只做提醒与记录，不会自动出稿或出片。\n需要我现在开始就说一声，我马上接上。`)
+          : `定时任务「${job.name}」已执行完成，结果已入库，请打开「内容库」审核。`);
       try {
         await deliverJobResultToWechat(job.name, job.userId, target, notifyText);
         await prisma.scheduledJob
@@ -604,7 +677,9 @@ async function alreadyRanToday(jobId: string, timeZone: string, now: Date): Prom
  */
 
 export async function tickScheduler(now = new Date()): Promise<string[]> {
-  const jobs = await prisma.scheduledJob.findMany({ where: { enabled: true } });
+  // 只执行「龙虾（OpenClaw agent）经微信创建」的任务（source=AGENT）。
+  // 平台网页端创建的任务（source=PLATFORM，已废弃）既不在查看器展示，也不再被调度执行。
+  const jobs = await prisma.scheduledJob.findMany({ where: { enabled: true, source: "AGENT" } });
   const fired: string[] = [];
   for (const job of jobs) {
     if (inFlight.has(job.id)) continue;

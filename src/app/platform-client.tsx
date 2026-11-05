@@ -877,6 +877,8 @@ export default function PlatformClient() {
   const [publishingHealing, setPublishingHealing] = useState(false);
   /** 内容详情页「去 Studio 修改」的启动中状态（huashu 成片才有） */
   const [studioOpening, setStudioOpening] = useState(false);
+  /** 内容库列表卡片上直接开 Studio 时，正在启动的那个 token（避免整页只能转一个圈） */
+  const [openingStudioToken, setOpeningStudioToken] = useState<string | null>(null);
   const [publishingFrontier, setPublishingFrontier] = useState(false);
   const [regeneratingImage, setRegeneratingImage] = useState<string | null>(null);
   const [wechatBinding, setWechatBinding] = useState<WechatBinding | null>(null);
@@ -2566,6 +2568,17 @@ export default function PlatformClient() {
   function stopGeneration() {
     // 防止重入：若已经 abort，直接 return
     if (!abortControllerRef.current || abortControllerRef.current.signal.aborted) return;
+    // 真正中止网关侧正在运行的任务：前端 abort 只是断开本地 SSE 读取，
+    // 网关里的 run（尤其视频渲染等长任务）还会继续跑、继续消耗资源。
+    // 这里先通知平台调 OpenClaw 的 chat.abort，再断前端读取。
+    const cid = activeConversation?.id;
+    if (cid) {
+      fetch(`/api/openclaw/task/stop`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversationId: cid })
+      }).catch(() => {});
+    }
     abortControllerRef.current.abort();
   }
 
@@ -3047,15 +3060,18 @@ export default function PlatformClient() {
   }
 
   /**
-   * 内容详情页的「去 Studio 修改」：只对 huashu 成片可用。
+   * 打开某条 huashu 成片的 Studio 改片页。
    *
    * 内容库里存的视频 URL 带项目 token（`/videos/huashu-<token>-vN.mp4`），
    * 所以这里不需要额外的关联字段；改了之后平台会自动出新版并回写本条内容。
+   * 详情页按钮和内容库列表卡片上的快捷入口共用这一段。
    */
-  async function openStudioForContent() {
-    const token = huashuTokenOf(activeContent?.videoUrl);
-    if (!token || studioOpening) return;
-    setStudioOpening(true);
+  async function openStudioByToken(token: string, fromList = false) {
+    if (!token) return;
+    if (fromList && openingStudioToken) return;
+    if (!fromList && studioOpening) return;
+    if (fromList) setOpeningStudioToken(token);
+    else setStudioOpening(true);
     setCopiedButton(null);
     setCopyHint("");
     try {
@@ -3066,8 +3082,16 @@ export default function PlatformClient() {
     } catch (error) {
       showCopyHint(error instanceof Error ? error.message : "Studio 启动失败。");
     } finally {
-      setStudioOpening(false);
+      if (fromList) setOpeningStudioToken(null);
+      else setStudioOpening(false);
     }
+  }
+
+  /** 内容详情页的「去 Studio 修改」。 */
+  async function openStudioForContent() {
+    const token = huashuTokenOf(activeContent?.videoUrl);
+    if (!token) return;
+    await openStudioByToken(token);
   }
 
   /** 把当前这篇图文推送到 AI员工官网「AI最前沿」频道（aiworker.aimemory.cafe/frontier.html）。 */
@@ -4203,6 +4227,7 @@ export default function PlatformClient() {
               <div className="library-grid">
                 {visibleContentItems.map((item, index) => {
                   const kindMeta = contentKindMeta(item);
+                  const studioToken = huashuTokenOf(item.videoUrl);
                   return (
                   <article
                     key={item.id}
@@ -4220,6 +4245,21 @@ export default function PlatformClient() {
                         <img src={item.coverImageUrl ?? fallbackImages[index % fallbackImages.length]} alt="内容封面" loading="lazy" />
                         {item.videoUrl && <span className="content-card-play" aria-hidden="true">▶</span>}
                       </div>
+                    )}
+                    {/* huashu 出的片子（可改片）直接在卡片上给入口，不用点进详情找 */}
+                    {studioToken && (
+                      <button
+                        type="button"
+                        className="content-card-studio"
+                        disabled={openingStudioToken === studioToken}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void openStudioByToken(studioToken, true);
+                        }}
+                        title="在 Studio 里点画面提修改，AI 自动改片并出新版"
+                      >
+                        {openingStudioToken === studioToken ? "启动中…" : "Studio 改片"}
+                      </button>
                     )}
                     <div className="content-card-head">
                       <span className={`category-tag ${kindMeta.tagClass}`}>{kindMeta.label}</span>
