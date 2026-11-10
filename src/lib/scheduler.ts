@@ -9,7 +9,7 @@
 import { prisma } from "@/lib/prisma";
 import { openClawClient, deliverWechatMessage } from "@/lib/openclaw";
 import { appendTurn } from "@/lib/wechat-conversation-store";
-import { runHuashuGeneration } from "@/lib/video/huashu-generate";
+import { runHuashuGeneration, type HuashuImageInput } from "@/lib/video/huashu-generate";
 
 /** 调度轮询间隔。 */
 const TICK_MS = 30_000;
@@ -829,4 +829,114 @@ export function stopScheduler(): void {
   if (timer) clearInterval(timer);
   timer = null;
   started = false;
+}
+
+/* ---------------------------------------------------------------------------
+ * 网关 cron 里的 agent 专用：把选题交回平台流水线出片
+ *
+ * 为什么需要它（2026-11-07）：
+ * 定时任务分两种落地形态。平台库里的任务走 runVideoJob（buildFilmPrompt + 平台统一渲染），
+ * 出来的片子 index.html 80KB、60 处音效、有 treatment.md；而网关 cron 里的任务由 agent
+ * 自己读规范、自己转述给 DSH，最后只剩 23KB、0 处音效、没有设计文档。
+ * 差距不在模型，在「谁写这段 prompt」——agent 转述必然丢细节。
+ *
+ * 所以给 agent 一个 HTTP 入口：它只负责「选题」，写片一律走平台这条已经调好的流水线。
+ * ------------------------------------------------------------------------- */
+
+/** 视频地址拼成公网可点的链接（微信里发相对路径点不开）。 */
+function publicVideoUrl(videoUrl: string): string {
+  const base = (process.env.PLATFORM_PUBLIC_URL || "https://aiemployee.aimemory.cafe").replace(/\/+$/, "");
+  return `${base}${videoUrl.startsWith("/") ? "" : "/"}${videoUrl}`;
+}
+
+export type VideoFromTopicInput = {
+  userId: string;
+  /** 要讲的选题内容（标题 + 要点），直接作为创作需求交给 DSH */
+  topic: string;
+  /** 视频/内容库标题，缺省取 topic 首行 */
+  title?: string | null;
+  targetSeconds?: number | null;
+  siteUrl?: string | null;
+  /** 参考图：远程 URL、平台站内路径，或已读成 Buffer 的本地文件（route 层负责校验与读取） */
+  images?: HuashuImageInput[];
+  /** 展示进度的会话名，缺省「选题出片 · <标题>」 */
+  conversationName?: string | null;
+};
+
+export type VideoFromTopicStart = {
+  conversationId: string;
+  title: string;
+  /** 给 agent 直接回给用户的话 */
+  message: string;
+};
+
+/**
+ * 立刻返回、后台出片，出完推微信。
+ *
+ * 为什么要异步：一条片子 5~15 分钟，agent 在微信里等不起（网关那边早超时了）。
+ * 接口先回一句「已开始」，出片后由平台直接投递到微信 —— 不依赖 agent 再起一轮。
+ */
+export async function startVideoFromTopic(input: VideoFromTopicInput): Promise<VideoFromTopicStart> {
+  const topic = (input.topic || "").trim();
+  if (!topic) throw new Error("缺少 topic（要讲的选题内容）。");
+
+  const title = (input.title || topic.split(/\r?\n/)[0] || "选题视频").trim().slice(0, 60);
+  const conversationId = await resolveVideoConversation(
+    input.userId,
+    input.conversationName || title
+  );
+  const targetSeconds =
+    typeof input.targetSeconds === "number" && Number.isFinite(input.targetSeconds)
+      ? Math.min(300, Math.max(5, Math.round(input.targetSeconds)))
+      : 30;
+
+  void (async () => {
+    try {
+      const result = await runHuashuGeneration({
+        userId: input.userId,
+        conversationId,
+        // 选题原文直接当创作需求：第一行就是主题，后续要点由 DSH 读 director.md 自己定方向。
+        requirement: topic.slice(0, 800),
+        siteUrl: input.siteUrl || null,
+        images: input.images ?? [],
+        progressTitle: `选题出片 · ${title}`,
+        prefixLines: [`选题：${title}`],
+        allowNoMaterials: true,
+        progressInChat: true,
+        targetSeconds,
+        title
+      });
+
+      const target = await resolveWechatTarget(input.userId).catch(() => null);
+      if (!target) return;
+      const duration = result.duration != null ? `${result.duration.toFixed(1)} 秒` : "时长未知";
+      await deliverJobResultToWechat(
+        title,
+        input.userId,
+        target,
+        [
+          `视频做好了（${duration}）`,
+          publicVideoUrl(result.videoUrl),
+          "已存进内容库。想改哪一处，打开这条视频点「在 Studio 里修改」。",
+        ].join("\n")
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[video-from-topic] 「${title}」出片失败：`, message);
+      const target = await resolveWechatTarget(input.userId).catch(() => null);
+      if (!target) return;
+      await deliverJobResultToWechat(
+        title,
+        input.userId,
+        target,
+        `视频没做出来：「${title}」。\n原因：${message.slice(0, 200)}\n可以让我重试，或者换个选题。`
+      ).catch(() => undefined);
+    }
+  })();
+
+  return {
+    conversationId,
+    title,
+    message: `已开始出片，成片约 ${targetSeconds} 秒。写片通常 15~30 分钟，做好我直接把视频发给你；进度可以在平台「${title}」这条会话里看。`,
+  };
 }

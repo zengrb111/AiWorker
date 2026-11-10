@@ -42,7 +42,12 @@ export async function POST(request: Request, context: { params: { id: string } }
 
   if (!requirement) return jsonError("请填写创作需求（它会作为产品名称使用）。");
   if (siteUrl && !/^https?:\/\//i.test(siteUrl)) return jsonError("产品网站需以 http:// 或 https:// 开头。");
-  if (!siteUrl && imageFiles.length === 0) return jsonError("产品网站与参考图至少填一个。");
+  // 知识库 Wiki 的知识点带过来的是「标题 + 分镜脚本」，本来就没有网站和参考图；
+  // 认「镜头 N」行首标记放行，否则用户点完「一键生成视频」会被素材校验卡住。
+  const hasStoryboard = /^镜头\s*\d+/m.test(requirement);
+  if (!siteUrl && imageFiles.length === 0 && !hasStoryboard) {
+    return jsonError("产品网站与参考图至少填一个。");
+  }
 
   const images: HuashuImageInput[] = [];
   for (const file of imageFiles) {
@@ -74,6 +79,8 @@ export async function POST(request: Request, context: { params: { id: string } }
           siteUrl: siteUrl || null,
           images,
           targetSeconds,
+          // 分镜脚本自带画面描述，不需要产品网站/参考图当素材。
+          allowNoMaterials: hasStoryboard,
           onProgress: (text) => safeEnqueue({ type: "delta", text: `${text}\n` })
         });
 

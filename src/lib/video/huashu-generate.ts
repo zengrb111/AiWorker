@@ -212,7 +212,9 @@ export async function runHuashuGeneration(
       conversationId,
       source: siteUrl ? "PRODUCT_SITE" : "IMAGES",
       siteUrl: siteUrl || null,
-      productName: requirement,
+      // 产品名只取需求的第一行：知识库来的需求是「标题 + 分镜脚本」的多行文本，
+      // 整段塞进 productName 会让面板标题/内容库条目标题变成一坨。
+      productName: (requirement.split("\n")[0] || requirement).slice(0, 60),
       projectDir: dir,
       status: "BUILDING",
       progressInChat,

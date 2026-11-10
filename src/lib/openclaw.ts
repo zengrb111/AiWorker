@@ -1789,7 +1789,46 @@ export type CronJobSummary = {
   schedule: string;
   /** 归属会话 key；用户任务应为 agent:u-<id>:<会话>。 */
   sessionKey: string;
+  /** 归属 agent（多 agent 后网关的权威归属，形如 u-<userId>）。 */
+  agentId: string;
+  /** 声明式托管任务的 key（如 skill-collection-review:<agent>）；系统任务非空，用户任务为空。 */
+  declarationKey: string;
+  /** 5 段 cron 表达式（网关 schedule.expr），非 cron 调度时为空。 */
+  cronExpr: string;
+  timezone: string;
+  /** 任务提示词（网关 payload.message），用于列表里展示「让 AI 做什么」。 */
+  prompt: string;
+  nextRunAtMs: number | null;
+  lastRunAtMs: number | null;
+  /** 网关原始执行状态：ok / error / skipped / null。 */
+  lastRunStatus: string | null;
+  lastError: string | null;
+  lastDurationMs: number | null;
+  createdAtMs: number | null;
 };
+
+/**
+ * cron.list 的短超时与结果缓存。
+ *
+ * 起因（2026-11-10）：网关重启期间（`gateway starting; retry shortly`），
+ * `cron.list` 会一直等到 20 秒超时，而前端 /api/scheduled-jobs 的超时也是 20 秒——
+ * 用户看到的是「请求超时，请稍后重试」，既不知道是网关没起来，也不知道任务还在不在。
+ *
+ * 超时统一放宽到 30 秒：网关刚重启时握手和插件加载都可能慢，5/6 秒太容易
+ * 在它「马上就好」之前误报「网关正在启动」。30 秒足够覆盖一次正常重启的等待，
+ * 同时不会让页面无限期挂住（前端有配套超时兜底）。
+ *
+ * 成功缓存 15 秒（定时任务页刷新很频繁，网关那边没必要每次真查）；
+ * 失败缓存 20 秒（期间直接抛同一条错误，避免每次刷新都干等满 30 秒）。
+ */
+const CRON_LIST_TIMEOUT_MS = 30000;
+/** 含建连在内的总预算：超过就报「网关正在启动」，绝不让前端无限期干等。 */
+const CRON_TOTAL_BUDGET_MS = 30000;
+const CRON_CACHE_OK_MS = 15_000;
+const CRON_CACHE_FAIL_MS = 20_000;
+
+let cronCache: { at: number; jobs: CronJobSummary[] } | null = null;
+let cronCacheFailure: { at: number; message: string } | null = null;
 
 export const openClawClient = {
   async createWechatBindingQr(): Promise<OpenClawQr> {
@@ -2031,17 +2070,55 @@ export const openClawClient = {
   },
 
   async listCronJobs(): Promise<CronJobSummary[]> {
-    const result = await requestGateway<{
-      jobs?: Array<{
-        id?: string;
-        name?: string;
-        displayName?: string;
-        enabled?: boolean;
-        sessionKey?: string;
-        schedule?: { kind?: string; expr?: string; tz?: string; everyMs?: number };
-      }>;
-    }>("cron.list", { includeDisabled: true, limit: 200 }, 20000);
-    return (result.jobs ?? [])
+    const now = Date.now();
+    if (cronCache && now - cronCache.at < CRON_CACHE_OK_MS) return cronCache.jobs;
+    // 网关未就绪时上一次已经失败过：短时间内别再打它，否则每次刷新都要干等满 30 秒，
+    // 前端先报「请求超时」，用户看到的是一句没有信息量的话。
+    if (cronCacheFailure && now - cronCacheFailure.at < CRON_CACHE_FAIL_MS) {
+      throw new Error(cronCacheFailure.message);
+    }
+
+    let result: { jobs?: Array<{
+      id?: string;
+      name?: string;
+      displayName?: string;
+      enabled?: boolean;
+      sessionKey?: string;
+      agentId?: string;
+      effectiveAgentId?: string;
+      declarationKey?: string;
+      createdAtMs?: number;
+      schedule?: { kind?: string; expr?: string; tz?: string; everyMs?: number };
+      payload?: { message?: string };
+      state?: {
+        nextRunAtMs?: number;
+        lastRunAtMs?: number;
+        lastRunStatus?: string;
+        lastStatus?: string;
+        lastError?: string;
+        lastDurationMs?: number;
+      };
+      nextRunAtMs?: number;
+      lastRunAtMs?: number;
+      lastRunStatus?: string;
+      lastRunError?: string;
+    }> };
+    try {
+      // 总预算 30 秒：`connectGateway` 自己有 15 秒连接超时，握手慢时还可能再叠上
+      // challenge 等待，只靠 request 的超时兜不住整个链路。外层预算把整条链钉死在 30 秒。
+      result = await withTimeout(
+        requestGateway("cron.list", { includeDisabled: true, limit: 200 }, CRON_LIST_TIMEOUT_MS),
+        CRON_TOTAL_BUDGET_MS,
+        "读取网关定时任务超时（网关可能正在启动，等 1~2 分钟再刷新）"
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      cronCacheFailure = { at: Date.now(), message };
+      throw error;
+    }
+    cronCacheFailure = null;
+
+    const jobs = (result.jobs ?? [])
       .filter((j) => Boolean(j?.id))
       .map((j) => {
         const s = j.schedule ?? {};
@@ -2050,14 +2127,30 @@ export const openClawClient = {
           schedule = `每 ${Math.max(1, Math.round(s.everyMs / 60000))} 分钟`;
         }
         if (schedule && s.tz) schedule = `${schedule} (${s.tz})`;
+        const state = j.state ?? {};
+        const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
         return {
           id: String(j.id),
           name: j.name || j.displayName || String(j.id),
           enabled: j.enabled !== false,
           schedule: schedule || s.kind || "unknown",
-          sessionKey: j.sessionKey ?? ""
+          sessionKey: j.sessionKey ?? "",
+          agentId: j.agentId || j.effectiveAgentId || "",
+          declarationKey: j.declarationKey ?? "",
+          cronExpr: s.kind === "cron" ? s.expr ?? "" : "",
+          timezone: s.tz ?? "Asia/Shanghai",
+          prompt: j.payload?.message ?? "",
+          nextRunAtMs: num(state.nextRunAtMs ?? j.nextRunAtMs),
+          lastRunAtMs: num(state.lastRunAtMs ?? j.lastRunAtMs),
+          lastRunStatus: state.lastRunStatus || state.lastStatus || j.lastRunStatus || null,
+          lastError: state.lastError || j.lastRunError || null,
+          lastDurationMs: num(state.lastDurationMs),
+          createdAtMs: num(j.createdAtMs)
         };
       });
+
+    cronCache = { at: Date.now(), jobs };
+    return jobs;
   },
 
   /**

@@ -662,6 +662,68 @@ const DEFAULT_LOOK_CAPTIONS = [
   { value: "minimal-line", label: "极简细描边" },
 ];
 
+/**
+ * 本机环境的判定：只在访问 localhost / 127.0.0.1 / 内网 IP / 3000 端口时为真。
+ * 线上（aiemployee.aimemory.cafe）与 WorkBuddy 沙箱域名都不会命中，不带任何构建配置。
+ */
+function isLocalDevHost(): boolean {
+  if (typeof window === "undefined") return false;
+  const host = window.location.hostname;
+  if (
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host === "[::1]" ||
+    host.endsWith(".localhost")
+  ) return true;
+  // 手机 / 局域网连本机 dev server 时也当本机环境。
+  // 不能用「端口是 3000」当兜底：任何域名只要挂 3000 端口都会误判成本机，
+  // 线上 / 沙箱一旦这样暴露就会把这个调试角标带出去（2026-11-10 实测踩过）。
+  return /^192\.168\./.test(host) || /^10\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+}
+
+/**
+ * 左下角的本机账号角标：固定头像 + 手机号后三位。
+ *
+ * 本机开发常在 13800138000 / 001 / 003 之间切账号，登录页长得一模一样，
+ * 退出后再进来分不清刚才用的是哪个号。头像是**固定的**（不随账号变），
+ * 数字取手机号后三位，不暴露完整号码。
+ *
+ * 登录页显示当前表单里的号码（输入时实时跟随），登录后的工作台显示会话里的
+ * `user.phone`；组件用 effect 判定环境，避免服务端渲染与客户端 hydration 不一致。
+ */
+function LocalAccountBadge({ phone, signedIn, compact = false }: { phone: string; signedIn: boolean; compact?: boolean }) {
+  const [isLocal, setIsLocal] = useState(false);
+  useEffect(() => setIsLocal(isLocalDevHost()), []);
+  if (!isLocal) return null;
+
+  const tail = (phone || "").replace(/\D/g, "").slice(-3) || "—";
+  return (
+    <div
+      className={`local-account-badge ${compact ? "in-sidebar compact" : "floating"}`}
+      title={signedIn ? "本机环境 · 当前登录账号尾号" : "本机环境 · 当前准备登录的账号尾号"}
+    >
+      <span className="local-badge-avatar" aria-hidden="true">
+        <svg viewBox="0 0 40 40" width="28" height="28" focusable="false">
+          <defs>
+            <linearGradient id="localBadgeGradient" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stopColor="#4f8cff" />
+              <stop offset="1" stopColor="#7c5cff" />
+            </linearGradient>
+          </defs>
+          <circle cx="20" cy="20" r="20" fill="url(#localBadgeGradient)" />
+          <circle cx="20" cy="15.5" r="6.2" fill="#fff" fillOpacity="0.95" />
+          <path d="M8.6 33.2c1.5-6.2 5.8-9.6 11.4-9.6s9.9 3.4 11.4 9.6z" fill="#fff" fillOpacity="0.95" />
+        </svg>
+      </span>
+      <span className="local-badge-text">
+        {!compact && <span className="local-badge-tag">本机</span>}
+        <span>{compact ? "" : "尾号 "}<strong>{tail}</strong></span>
+      </span>
+    </div>
+  );
+}
+
 export default function PlatformClient() {
   const [checkingSession, setCheckingSession] = useState(true);
   const [user, setUser] = useState<User | null>(null);
@@ -1707,6 +1769,37 @@ export default function PlatformClient() {
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await sendChatContent(chatInput);
+  }
+
+  /**
+   * 知识库 Wiki 知识点 → 会话里的「一键生成视频」面板。
+   *
+   * 只预填创作需求（标题 + 分镜脚本），不自动开跑：时长、风格、参考图还得用户定，
+   * 直接跑起来反而要返工。没有会话时先建一个，否则面板没有归属会话可挂。
+   */
+  async function openVideoFromKnowledge(requirement: string) {
+    let conversationId = activeConversation?.id;
+    if (!conversationId) {
+      try {
+        const data = await api<{ conversation: Conversation }>("/api/conversations", {
+          method: "POST",
+          body: "{}"
+        });
+        setConversations((items) => [data.conversation, ...items]);
+        setActiveConversationId(data.conversation.id);
+        conversationId = data.conversation.id;
+      } catch (error) {
+        setChatError(error instanceof Error ? error.message : "创建对话失败。");
+        return;
+      }
+    }
+    setSection("chat");
+    setGenVideoPlan(null);
+    setVideoRequestEcho(null);
+    // 分镜脚本自带画面描述，不带产品网站（否则会去抓官网素材，跟脚本冲突）。
+    huashuPanel.reset(requirement, { siteUrl: "" });
+    setGenVideoPanelFor(conversationId);
+    setGenVideoPanelOpen(true);
   }
 
   async function sendChatContent(content: string, url?: string) {
@@ -3199,6 +3292,7 @@ export default function PlatformClient() {
   if (!user) {
     return (
       <main className="auth-shell">
+        <LocalAccountBadge phone={phone} signedIn={false} />
         <section className="auth-card">
           <div className="auth-promo">
             <span className="eyebrow">AI Digital Workforce</span>
@@ -3285,7 +3379,19 @@ export default function PlatformClient() {
             {(authMode === "login" || registerBound) && (
               <form className="auth-form" onSubmit={handleAuth}>
                 <label>手机号<input value={phone} onChange={(event) => setPhone(event.target.value)} /></label>
-                <label>密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+                <label>
+                  密码
+                  <input
+                    // 注册时明文显示，方便用户核对自己设的密码；登录时仍按密码掩码。
+                    type={authMode === "register" ? "text" : "password"}
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    autoComplete={authMode === "register" ? "new-password" : "current-password"}
+                  />
+                </label>
+                {authMode === "register" && (
+                  <p className="hint">注册时密码明文显示，方便核对；登录时会自动隐藏。</p>
+                )}
                 <button type="submit">{authMode === "login" ? "登录" : "注册并登录"}</button>
               </form>
             )}
@@ -3315,6 +3421,7 @@ export default function PlatformClient() {
             <button key={key} className={section === key ? "active" : ""} onClick={() => selectSection(key)} title={label}><span className="nav-icon" aria-hidden="true">{icon}</span><span className="nav-label">{label}</span></button>
           ))}
         </nav>
+        <LocalAccountBadge phone={user?.phone || phone} signedIn compact />
       </aside>
 
       <section className="workspace">
@@ -4288,7 +4395,12 @@ export default function PlatformClient() {
           )
         )}
 
-        {section === "knowledge" && <KnowledgePanel resetToken={knowledgeResetToken} />}
+        {section === "knowledge" && (
+          <KnowledgePanel
+            resetToken={knowledgeResetToken}
+            onGenerateVideo={(requirement) => void openVideoFromKnowledge(requirement)}
+          />
+        )}
         {section === "jobs" && <ScheduledJobsPanel resetToken={jobsResetToken} />}
         {section === "publish" && <PublishPanel resetToken={publishResetToken} />}
         {section === "analytics" && <AnalyticsPanel resetToken={analyticsResetToken} />}

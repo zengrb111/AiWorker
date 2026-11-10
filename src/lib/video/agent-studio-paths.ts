@@ -17,7 +17,10 @@ export function allowedSourceDirs(): string[] {
   const dirs: string[] = [
     join(process.cwd(), "public"),
     process.env.HUASHU_MOTION_ROOT || "",
-    process.env.OPENCLAW_WORKSPACE_ROOT || join(homedir(), ".openclaw", "workspace")
+    process.env.OPENCLAW_WORKSPACE_ROOT || join(homedir(), ".openclaw", "workspace"),
+    // 多 agent 之后每个用户 agent 的工作区在 workspaces/<agentId>/（复数），
+    // 只放单数 workspace 会让 agent 传自己生成的参考图被白名单拒掉。
+    join(homedir(), ".openclaw", "workspaces")
   ];
   const extra = (process.env.AGENT_VIDEO_IMPORT_DIRS || "")
     .split(/[;:]/)

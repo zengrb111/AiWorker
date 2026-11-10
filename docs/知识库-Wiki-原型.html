@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>知识库 · RAG + Wiki 双形态 · 原型</title>
+<style>
+  :root{
+    color-scheme: light;
+    --bg:#eef3f7; --panel:#fff; --panel-soft:#f6f9fc;
+    --ink:#151a24; --muted:#687482; --muted-2:#8c9aa9;
+    --line:#d9e3ec; --line-soft:#e6eef5;
+    --accent:#2b7cff; --accent-dark:#155bd4;
+    --wiki:#7c5cff; --wiki-dark:#5b3fdb; --wiki-bg:#f2eeff; --wiki-line:#ddd3ff;
+    --success:#16a34a; --success-bg:#e7f6ec;
+    --warn:#9a6816; --warn-bg:#fdf3e0;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"PingFang SC","Microsoft YaHei",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  button{font-family:inherit;cursor:pointer}
+
+  /* ---------- 布局 ---------- */
+  .app{display:flex;min-height:100vh}
+  .side{
+    width:128px;flex:0 0 128px;background:#0f172a;color:#c7d2e4;
+    display:flex;flex-direction:column;align-items:center;padding:18px 8px;gap:6px;
+  }
+  .logo{width:40px;height:40px;border-radius:12px;background:linear-gradient(140deg,#2b7cff,#17d5ff);
+    display:grid;place-items:center;color:#fff;font-weight:900;font-size:17px;margin-bottom:14px}
+  .nav-item{
+    width:100%;border:0;background:transparent;color:#9fb0c8;font-size:12px;font-weight:700;
+    padding:10px 4px;border-radius:10px;display:grid;gap:4px;justify-items:center;
+  }
+  .nav-item .ic{font-size:16px}
+  .nav-item.on{background:rgba(43,124,255,.16);color:#fff}
+  .main{flex:1;min-width:0;padding:22px 26px 40px}
+  .page{max-width:1180px;margin:0 auto}
+
+  /* ---------- 原型切换条 ---------- */
+  .proto-bar{
+    display:flex;align-items:center;gap:8px;margin-bottom:18px;
+    background:#fff;border:1px dashed #c3d3e6;border-radius:12px;padding:10px 14px;
+  }
+  .proto-bar b{font-size:12px;color:var(--muted-2);letter-spacing:.04em;margin-right:4px}
+  .proto-bar button{
+    border:1px solid var(--line);background:#fff;color:var(--muted);font-size:12.5px;font-weight:700;
+    padding:6px 12px;border-radius:999px;
+  }
+  .proto-bar button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .proto-bar .spacer{margin-left:auto;font-size:12px;color:var(--muted-2)}
+
+  /* ---------- 通用 ---------- */
+  .toolbar{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+  .search{
+    display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--line);
+    border-radius:10px;padding:0 12px;height:40px;min-width:260px;
+  }
+  .search span{color:var(--muted-2)}
+  .search input{border:0;outline:0;flex:1;font-size:13px;background:transparent;color:var(--ink)}
+  .seg{display:flex;background:#e7eef7;border-radius:10px;padding:3px;gap:2px}
+  .seg button{border:0;background:transparent;font-size:12.5px;font-weight:700;color:var(--muted);padding:7px 14px;border-radius:8px}
+  .seg button.on{background:#fff;color:var(--accent);box-shadow:0 2px 6px rgba(21,32,54,.1)}
+  .seg.wiki button.on{color:var(--wiki)}
+  .spacer{flex:1}
+  .btn{
+    height:40px;padding:0 16px;border-radius:10px;border:1px solid var(--line);
+    background:#fff;color:var(--ink);font-size:13px;font-weight:700;display:inline-flex;align-items:center;gap:6px;
+  }
+  .btn:hover{border-color:#bcd2ee}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.primary:hover{background:var(--accent-dark)}
+  .btn.wiki{background:var(--wiki);border-color:var(--wiki);color:#fff}
+  .btn.wiki:hover{background:var(--wiki-dark)}
+  .btn.sm{height:32px;padding:0 11px;font-size:12px;border-radius:8px}
+  .btn:disabled{opacity:.55;cursor:not-allowed}
+
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+  .stat .k{font-size:12px;color:var(--muted);font-weight:700}
+  .stat .v{font-size:24px;font-weight:900;margin-top:6px;letter-spacing:-.02em}
+  .stat .v small{font-size:12px;font-weight:700;color:var(--muted-2);margin-left:4px}
+  .stat .v.warn{color:var(--warn)}
+
+  /* ---------- 知识库卡片 ---------- */
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+  .card{
+    position:relative;display:grid;gap:11px;background:#fff;border:1px solid var(--line);
+    border-radius:16px;padding:18px;cursor:pointer;transition:.16s;box-shadow:0 6px 18px rgba(21,32,54,.05);
+  }
+  .card:hover{transform:translateY(-2px);border-color:rgba(43,124,255,.5);box-shadow:0 16px 34px rgba(21,32,54,.12)}
+  .card.wiki:hover{border-color:rgba(124,92,255,.55);box-shadow:0 16px 34px rgba(92,63,219,.14)}
+  .card-top{display:flex;align-items:center;gap:10px}
+  .ico{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;font-size:16px;font-weight:800;
+    background:linear-gradient(140deg,#eaf3ff,#dbeaff);color:var(--accent)}
+  .ico.wiki{background:linear-gradient(140deg,#f2eeff,#e3dbff);color:var(--wiki)}
+  .ico.big{width:52px;height:52px;border-radius:15px;font-size:22px}
+  .card-name{font-size:15px;font-weight:800;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pill{font-size:11.5px;font-weight:800;border-radius:999px;padding:4px 11px;white-space:nowrap}
+  .pill.ready{background:var(--success-bg);color:var(--success);border:1px solid #c7e9d3}
+  .pill.todo{background:var(--warn-bg);color:var(--warn);border:1px solid #f0dda8}
+  .pill.wiki{background:var(--wiki-bg);color:var(--wiki-dark);border:1px solid var(--wiki-line)}
+  .pill.rag{background:#eaf3ff;color:var(--accent-dark);border:1px solid #d3e6ff}
+  .card-desc{margin:0;font-size:13px;color:var(--muted);line-height:1.6;min-height:42px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{font-size:11.5px;font-weight:700;color:var(--accent-dark);background:#eaf3ff;border:1px solid #d3e6ff;border-radius:999px;padding:4px 10px}
+  .chip.wiki{color:var(--wiki-dark);background:var(--wiki-bg);border-color:var(--wiki-line)}
+  .card-foot{display:flex;align-items:center;gap:12px;font-size:12px;color:var(--muted-2);font-weight:700;
+    border-top:1px solid var(--line-soft);padding-top:11px}
+  .card-foot .time{margin-left:auto}
+
+  /* ---------- 新建弹窗 ---------- */
+  .overlay{position:fixed;inset:0;background:rgba(15,23,42,.42);display:grid;place-items:center;padding:24px;z-index:40}
+  .modal{width:min(760px,100%);background:#fff;border-radius:18px;box-shadow:0 30px 80px rgba(15,23,42,.3);overflow:hidden}
+  .modal-head{display:flex;align-items:center;padding:18px 22px;border-bottom:1px solid var(--line-soft)}
+  .modal-head h4{margin:0;font-size:16px;font-weight:800;flex:1}
+  .modal-body{padding:20px 22px;display:grid;gap:16px;max-height:70vh;overflow:auto}
+  .modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:14px 22px;border-top:1px solid var(--line-soft);background:var(--panel-soft)}
+  .kind-pick{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .kind-opt{
+    text-align:left;border:1.5px solid var(--line);background:#fff;border-radius:14px;padding:16px;display:grid;gap:6px;
+  }
+  .kind-opt .t{font-size:14px;font-weight:800;display:flex;align-items:center;gap:8px}
+  .kind-opt .d{font-size:12.5px;color:var(--muted);line-height:1.6}
+  .kind-opt .tag{font-size:11px;font-weight:800;padding:2px 8px;border-radius:999px;background:#eef3f7;color:var(--muted)}
+  .kind-opt.on{border-color:var(--accent);background:#f7fbff;box-shadow:0 0 0 3px rgba(43,124,255,.12)}
+  .kind-opt.on.wiki{border-color:var(--wiki);background:#faf8ff;box-shadow:0 0 0 3px rgba(124,92,255,.14)}
+  .field{display:grid;gap:7px}
+  .field label{font-size:12.5px;font-weight:800;color:var(--muted)}
+  .field input,.field textarea,.field select{
+    width:100%;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px;
+    font-family:inherit;color:var(--ink);background:#fff;outline:0;
+  }
+  .field input:focus,.field textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(43,124,255,.12)}
+  .field textarea{min-height:70px;resize:vertical}
+  .hint{font-size:12px;color:var(--muted-2);line-height:1.6}
+
+  /* ---------- 详情 ---------- */
+  .back{border:0;background:transparent;color:var(--muted);font-size:13px;font-weight:700;padding:0;margin-bottom:14px}
+  .detail-head{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+  .detail-title{flex:1;min-width:0}
+  .detail-title .row{display:flex;align-items:center;gap:9px}
+  .detail-title h3{margin:0;font-size:19px;font-weight:900}
+  .detail-title p{margin:5px 0 0;font-size:13px;color:var(--muted)}
+
+  .panel{background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:14px}
+  .panel-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+  .panel-head h4{margin:0;font-size:14.5px;font-weight:800}
+  .panel-head p{margin:3px 0 0;font-size:12.5px;color:var(--muted)}
+
+  .drop{
+    border:1.5px dashed #c8d8ea;border-radius:14px;background:#fbfdff;padding:26px;text-align:center;cursor:pointer;
+  }
+  .drop:hover{border-color:var(--accent);background:#f6faff}
+  .drop .ic{font-size:22px;color:var(--accent);margin-bottom:6px}
+  .drop b{display:block;font-size:13.5px;font-weight:800;margin-bottom:4px}
+  .drop span{font-size:12px;color:var(--muted-2)}
+
+  .docs{display:grid;gap:8px;margin-top:14px}
+  .doc{display:flex;align-items:center;gap:10px;border:1px solid var(--line-soft);border-radius:11px;padding:10px 12px;background:#fff}
+  .doc .kind{font-size:11px;font-weight:800;padding:3px 8px;border-radius:6px;background:#eef3f7;color:var(--muted)}
+  .doc .name{flex:1;min-width:0;font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .doc .meta{font-size:11.5px;color:var(--muted-2)}
+  .doc .ok{font-size:11.5px;font-weight:800;color:var(--success);background:var(--success-bg);border:1px solid #c7e9d3;border-radius:999px;padding:3px 9px}
+
+  .points{display:grid;gap:12px}
+  .point{border:1px solid var(--line);border-radius:14px;padding:16px;background:#fff;display:grid;gap:10px;transition:.15s}
+  .point:hover{border-color:#c8d8ea;box-shadow:0 8px 22px rgba(21,32,54,.07)}
+  .point-head{display:flex;align-items:flex-start;gap:10px}
+  .seq{width:24px;height:24px;flex:0 0 24px;border-radius:8px;background:var(--wiki-bg);color:var(--wiki-dark);
+    font-size:12px;font-weight:900;display:grid;place-items:center}
+  .point-head h5{margin:0;font-size:14.5px;font-weight:800;flex:1;line-height:1.45}
+  .point-dur{font-size:11.5px;font-weight:800;color:var(--wiki-dark);background:var(--wiki-bg);border:1px solid var(--wiki-line);border-radius:999px;padding:3px 9px;white-space:nowrap}
+  .point-body{font-size:13px;color:#3d4757;line-height:1.78;margin:0}
+  .point-src{font-size:12px;color:var(--muted-2);background:var(--panel-soft);border-left:3px solid var(--line);
+    padding:8px 10px;border-radius:0 8px 8px 0;line-height:1.65}
+  .point-foot{display:flex;align-items:center;gap:8px;padding-top:2px}
+  .point-foot .from{font-size:11.5px;color:var(--muted-2);margin-left:auto}
+
+  .alert{font-size:12.5px;line-height:1.6;border-radius:10px;padding:10px 12px;margin-bottom:12px}
+  .alert.info{background:#f2f8ff;border:1px solid #d6e7ff;color:#2a5aa8}
+  .alert.wiki{background:var(--wiki-bg);border:1px solid var(--wiki-line);color:var(--wiki-dark)}
+
+  .empty{display:grid;place-items:center;gap:8px;padding:44px 20px;color:var(--muted);text-align:center}
+  .empty .ic{font-size:30px;opacity:.5}
+  .empty b{font-size:14px}
+  .empty p{margin:0;font-size:12.5px;color:var(--muted-2);max-width:380px;line-height:1.7}
+
+  .view{display:none}
+  .view.on{display:block}
+  .toast{
+    position:fixed;left:50%;bottom:28px;transform:translateX(-50%);
+    background:#0f172a;color:#fff;font-size:13px;font-weight:600;padding:10px 18px;border-radius:10px;
+    opacity:0;pointer-events:none;transition:.2s;z-index:60;
+  }
+  .toast.on{opacity:1;transform:translateX(-50%) translateY(-4px)}
+
+  /* ---------- 会话 + 图生视频面板 ---------- */
+  .chat-shell{background:#fff;border:1px solid var(--line);border-radius:18px;overflow:hidden;display:grid}
+  .chat-head{display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--line-soft)}
+  .chat-head h3{margin:0;font-size:15px;font-weight:800}
+  .chat-head p{margin:4px 0 0;font-size:12.5px;color:var(--muted)}
+  .chat-head .btn{margin-left:auto}
+  .chat-stream{padding:18px 20px;display:grid;gap:14px;background:var(--panel-soft);max-height:300px;overflow:auto}
+  .bubble{max-width:78%;border-radius:14px;padding:12px 14px;font-size:13px;line-height:1.7}
+  .bubble p{margin:0}
+  .bubble.user{background:#eaf3ff;border:1px solid #d3e6ff;justify-self:end}
+  .bubble.agent{background:#fff;border:1px solid var(--line)}
+  .bubble-tag{font-size:11px;font-weight:800;color:var(--muted-2);margin-bottom:6px;letter-spacing:.02em}
+
+  .video-panel{border-top:1px solid var(--line);padding:18px 20px;display:grid;gap:14px;background:#fff}
+  .vp-head{display:flex;align-items:center}
+  .vp-title{font-size:14px;font-weight:900;flex:1}
+  .vp-close{color:var(--muted-2);font-size:14px;cursor:pointer}
+  .vp-badge{
+    display:inline-flex;align-items:center;gap:6px;width:max-content;
+    font-size:12px;font-weight:800;color:var(--wiki-dark);background:var(--wiki-bg);
+    border:1px solid var(--wiki-line);border-radius:999px;padding:5px 12px;
+  }
+  .vp-field{display:grid;gap:7px}
+  .vp-field label{font-size:12.5px;font-weight:800;color:var(--muted)}
+  .vp-field textarea,.vp-field input{
+    width:100%;border:1px solid var(--line);border-radius:10px;padding:11px 12px;font-size:13px;
+    font-family:inherit;color:var(--ink);line-height:1.7;outline:0;resize:vertical;
+  }
+  .vp-field textarea:focus,.vp-field input:focus{border-color:var(--wiki);box-shadow:0 0 0 3px rgba(124,92,255,.12)}
+  .vp-row{display:flex;gap:12px;align-items:flex-end}
+  .vp-upload{
+    flex:0 0 190px;height:76px;border:1.5px dashed #c8d8ea;border-radius:12px;background:#fbfdff;
+    display:grid;place-items:center;gap:2px;font-size:12px;color:var(--muted);font-weight:700;cursor:pointer;
+  }
+  .vp-upload-ic{font-size:18px;color:var(--accent)}
+  .vp-foot{display:flex;align-items:center;gap:12px;border-top:1px solid var(--line-soft);padding-top:14px}
+  .vp-hint{font-size:12px;color:var(--muted-2);line-height:1.5}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="logo">腾</div>
+    <button class="nav-item"><span class="ic">◉</span>对话</button>
+    <button class="nav-item"><span class="ic">▦</span>内容库</button>
+    <button class="nav-item"><span class="ic">◔</span>定时任务</button>
+    <button class="nav-item"><span class="ic">◫</span>效果分析</button>
+    <button class="nav-item on"><span class="ic">▤</span>知识库</button>
+    <button class="nav-item"><span class="ic">◈</span>授权管理</button>
+  </aside>
+
+  <main class="main">
+    <div class="page">
+      <div class="proto-bar">
+        <b>原型预览</b>
+        <button class="on" data-go="list">① 列表（分类型）</button>
+        <button data-go="create">② 新建（选类型）</button>
+        <button data-go="detail">③ Wiki 详情</button>
+        <button data-go="chat">④ 跳到会话</button>
+        <span class="spacer">点击卡片可进详情 · 按钮可点</span>
+      </div>
+
+      <!-- ============ ① 列表 ============ -->
+      <section class="view on" id="view-list">
+        <div class="toolbar">
+          <div class="search"><span>⌕</span><input placeholder="搜索知识库名称 / 描述…" /></div>
+          <div class="seg">
+            <button class="on">全部</button>
+            <button>已就绪</button>
+            <button>需处理</button>
+          </div>
+          <div class="seg wiki">
+            <button class="on">全部类型</button>
+            <button>RAG 检索库</button>
+            <button>Wiki 图文库</button>
+          </div>
+          <div class="spacer"></div>
+          <button class="btn">⌕ 检索测试</button>
+          <button class="btn primary" data-go="create">＋ 新建知识库</button>
+        </div>
+
+        <div class="stats">
+          <div class="stat"><div class="k">知识库总数</div><div class="v">6<small>个</small></div></div>
+          <div class="stat"><div class="k">文档总数</div><div class="v">34<small>份</small></div></div>
+          <div class="stat"><div class="k">知识点</div><div class="v">27<small>条</small></div></div>
+          <div class="stat"><div class="k">待处理</div><div class="v warn">2<small>个库</small></div></div>
+        </div>
+
+        <div class="grid">
+          <article class="card wiki" data-go="detail">
+            <div class="card-top">
+              <div class="ico wiki">✦</div>
+              <div class="card-name">父母采访方法论</div>
+              <span class="pill wiki">WIKI</span>
+            </div>
+            <p class="card-desc">把「怎么问、怎么听、怎么追问」拆成可讲的知识点，一条一个讲解视频。</p>
+            <div class="chips">
+              <span class="chip wiki">4 份图文文档</span>
+              <span class="chip wiki">12 个知识点</span>
+            </div>
+            <div class="card-foot"><span>最近解析 今天 15:22</span><span class="time">11/05</span></div>
+          </article>
+
+          <article class="card wiki" data-go="detail">
+            <div class="card-top">
+              <div class="ico wiki">✦</div>
+              <div class="card-name">银发用户洞察</div>
+              <span class="pill todo">待提炼</span>
+            </div>
+            <p class="card-desc">行业报告与访谈纪要，提炼成「银发人群使用手机的真实障碍」系列知识点。</p>
+            <div class="chips">
+              <span class="chip wiki">2 份图文文档</span>
+              <span class="chip wiki">0 个知识点</span>
+            </div>
+            <div class="card-foot"><span>刚上传，还没提炼</span><span class="time">11/05</span></div>
+          </article>
+
+          <article class="card">
+            <div class="card-top">
+              <div class="ico">▤</div>
+              <div class="card-name">银发内容素材库</div>
+              <span class="pill ready">已就绪</span>
+            </div>
+            <p class="card-desc">写作时可检索引用的原始素材：故事、金句、用户反馈。</p>
+            <div class="chips">
+              <span class="chip">embedding-3</span>
+              <span class="chip">智能语义切片</span>
+            </div>
+            <div class="card-foot"><span>18 份文档</span><span>642 条切片</span><span class="time">11/03</span></div>
+          </article>
+
+          <article class="card">
+            <div class="card-top">
+              <div class="ico">▤</div>
+              <div class="card-name">爆款拆解库</div>
+              <span class="pill ready">已就绪</span>
+            </div>
+            <p class="card-desc">对标账号的爆款结构、开头钩子、评论区话术，供仿写时检索。</p>
+            <div class="chips">
+              <span class="chip">本地哈希向量</span>
+              <span class="chip">智能语义切片</span>
+            </div>
+            <div class="card-foot"><span>10 份文档</span><span>233 条切片</span><span class="time">11/01</span></div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============ ② 新建 ============ -->
+      <section class="view" id="view-create">
+        <div class="overlay" style="position:static;background:transparent;padding:0;display:block">
+          <div class="modal" style="margin:0 auto">
+            <div class="modal-head">
+              <h4>新建知识库</h4>
+              <button class="btn sm" style="border:0;background:transparent;font-size:15px">✕</button>
+            </div>
+            <div class="modal-body">
+              <div class="field">
+                <label>选择类型</label>
+                <div class="kind-pick">
+                  <button class="kind-opt" onclick="pickKind(this,'rag')">
+                    <span class="t">▤ RAG 检索库 <span class="tag">给 AI 查资料</span></span>
+                    <span class="d">文档切片 + 向量训练，AI 员工写文案时自动检索引用。适合放素材、案例、历史内容。</span>
+                  </button>
+                  <button class="kind-opt on wiki" onclick="pickKind(this,'wiki')">
+                    <span class="t">✦ Wiki 图文库 <span class="tag">给人看 + 做视频</span></span>
+                    <span class="d">上传图文文档，自动提炼「知识点 + 讲解」，每个知识点可一键生成讲解视频。适合方法论、课程、产品说明。</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="field">
+                <label>名称</label>
+                <input value="父母采访方法论" />
+              </div>
+              <div class="field">
+                <label>描述</label>
+                <textarea>把「怎么问、怎么听、怎么追问」拆成可讲的知识点，一条一个讲解视频。</textarea>
+              </div>
+
+              <div id="wiki-extra">
+                <div class="alert wiki">
+                  Wiki 库不需要设置向量模型和切片参数 —— 它不走向量检索，只看「提炼出哪几个知识点」。
+                </div>
+              </div>
+
+              <div id="rag-extra" style="display:none">
+                <div class="field" style="margin-bottom:14px">
+                  <label>向量模型</label>
+                  <select><option>智谱 embedding-3（2048 维 · 需 API Key）</option><option>本地哈希向量（256 维 · 免联网）</option></select>
+                </div>
+                <div class="field">
+                  <label>切片策略</label>
+                  <div class="seg" style="width:max-content"><button class="on">智能语义</button><button>固定长度</button></div>
+                </div>
+              </div>
+            </div>
+            <div class="modal-foot">
+              <button class="btn" data-go="list">取消</button>
+              <button class="btn wiki" onclick="toast('已创建「父母采访方法论」· WIKI')">创建</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ ③ Wiki 详情 ============ -->
+      <section class="view" id="view-detail">
+        <button class="back" data-go="list">← 返回知识库</button>
+
+        <div class="detail-head">
+          <div class="ico wiki big">✦</div>
+          <div class="detail-title">
+            <div class="row">
+              <h3>父母采访方法论</h3>
+              <span class="pill wiki">WIKI</span>
+              <span class="pill ready">12 个知识点</span>
+            </div>
+            <p>把「怎么问、怎么听、怎么追问」拆成可讲的知识点，一条一个讲解视频。</p>
+          </div>
+          <button class="btn sm">✎ 编辑信息</button>
+        </div>
+
+        <!-- 文档 -->
+        <div class="panel">
+          <div class="panel-head">
+            <div style="flex:1">
+              <h4>图文文档</h4>
+              <p>支持 .docx / .pdf / .md / 图片（自动 OCR）。上传后可直接提炼，不用切片训练。</p>
+            </div>
+            <button class="btn wiki sm" onclick="toast('正在提炼 2 份文档…约 40 秒')">✦ 提炼知识点</button>
+          </div>
+
+          <div class="drop">
+            <div class="ic">⇪</div>
+            <b>点击选择文件，或把文件拖到这里</b>
+            <span>单个文件不超过 30MB，可一次多选</span>
+          </div>
+
+          <div class="docs">
+            <div class="doc">
+              <span class="kind">DOCX</span>
+              <span class="name">采访提纲-从一件旧物开始.docx</span>
+              <span class="meta">1.2 MB</span>
+              <span class="ok">已提炼 4 个</span>
+            </div>
+            <div class="doc">
+              <span class="kind">PDF</span>
+              <span class="name">口述史访谈技巧笔记.pdf</span>
+              <span class="meta">3.8 MB</span>
+              <span class="ok">已提炼 5 个</span>
+            </div>
+            <div class="doc">
+              <span class="kind">IMG</span>
+              <span class="name">现场速记-第 3 次访谈.jpg</span>
+              <span class="meta">820 KB</span>
+              <span class="ok">已提炼 3 个</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 知识点 -->
+        <div class="panel">
+          <div class="panel-head">
+            <div style="flex:1">
+              <h4>知识点（12）</h4>
+              <p>每个知识点都能单独成片。讲解稿可直接改，改完再生成视频。</p>
+            </div>
+            <button class="btn sm">↻ 重新提炼全部</button>
+          </div>
+
+          <div class="alert info">
+            点「一键生成视频」会跳到会话里的图生视频面板，知识点讲解自动填进创作需求，你确认时长和风格后再出片。
+          </div>
+
+          <div class="points">
+            <article class="point">
+              <div class="point-head">
+                <span class="seq">1</span>
+                <h5>从一件旧物开始提问</h5>
+                <span class="point-dur">30 秒</span>
+              </div>
+              <p class="point-body">
+                别一上来就问「您这辈子最难忘的事是什么」，太大，老人接不住。指着一个具体的东西问：这个搪瓷缸哪来的、用了多少年、边上那个豁口是怎么磕的。物件是有形状的记忆，它比「难忘的事」好回答得多。等他把缸的故事讲完，年代、人物、当时在哪儿上班，自然就都出来了。
+              </p>
+              <div class="point-src">原文：不要问开放式的大问题。拿一件他天天在用、有磨损的旧物当引子，问它的来历和那道磕痕。</div>
+              <div class="point-foot">
+                <button class="btn wiki sm" data-go="chat">▶ 一键生成视频</button>
+                <button class="btn sm">✎ 编辑讲解</button>
+                <span class="from">来自 采访提纲-从一件旧物开始.docx</span>
+              </div>
+            </article>
+
+            <article class="point">
+              <div class="point-head">
+                <span class="seq">2</span>
+                <h5>别问「您还记得吗」</h5>
+                <span class="point-dur">25 秒</span>
+              </div>
+              <p class="point-body">
+                「还记得吗」这四个字，等于先把「你可能忘了」摆在老人面前。他要么硬撑着说记得，然后编；要么干脆说记不清，话题就断了。换成「那时候家里是怎么弄的」，把记忆当成一件还在那儿的事去问，他的反应完全不一样。承认遗忘是正常的，别让他为了面子编故事。
+              </p>
+              <div class="point-src">原文：避免「你还记得……吗」这类句式，会让受访者因怕忘而虚构，或直接放弃回答。</div>
+              <div class="point-foot">
+                <button class="btn wiki sm" data-go="chat">▶ 一键生成视频</button>
+                <button class="btn sm">✎ 编辑讲解</button>
+                <span class="from">来自 口述史访谈技巧笔记.pdf</span>
+              </div>
+            </article>
+
+            <article class="point">
+              <div class="point-head">
+                <span class="seq">3</span>
+                <h5>一次只挖一个场景</h5>
+                <span class="point-dur">35 秒</span>
+              </div>
+              <p class="point-body">
+                老人讲着讲着会跳到另一件事，这很正常，但别跟着跳。他说到「那年冬天特别冷」，你就停在这儿：冷到什么程度、屋里怎么取暖、手冻裂了怎么干活。一个场景挖到底，出来的细节才有画面感。一场两小时的访谈，能挖透三个场景，就已经很够了，贪多只会全是梗概。
+              </p>
+              <div class="point-src">原文：单次访谈聚焦 2~3 个场景，追问细节而非扩大范围；跳跃的话题先记下，留到下次。</div>
+              <div class="point-foot">
+                <button class="btn wiki sm" data-go="chat">▶ 一键生成视频</button>
+                <button class="btn sm">✎ 编辑讲解</button>
+                <span class="from">来自 采访提纲-从一件旧物开始.docx</span>
+              </div>
+            </article>
+
+            <article class="point">
+              <div class="point-head">
+                <span class="seq">4</span>
+                <h5>把他说的复述一遍再追问</h5>
+                <span class="point-dur">28 秒</span>
+              </div>
+              <p class="point-body">
+                他说完一段，你用自己的话复述一次：「所以那时候您是先在县里干了两年，才调去市里的？」这一步有两个作用：一是确认你没听错，二是让他听见自己的话被认真接住了，他会愿意再往下说。很多人访谈失败，不是问题不好，是老人感觉不到你在听。
+              </p>
+              <div class="point-src">原文：用复述做确认，同时传递「我在认真听」；这是访谈能否深入的关键动作。</div>
+              <div class="point-foot">
+                <button class="btn wiki sm" data-go="chat">▶ 一键生成视频</button>
+                <button class="btn sm">✎ 编辑讲解</button>
+                <span class="from">来自 现场速记-第 3 次访谈.jpg</span>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+      <!-- ============ ④ 跳到会话 ============ -->
+      <section class="view" id="view-chat">
+        <div class="chat-shell">
+          <div class="chat-head">
+            <div>
+              <h3>新建对话</h3>
+              <p>从知识库「父母采访方法论 · 从一件旧物开始提问」带入</p>
+            </div>
+            <button class="btn sm" data-go="detail">← 回到知识点</button>
+          </div>
+
+          <div class="chat-stream">
+            <div class="bubble user">
+              <div class="bubble-tag">来自知识库 · 一键生成视频</div>
+              <p>做一条 30 秒的竖版知识讲解视频，主题是「从一件旧物开始提问」。<br />讲解文案：别一上来就问「您这辈子最难忘的事是什么」，太大，老人接不住……</p>
+            </div>
+            <div class="bubble agent">
+              <div class="bubble-tag">AI 员工</div>
+              <p>已按知识点准备好创作需求，时长 30 秒。你可以在下面改创作需求或补参考图，确认后点「开始生成」，我会先出分镜脚本再出片。</p>
+            </div>
+          </div>
+
+          <!-- 图生视频面板 -->
+          <div class="video-panel">
+            <div class="vp-head">
+              <div class="vp-title">🎬 一键生成视频</div>
+              <div class="vp-close">✕</div>
+            </div>
+
+            <div class="vp-badge">✦ 来自知识库 · 父母采访方法论 › 从一件旧物开始提问</div>
+
+            <div class="vp-field">
+              <label>创作需求</label>
+              <textarea rows="5">做一条 30 秒的竖版知识讲解视频，主题是「从一件旧物开始提问」。
+讲解文案：别一上来就问「您这辈子最难忘的事是什么」，太大，老人接不住。指着一个具体的东西问：这个搪瓷缸哪来的、用了多少年、边上那个豁口是怎么磕的。物件是有形状的记忆，它比「难忘的事」好回答得多。
+要求：口播念白 + 关键句大字幕，画面用简洁的图形化演绎，不要真人出镜。</textarea>
+            </div>
+
+            <div class="vp-row">
+              <div class="vp-field" style="flex:1">
+                <label>产品网站（可选）</label>
+                <input value="https://aimemory.cafe/" />
+              </div>
+              <div class="vp-upload">
+                <span class="vp-upload-ic">＋</span>
+                <span>参考图（可选）</span>
+              </div>
+            </div>
+
+            <div class="vp-foot">
+              <span class="vp-hint">时长由创作需求里的「30 秒」决定；分镜由 AI 生成后可再调。</span>
+              <button class="btn wiki" onclick="toast('开始生成 · 会先出分镜脚本')">开始生成</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  function go(name){
+    document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === 'view-' + name));
+    document.querySelectorAll('.proto-bar button').forEach(b => b.classList.toggle('on', b.dataset.go === name));
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+  document.querySelectorAll('[data-go]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      go(el.dataset.go);
+    });
+  });
+
+  function pickKind(el, kind){
+    document.querySelectorAll('.kind-opt').forEach(b => b.classList.remove('on','wiki'));
+    el.classList.add('on');
+    if(kind === 'wiki') el.classList.add('wiki');
+    document.getElementById('wiki-extra').style.display = kind === 'wiki' ? '' : 'none';
+    document.getElementById('rag-extra').style.display = kind === 'rag' ? '' : 'none';
+    document.querySelector('#view-create .btn.wiki, #view-create .modal-foot .btn.primary')
+      ?.setAttribute('class', 'btn ' + (kind === 'wiki' ? 'wiki' : 'primary'));
+  }
+
+  let toastTimer;
+  function toast(msg){
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('on'), 2200);
+  }
+
+  // 支持 #list / #create / #detail 直达（截图与分享用）
+  if (location.hash) {
+    const name = location.hash.slice(1);
+    if (['list','create','detail','chat'].includes(name)) go(name);
+  }
+</script>
+</body>
+</html>

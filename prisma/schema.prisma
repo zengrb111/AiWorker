@@ -416,13 +416,18 @@ model PlatformFanRegion {
   @@index([platform, metricDate])
 }
 
-/// RAG 知识库
+/// 知识库（两种形态）
+///
+/// - RAG：切片 + 向量检索，供对话/写作检索引用；
+/// - WIKI：图文知识库，上传文档后由模型提炼「知识点 + 讲解」，每个知识点可一键转讲解视频。
 model KnowledgeBase {
   id            String       @id @default(cuid())
   userId        String
   user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   name          String
   description   String       @default("")
+  /// RAG | WIKI —— 决定详情页展示哪套流程（切片训练 / 知识点提炼）
+  kind          String       @default("RAG")
   vectorModel   String       @default("local-hash-256")
   chunkStrategy String       @default("semantic") // semantic | fixed
   chunkSize     Int          @default(600)
@@ -434,6 +439,8 @@ model KnowledgeBase {
   updatedAt     DateTime     @updatedAt
   documents     KbDocument[]
   chunks        KbChunk[]
+  points        KbKnowledgePoint[]
+  @@index([userId, kind])
 }
 
 /// 知识库文档（文本 / 图片 / 图文）
@@ -452,6 +459,7 @@ model KbDocument {
   chunkCount      Int           @default(0)
   createdAt       DateTime      @default(now())
   chunks          KbChunk[]
+  points          KbKnowledgePoint[]
 }
 
 /// 知识库切片
@@ -468,4 +476,26 @@ model KbChunk {
   embedding       String? // JSON float array
   trainedAt       DateTime?
   createdAt       DateTime      @default(now())
+}
+
+/// Wiki 知识点：由文档自动提炼，一条 = 一个可独立成片的讲解点
+model KbKnowledgePoint {
+  id              String        @id @default(cuid())
+  knowledgeBaseId String
+  knowledgeBase   KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  /// 来源文档；文档删了知识点留着（onDelete: SetNull），只是失去出处
+  documentId      String?
+  document        KbDocument?   @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  /// 库内展示顺序
+  seq             Int           @default(0)
+  title           String
+  /// 讲解正文：口语化讲清这个知识点，直接可做视频口播稿
+  explanation     String        @default("")
+  /// 提炼依据的原文片段，便于人工核对
+  sourceExcerpt   String        @default("")
+  /// 建议视频时长（秒），模型给的估值，前端可改
+  videoSeconds    Int?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  @@index([knowledgeBaseId, seq])
 }

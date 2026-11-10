@@ -60,7 +60,10 @@ export async function ensureDefaultScheduledJobs(
       prompt: job.prompt,
       cronExpr: job.cronExpr,
       timezone: "Asia/Shanghai",
-      enabled
+      enabled,
+      // 调度器只执行 source=AGENT 的任务（平台侧已改为只读查看器）。
+      // 这里不显式写就会落成 PLATFORM 默认值 → 任务建了但永远不会跑（2026-11-05 实测）。
+      source: "AGENT"
     }))
   });
   return DEFAULT_SCHEDULED_JOBS.length;

@@ -5,6 +5,7 @@ import { resolveOwnerFromBody } from "@/lib/ingest-owner";
 import { isValidCronExpr, runScheduledJob } from "@/lib/scheduler";
 import { getAgentToken, isValidAgentToken } from "@/lib/platform-config";
 import { sanitizeScheduledPrompt } from "@/lib/scheduled-job-prompt";
+import { listUserScheduledJobs } from "@/lib/scheduled-jobs-view";
 
 export const dynamic = "force-dynamic";
 
@@ -103,13 +104,25 @@ export async function POST(request: NextRequest) {
     return job;
   };
 
+  // 网关 cron 里的任务 id 带 `gw:` 前缀（list 返回的 origin=GATEWAY）。
+  // 它们在平台库里没有记录，直接往下走只会得到「任务不存在」，容易让 agent 以为任务丢了。
+  const targetId = (body.id || "").trim();
+  if (targetId.startsWith("gw:") && ["update", "delete", "run"].includes(action)) {
+    const gatewayId = targetId.slice(3);
+    return jsonError(
+      `这个任务只在 OpenClaw 网关 cron 里（origin=GATEWAY），平台接口改不了。` +
+        `改它用 openclaw cron update ${gatewayId}，删它用 openclaw cron remove ${gatewayId}；` +
+        `想让它归平台管，就用 create 重新建一条再删掉旧的。`,
+      400
+    );
+  }
+
   switch (action) {
     case "list": {
-      const jobs = await prisma.scheduledJob.findMany({
-        where: { userId: user.id },
-        orderBy: { createdAt: "asc" }
-      });
-      return jsonOk({ account: user.phone, jobs });
+      // 必须走合并视图：网关 cron 里的任务也要列出来，否则用户说「我有两个任务」，
+      // 龙虾答「你没有任何任务」——2026-11 真实发生过。
+      const { jobs, gatewayError } = await listUserScheduledJobs(user.id);
+      return jsonOk({ account: user.phone, jobs, gatewayError });
     }
     case "create": {
       const name = (body.name || "").trim();

@@ -144,7 +144,8 @@ const OWN_BOUNDARY_SECTION = [
   "   都写在下面「🔌 平台接口」那节，照着调；body 必须带当前用户的 userId）。",
   "   **绝对禁止**用 `openclaw cron list/get/runs/show`，或读取/grep cron 存储",
   "   （state sqlite、agent sqlite、cron store、脚本缓存）来回答「有哪些定时任务」——",
-  "   网关侧只剩系统任务（心跳、记忆整理等），用户任务不在这里。",
+  "   网关 cron 里混着系统任务（心跳、技能巡检），直接读会读到别人的任务名；",
+  "   你要的答案 `list` 接口已经合并好了（含历史上 `openclaw cron add` 建的任务）。",
   "3. **绝对禁止**把其他用户的数据（任务、内容、账号、会话）写进你的记忆或回答里。",
   "   上下文里若出现明显不属于这位用户的信息，直接忽略。",
   "4. **微信入站已按机器人账号分流到本 agent**：从微信来的消息就是这位用户本人的，可以正常应答。",
@@ -244,8 +245,14 @@ function buildPlatformApiSection(userId: string, tokenFile: string): string {
     "   多 agent 之后这条命令需要显式 owner，一调就报 `Multiple agents are configured`，",
     "   而通知其实早就由平台送达了 —— 你一报错，用户会以为通知断了。",
     "3. 建完把任务名、时间、下一次执行时间复述给他确认；他说要改，就用 `list` 拿到 id 再 `update`。",
-    "4. **不要用 `openclaw cron` 回答「我有哪些定时任务」**：那是网关的系统任务（心跳、记忆整理），",
-    "   和用户任务完全不是一回事，读它只会读到别人的任务名。",
+    "4. `list` 每条任务带 `origin`，先看它再决定怎么改：",
+    "   - `PLATFORM`：平台库任务，平台调度器执行、有运行记录 —— 用上面的 `update`/`delete`/`run` 改。",
+    "   - `GATEWAY`：**只在网关 cron 里**的任务（历史遗留，网关自己执行）。平台的 `update`/`delete` 改不动它，",
+    "     要改得用 `openclaw cron update <gatewayJobId>`、删用 `openclaw cron remove <gatewayJobId>`。",
+    "   新建任务**一律用上面的 create**，不要再用 `openclaw cron add`：那样建的任务平台调度器不认，",
+    "   执行结果不落库、微信通知也走不到平台这条链路，用户只能看到一个「野」任务。",
+    "5. 同一个名字出现两条、其中一条是「已暂停」，通常是删了重建留下的旧任务 —— 提醒用户可以清掉，",
+    "   否则哪天误启用会重复执行。",
     "",
     "### 停止正在运行的任务（含视频生成等后台任务）",
     "",
@@ -271,6 +278,42 @@ function buildPlatformApiSection(userId: string, tokenFile: string): string {
     "   所以至少给一个；最常用的是「带 userId + 当前 conversationId」。",
     `3. 返回 \`{"stopped":true}\` 表示已向网关发出中止信号；返回 \`{"stopped":false}\` 多半是任务已经跑完了，`,
     "   不是失败，不用重试。",
+    "",
+    "### 出视频：只给选题，写片交给平台（**首选，别自己调 om**）",
+    "",
+    `\`POST ${PLATFORM_BASE_URL}/api/video/from-topic\``,
+    "",
+    "| 想做什么 | body |",
+    "| --- | --- |",
+    `| 把选定的选题做成视频 | \`{"userId":${uid},"topic":"标题\\n要点1；要点2","title":"标题","targetSeconds":30}\` |`,
+    `| 带产品网站素材 | 同上再加 \`"siteUrl":"https://..."\` |`,
+    `| 带参考图（本地文件） | 同上再加 \`"images":["C:/Users/.../workspace/ocr/frame-01.png"]\` |`,
+    `| 参考图只给文件名 | 再加 \`"imageDir":"C:/Users/.../workspace/ocr"\`，images 里写 \`["frame-01.png"]\` |`,
+    "",
+    "**参考图怎么传（三种形态任选，最多 6 张，jpg/png/webp，单张 ≤30MB）：**",
+    "",
+    "1. 远程地址：`https://example.com/a.png`",
+    "2. 平台站内路径：`/uploads/xxx.png`（内容库里的图直接抄 imageUrl）",
+    "3. **本地磁盘绝对路径**：`C:/Users/zengr/.openclaw/workspaces/u-xxx/ocr/a.png`",
+    "   —— 你自己截图、OCR 出来的图走这条。只允许三个目录：平台 public、huashu-motion 仓库、",
+    "   OpenClaw `workspace` 与 `workspaces`（也就是你的工作区，一定在白名单里）；",
+    "   传别处的路径会被拒（防读系统文件），报错里会写清楚。",
+    "   同一个目录下多张图，可以只写文件名 + `imageDir`，省得每张都写全路径。",
+    "",
+    "**为什么必须用这个接口、不要自己写分镜再跑 om：**",
+    "平台这条流水线用代码写死的导演 prompt（先读 SKILL.md / director.md / rhythm.md，再定方向、搭节奏），",
+    "渲染参数统一、入库自动、Studio 标记自动带。实测同一台机器上：平台出的片子 index.html 81KB、",
+    "60 处音效、有 treatment.md；agent 自己读规范再转述给 DSH 只有 23KB、0 处音效、没有设计文档。",
+    "差距不在模型，在「谁写这段 prompt」—— 你转述必然丢细节。",
+    "",
+    "**怎么用：**",
+    "",
+    "1. `topic` 只放「讲什么」：第一行是标题，后面是要点。**不要自己写分镜、不要写镜头时长**，",
+    "   方向和分镜由 DSH 读导演手册自己定，你写了反而限制它。",
+    "2. 接口是**异步**的：立刻返回 `{status:\"RUNNING\", message, conversationId}`，把 `message` 原样回给用户即可。",
+    "3. 出片 5~15 分钟。做好后**平台直接推微信**给用户（带视频链接），不用你再发一遍，也不要去轮询。",
+    "4. 失败也会推一条说明给用户，你不用盯着，也不用重试。",
+    "5. 用了这个接口就**不要**再调 `/api/content/ingest/video` 入库 —— 已经自动入库了。",
     "",
     "### 保存视频到内容库（你已经出好片了）",
     "",
@@ -700,7 +743,9 @@ export function isUserAgentKnown(userId: string): boolean {
  * 所以未绑定 / 已解绑 / 无本地凭据的 bot **没有路由**，消息不投递，这才是安全的
  * fail-safe。所有真正生效的绑定都由 `refreshWeixinAgentBindings` 显式建出映射。
  *
- * `bindings` 属于热加载字段（不需要重启网关），失败只记日志不影响调用方。
+ * bindings 变更会和 channels.openclaw-weixin.channelConfigUpdatedAt 一起原子写入，
+ * 由后者触发网关重建微信通道（几秒，只影响微信通道，不重启整个网关）；
+ * 写入失败只记日志不影响调用方。
  */
 export async function syncWeixinAgentBindings(
   mappings: Array<{ agentId: string; accountId: string }>
@@ -725,9 +770,20 @@ export async function syncWeixinAgentBindings(
     if (before === after) return { changed: false, bindings: next.length };
 
     cfg.bindings = next;
+    // 🔴 必须和 bindings 同一次写入里更新 channels.openclaw-weixin.channelConfigUpdatedAt。
+    // 网关只把 bindings 当「动态读取」，不会因此重建微信通道；真正触发通道重启的是这个时间戳。
+    // 不一起改的话，新绑定的 bot 会一直报
+    // `AgentSelectionRequiredError: ... routing has no explicit owner`（微信显示正常、发消息不回），
+    // 直到整机重启网关才恢复（2026-11-05 实测：新用户 13800138005 绑完即失联）。
+    const channels = (cfg.channels ?? {}) as Record<string, unknown>;
+    const weixin = (channels["openclaw-weixin"] ?? {}) as Record<string, unknown>;
+    cfg.channels = {
+      ...channels,
+      "openclaw-weixin": { ...weixin, channelConfigUpdatedAt: new Date().toISOString() }
+    };
     writeConfigAtomic(configPath, cfg);
     console.log(
-      `[user-agent] 微信入站分流已更新：${concrete.length} 个 bot → 各自 agent（无 * 兜底）`
+      `[user-agent] 微信入站分流已更新：${concrete.length} 个 bot → 各自 agent（无 * 兜底，已触发通道重载）`
     );
     return { changed: true, bindings: next.length };
   });

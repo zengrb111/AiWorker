@@ -38,10 +38,14 @@ type JobItem = {
   lastError: string | null;
   lastResult: string | null;
   runCount: number;
-  /** AGENT=龙虾经微信创建 / PLATFORM=平台网页端创建（已废弃，不再展示） */
+  /** AGENT=龙虾经微信创建 / GATEWAY=只在网关 cron 里（平台库无记录） */
   source: string;
+  /** PLATFORM=平台库任务（平台调度器执行）/ GATEWAY=网关 cron 任务（网关自己执行） */
+  origin: "PLATFORM" | "GATEWAY";
+  gatewayJobId: string | null;
   nextRunAt: string | null;
   createdAt: string;
+  lastDurationMs?: number | null;
 };
 
 type JobRun = {
@@ -62,7 +66,7 @@ type ChannelHealth = {
   problems: string[];
 };
 
-async function request<T>(path: string, init?: RequestInit, timeoutMs = 20000): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, timeoutMs = 30000): Promise<T> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -186,6 +190,8 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
   const [channel, setChannel] = useState<ChannelHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  /** 网关 cron 读取失败的原因：平台库任务照常展示，但要如实说明少了什么。 */
+  const [gatewayError, setGatewayError] = useState<string | null>(null);
   /** 展开看运行记录的任务 id（同时只展开一条） */
   const [historyJobId, setHistoryJobId] = useState<string | null>(null);
   const [historyRuns, setHistoryRuns] = useState<JobRun[]>([]);
@@ -201,8 +207,16 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
     setLoading(true);
     setError("");
     try {
-      const data = await request<{ jobs: JobItem[] }>("/api/scheduled-jobs");
+      // 后端网关调用超时 30 秒（成功或带 gatewayError 都会在 30 秒内返回）。
+      // 这里给 35 秒是必需的余量：若两边都卡在 30 秒，前端会先 abort，用户又看到
+      // 「请求超时」而不是后端那条有意义的「网关正在启动」提示；多出的 5 秒留给冷编译和传输。
+      const data = await request<{ jobs: JobItem[]; gatewayError?: string | null }>(
+        "/api/scheduled-jobs",
+        undefined,
+        35000
+      );
       setJobs(data.jobs);
+      setGatewayError(data.gatewayError ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载定时任务失败。");
     } finally {
@@ -309,6 +323,17 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
       </div>
 
       {error && <p className="sj-error">{error}</p>}
+      {gatewayError && (
+        <div className="sj-channel-warn">
+          <strong>
+            {/starting|startup|retry shortly/i.test(gatewayError)
+              ? "网关正在启动，任务列表暂时读不出来"
+              : "网关里的任务这次没读出来"}
+          </strong>
+          <p>{/starting|startup/i.test(gatewayError) ? "通常是网关刚重启，等 1~2 分钟再点刷新就好；平台侧的任务不受影响。" : summarize(gatewayError, 200)}</p>
+          <p>下面只显示平台侧登记的任务；网关恢复后刷新即可看到全部。</p>
+        </div>
+      )}
 
       {channel && !channelOk && jobs.some((j) => j.enabled) && (
         <div className="sj-channel-warn">
@@ -345,12 +370,18 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
                   {job.enabled ? "运行中" : "已暂停"}
                 </span>
                 <div className="sj-job-actions">
-                  <button
-                    className={`sj-btn sm ghost${historyJobId === job.id ? " active" : ""}`}
-                    onClick={() => void toggleHistory(job)}
-                  >
-                    {historyJobId === job.id ? "收起记录" : "运行记录"}
-                  </button>
+                  {job.origin === "GATEWAY" ? (
+                    <span className="sj-badge off" title="这条任务由 OpenClaw 网关自己调度执行，平台只做展示">
+                      网关调度
+                    </span>
+                  ) : (
+                    <button
+                      className={`sj-btn sm ghost${historyJobId === job.id ? " active" : ""}`}
+                      onClick={() => void toggleHistory(job)}
+                    >
+                      {historyJobId === job.id ? "收起记录" : "运行记录"}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -372,10 +403,12 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
                       : formatRunAt(job.nextRunAt, job.timezone)}
                 </span>
                 <span>
-                  <i>已执行</i> {job.runCount} 次
+                  <i>{job.origin === "GATEWAY" ? "执行方" : "已执行"}</i>{" "}
+                  {job.origin === "GATEWAY" ? "OpenClaw 网关" : `${job.runCount} 次`}
                 </span>
                 <span>
-                  <i>来源</i> 微信 · 龙虾创建
+                  <i>来源</i>{" "}
+                  {job.origin === "GATEWAY" ? "微信 · 龙虾创建（网关调度）" : "微信 · 龙虾创建"}
                 </span>
                 <span>
                   <i>创建</i> {formatDateTime(job.createdAt, job.timezone)}
@@ -398,14 +431,26 @@ export default function ScheduledJobsPanel({ resetToken }: { resetToken: number 
                       ? `${formatRunAt(job.lastRunAt, job.timezone)} 失败`
                       : job.lastStatus === "RUNNING"
                         ? "正在执行"
-                        : "从未执行"}
+                        : job.lastStatus === "SKIPPED"
+                          ? "已跳过（网关未执行）"
+                          : job.lastRunAt
+                            ? `${formatRunAt(job.lastRunAt, job.timezone)} 已执行`
+                            : "从未执行"}
+                  {job.origin === "GATEWAY" && job.lastStatus && job.lastDurationMs != null && (
+                    <span className="sj-run-tag">耗时 {formatDuration(job.lastDurationMs)}</span>
+                  )}
                   {body && (
                     <span className="sj-run-tag" title={body}>
                       {summarize(body, 24)}
                     </span>
                   )}
                 </div>
-                {job.notifyWechat === false ? (
+                {job.origin === "GATEWAY" ? (
+                  <div className="sj-run ok">
+                    <i className="sj-dot" />
+                    <em>微信通知</em>由网关投递
+                  </div>
+                ) : job.notifyWechat === false ? (
                   <div className="sj-run">
                     <i className="sj-dot" />
                     <em>微信通知</em>已关闭

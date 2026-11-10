@@ -30,8 +30,10 @@ export type HuashuPanelController = {
   removeImage: (index: number) => void;
   /** 外部直接灌入图片（热点流程已备好带 objectURL 的素材）。 */
   setImagesFromFiles: (files: HuashuPanelImage[]) => void;
-  /** 清空全部状态回到初始；nextRequirement 作为新的创作需求（不传=清空）。 */
-  reset: (nextRequirement?: string) => void;
+  /** 清空全部状态回到初始；nextRequirement 作为新的创作需求（不传=清空）。
+   *  overrides.siteUrl 可指定网站字段的初始值：知识库带分镜脚本过来时要传空串，
+   *  否则会带着默认官网去抓素材，跟「按分镜脚本出片」冲突。 */
+  reset: (nextRequirement?: string, overrides?: { siteUrl?: string }) => void;
   // 运行状态
   phase: Phase;
   progress: string[];
@@ -108,7 +110,17 @@ export function useHuashuVideoPanel(options: {
   optionsRef.current = options;
   const abortRef = useRef<AbortController | null>(null);
 
-  const canSubmit = requirement.trim().length > 0 && (siteUrl.trim().length > 0 || images.length > 0);
+  /**
+   * 能不能提交。
+   *
+   * 除了「有网站或有参考图」，还允许**纯分镜脚本**：知识库 Wiki 的「一键生成视频」
+   * 带过来的需求是「标题 + 镜头/画面/口播」，本来就没有网站和图，硬卡素材
+   * 会让用户以为功能坏了。判定就认「镜头 N」这种行首标记。
+   */
+  const hasStoryboard = /^镜头\s*\d+/m.test(requirement);
+  const canSubmit =
+    requirement.trim().length > 0 &&
+    (hasStoryboard || siteUrl.trim().length > 0 || images.length > 0);
 
   function addImages(files: FileList | null) {
     if (!files?.length) return;
@@ -130,11 +142,14 @@ export function useHuashuVideoPanel(options: {
     });
   }
 
-  function reset(nextRequirement = DEFAULT_HUASHU_REQUIREMENT) {
+  function reset(
+    nextRequirement = DEFAULT_HUASHU_REQUIREMENT,
+    overrides?: { siteUrl?: string }
+  ) {
     for (const item of images) URL.revokeObjectURL(item.url);
     setImages([]);
     // 重置回默认值（而不是清空）：出片后再次打开面板依然能直接点「开始生成」
-    setSiteUrl(DEFAULT_HUASHU_SITE_URL);
+    setSiteUrl(overrides?.siteUrl ?? DEFAULT_HUASHU_SITE_URL);
     setRequirement(nextRequirement);
     setPhase("form");
     setProgress([]);
@@ -341,6 +356,9 @@ export default function HuashuVideoPanel({ panel, onClose }: PanelProps) {
     setPreview, canSubmit, submit, openStudio, syncing, syncNotice, syncTo
   } = panel;
 
+  /** 需求里带了分镜脚本（知识库带过来的），此时不需要产品网站/参考图。 */
+  const storyboardFilled = /^镜头\s*\d+/m.test(requirement);
+
   return (
     <div className="viral-remake-panel">
       <div className="viral-remake-title">一键生成视频</div>
@@ -386,19 +404,23 @@ export default function HuashuVideoPanel({ panel, onClose }: PanelProps) {
         {images.length === 0
           ? siteUrl.trim()
             ? "只依据产品网站创作"
-            : "产品网站与参考图至少填一个"
+            : storyboardFilled
+              ? "已按分镜脚本生成，无需产品网站或参考图"
+              : "产品网站与参考图至少填一个"
           : `参考图 ${images.length} 张${siteUrl.trim() ? " + 产品网站" : ""}（点缩略图看大图）`}
       </div>
 
       <label className="viral-remake-file" style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
-        整体创作需求（作为产品名称）
+        整体创作需求（首行作为视频标题）
         <textarea
           value={requirement}
           onChange={(event) => setRequirement(event.target.value)}
           placeholder="例如：AI 回忆录，帮普通人把父母的故事做成一本可导出的书"
           disabled={phase === "running"}
           style={{
-            minHeight: 84,
+            // 知识库带来的需求是「标题 + 分镜脚本」，动辄十几行；
+            // 固定 84px 只能看到镜头 1，用户以为没填全，所以按行数撑开（上限 460）。
+            minHeight: Math.min(460, Math.max(84, requirement.split("\n").length * 21 + 30)),
             resize: "vertical",
             border: "1px solid var(--line)",
             borderRadius: 7,

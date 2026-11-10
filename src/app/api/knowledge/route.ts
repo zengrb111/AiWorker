@@ -12,6 +12,8 @@ import { LOCAL_MODEL } from "@/lib/kb-embed";
 type CreateBody = {
   name?: string;
   description?: string;
+  /** RAG（默认）| WIKI */
+  kind?: string;
   vectorModel?: string;
   chunkStrategy?: string;
   chunkSize?: number;
@@ -38,10 +40,19 @@ export async function GET() {
   });
   const trainedMap = new Map(trainedRows.map((row) => [row.knowledgeBaseId, row._count._all]));
 
+  // Wiki 库的「体量」是知识点条数，不是切片数：列表卡片要显示对用户有意义的数字。
+  const pointRows = await prisma.kbKnowledgePoint.groupBy({
+    by: ["knowledgeBaseId"],
+    where: { knowledgeBaseId: { in: items.map((item) => item.id) } },
+    _count: { _all: true }
+  });
+  const pointMap = new Map(pointRows.map((row) => [row.knowledgeBaseId, row._count._all]));
+
   const knowledgeBases = items.map((item) => ({
     id: item.id,
     name: item.name,
     description: item.description,
+    kind: item.kind,
     vectorModel: item.vectorModel,
     chunkStrategy: item.chunkStrategy,
     chunkSize: item.chunkSize,
@@ -53,7 +64,8 @@ export async function GET() {
     updatedAt: item.updatedAt.toISOString(),
     documentCount: item._count.documents,
     chunkCount: item._count.chunks,
-    trainedCount: trainedMap.get(item.id) ?? 0
+    trainedCount: trainedMap.get(item.id) ?? 0,
+    pointCount: pointMap.get(item.id) ?? 0
   }));
 
   return jsonOk({ knowledgeBases });
@@ -83,6 +95,9 @@ export async function POST(request: Request) {
       userId: user.id,
       name,
       description: (body.description ?? "").trim(),
+      // WIKI = 图文知识库（提炼知识点 → 一键出讲解视频），不做切片/向量；
+      // 其余配置照旧写默认值，将来若要把它切回 RAG 也不用补数据。
+      kind: (body.kind ?? "").trim().toUpperCase() === "WIKI" ? "WIKI" : "RAG",
       vectorModel: (body.vectorModel ?? LOCAL_MODEL).trim() || LOCAL_MODEL,
       chunkStrategy: body.chunkStrategy === "fixed" ? "fixed" : "semantic",
       chunkSize,
