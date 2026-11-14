@@ -13,7 +13,7 @@ import { decryptCredential } from "./platform-creds";
  *   平台接口有签名/风控不确定性，验证器按候选端点轮询，失败如实记录到账号状态。
  */
 
-export const PLATFORM_META: Record<string, { name: string; desc: string; cookieGuide: string; needsToken?: boolean }> = {
+export const PLATFORM_META: Record<string, { name: string; desc: string; cookieGuide: string; needsToken?: boolean; needsApiKeys?: boolean }> = {
   site: {
     name: "官网",
     desc: "和光万象官网（好物推荐）或 AI回忆录官网（心灵驿站），配置域名 + 令牌后可用",
@@ -52,6 +52,16 @@ export const PLATFORM_META: Record<string, { name: string; desc: string; cookieG
     desc: "微信公众号后台数据授权（mp.weixin.qq.com），授权后自动拉取图文阅读 / 在看 / 涨粉数据",
     cookieGuide:
       "电脑浏览器打开 mp.weixin.qq.com 登录公众号后台 → F12 打开开发者工具 → Network 面板刷新页面 → 任选一个请求 → 复制 Request Headers 里完整的 Cookie 值粘贴到下面。\n授权后「效果分析」会新增「公众号」渠道，展示阅读次数 / 阅读人数 / 在看 / 分享 / 收藏 / 涨粉。",
+  },
+  "wechat-mp": {
+    name: "公众号开放平台",
+    desc: "配置 AppID + AppSecret 后，内容库详情页可一键把图文存进公众号草稿箱",
+    cookieGuide:
+      "在公众号后台「设置与开发 → 基本配置」拿 AppID 与 AppSecret（需已认证的订阅号/服务号）。\n" +
+      "🔴 必须把平台服务器 IP 加到同一页的「IP 白名单」，否则微信会报 40164。\n" +
+      "保存时会真实换一次 access_token 校验；若因白名单未生效而失败，密钥仍会保存，加完白名单直接可用。\n" +
+      "配置后内容库详情页出现「推送到草稿箱」按钮：正文图会自动上传微信图床、封面上传永久素材、标题与重点加粗按统一风格排版。",
+    needsApiKeys: true,
   },
   channels: {
     name: "视频号",

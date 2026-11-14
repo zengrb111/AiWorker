@@ -1,8 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent } from "react";
 import { renderMarkdown } from "@/lib/markdown";
-import { escapeHtml, escapeAttr } from "@/lib/escape";
+import { renderArticleHtml, applyAutoBold } from "@/lib/article/wechat-style";
 import KnowledgePanel from "./knowledge-panel";
 import PublishPanel from "./publish-panel";
 import AnalyticsPanel from "./analytics-panel";
@@ -929,11 +929,18 @@ export default function PlatformClient() {
   const libraryScrollRef = useRef<HTMLElement | null>(null);
   const librarySentinelRef = useRef<HTMLDivElement | null>(null);
   const [copyHint, setCopyHint] = useState("");
+  const [copyHintWarning, setCopyHintWarning] = useState(false);
   const copyHintTimerRef = useRef<number | null>(null);
   const [copiedButton, setCopiedButton] = useState<string | null>(null);
+  /** 复制到公众号要先在服务端搬运图片，按钮期间置灰避免重复触发。 */
+  const [copyingRich, setCopyingRich] = useState(false);
   const [editingContent, setEditingContent] = useState<"title" | "body" | null>(null);
   const [editingBody, setEditingBody] = useState("");
   const [editingTitle, setEditingTitle] = useState("");
+  const [uploadingBodyImages, setUploadingBodyImages] = useState(0);
+  const [bodyDragOver, setBodyDragOver] = useState(false);
+  const bodyEditRef = useRef<HTMLTextAreaElement | null>(null);
+  const pasteSeqRef = useRef(0);
   const [contentSaving, setContentSaving] = useState(false);
   const [publishingContent, setPublishingContent] = useState(false);
   const [publishingHealing, setPublishingHealing] = useState(false);
@@ -942,6 +949,9 @@ export default function PlatformClient() {
   /** 内容库列表卡片上直接开 Studio 时，正在启动的那个 token（避免整页只能转一个圈） */
   const [openingStudioToken, setOpeningStudioToken] = useState<string | null>(null);
   const [publishingFrontier, setPublishingFrontier] = useState(false);
+  /** 公众号草稿箱推送 / 按大意生成配图 的进行中状态 */
+  const [publishingWechatDraft, setPublishingWechatDraft] = useState(false);
+  const [illustrating, setIllustrating] = useState(false);
   const [regeneratingImage, setRegeneratingImage] = useState<string | null>(null);
   const [wechatBinding, setWechatBinding] = useState<WechatBinding | null>(null);
   /** 微信通道体检：BOUND 不等于通，个人中心按这个显示真实状态。 */
@@ -2676,10 +2686,11 @@ export default function PlatformClient() {
   }
 
   /** 统一的复制结果提示：底部浮动 toast，2 秒后自动消失（重复触发会重置计时）。 */
-  function showCopyHint(text: string) {
+  function showCopyHint(text: string, durationMs = 2200, warning = false) {
     setCopyHint(text);
+    setCopyHintWarning(warning);
     if (copyHintTimerRef.current) window.clearTimeout(copyHintTimerRef.current);
-    copyHintTimerRef.current = window.setTimeout(() => setCopyHint(""), 2200);
+    copyHintTimerRef.current = window.setTimeout(() => setCopyHint(""), durationMs);
   }
 
   /**
@@ -2821,35 +2832,143 @@ export default function PlatformClient() {
     }
   }
 
-  async function copyRichContent(item: ContentItem) {
-    const images = parseInlineImages(item.inlineImagesJson);
-    const allImages = [
-      item.coverImageUrl ?? fallbackImages[0],
-      ...images
-    ].filter(Boolean) as string[];
-
-    const htmlParts: string[] = [];
-    htmlParts.push(`<h1>${escapeHtml(item.title)}</h1>`);
-    for (const img of allImages) {
-      htmlParts.push(`<img src="${escapeAttr(img)}" alt="配图" />`);
+  /**
+   * 公众号编辑器会去抓取剪贴板 HTML 里的外链图片，而本机 /uploads/ 图片只存在本地磁盘，
+   * 拼成任何公网域名都是 404（2026-11-13 实测：本机 200 / 线上 404）。
+   * 服务端接口不可用时，前端把同源图片读成 data URI 内嵌，剪贴板自包含。
+   */
+  async function inlineLocalImages(html: string): Promise<string> {
+    const srcs = Array.from(
+      new Set(Array.from(html.matchAll(/\bsrc="(\/[^"]+)"/g), (match) => match[1]))
+    );
+    let out = html;
+    for (const src of srcs) {
+      try {
+        const response = await fetch(src);
+        if (!response.ok) continue;
+        const blob = await response.blob();
+        if (!blob.size || blob.size > 12 * 1024 * 1024) continue;
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.onerror = () => reject(new Error("读取图片失败"));
+          reader.readAsDataURL(blob);
+        });
+        out = out.split(`src="${src}"`).join(`src="${dataUrl}"`);
+      } catch {
+        // 单张读不到不影响其它图，静默跳过。
+      }
     }
-    htmlParts.push(renderMarkdown(item.body));
-    const html = htmlParts.join("\n");
-    const plain = `${item.title}\n\n${item.body}`;
+    return out;
+  }
 
+  /** ClipboardItem 不可用时，用选区 + copy 事件写 text/html，保住排版而不是退化成纯文本。 */
+  function fallbackWriteRichHtml(html: string, plain: string): boolean {
+    const holder = document.createElement("div");
+    holder.contentEditable = "true";
+    holder.style.cssText = "position:fixed;left:-99999px;top:0;width:600px;opacity:0;pointer-events:none;";
+    holder.innerHTML = html;
+    document.body.appendChild(holder);
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(holder);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    let copied = false;
+    const onCopy = (event: ClipboardEvent) => {
+      event.preventDefault();
+      event.clipboardData?.setData("text/html", html);
+      event.clipboardData?.setData("text/plain", plain);
+      copied = true;
+    };
+    document.addEventListener("copy", onCopy, { once: true });
     try {
-      const htmlBlob = new Blob([html], { type: "text/html" });
-      const textBlob = new Blob([plain], { type: "text/plain" });
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          "text/html": htmlBlob,
-          "text/plain": textBlob
-        })
-      ]);
-      showCopyHint("图文已复制");
+      copied = document.execCommand("copy") && copied;
     } catch {
-      await navigator.clipboard.writeText(plain);
-      showCopyHint("已复制（纯文本）");
+      copied = false;
+    }
+    document.removeEventListener("copy", onCopy);
+    selection?.removeAllRanges();
+    holder.remove();
+    return copied;
+  }
+
+  /** 富文本优先；ClipboardItem 不可用时退回选区 + copy 事件，不退化成纯文本。 */
+  async function writeRichClipboard(html: string, plain: string): Promise<boolean> {
+    let rich = false;
+    try {
+      if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([html], { type: "text/html" }),
+            "text/plain": new Blob([plain], { type: "text/plain" })
+          })
+        ]);
+        rich = true;
+      }
+    } catch {
+      rich = false;
+    }
+    if (!rich) rich = fallbackWriteRichHtml(html, plain);
+    return rich;
+  }
+
+  /**
+   * 复制带排版的富文本到剪贴板，Ctrl+V 粘进公众号编辑器仍能保留橙红竖线小标题、
+   * 深靛蓝标题文字、重点加粗和配图。公众号会过滤 class/<style>，所以只用内联样式。
+   *
+   * 图片由服务端 /wechat-clipboard 处理：配了公众号凭据就传微信图床（mmbiz.qpic.cn），
+   * 否则读本地文件转 data URI 内嵌 —— 不再把本机图片伪装成公网 URL 让微信去抓 404。
+   */
+  async function copyRichContent(item: ContentItem, buttonKey = "wechat-rich") {
+    if (copyingRich) return;
+    setCopyingRich(true);
+    const plain = `${item.title}\n\n${toPlainTextForPublish(item.body)}`;
+    try {
+      let html = "";
+      let notice = "";
+      let warning: string | null = null;
+      try {
+        const result = await api<{ html: string; notice: string; warning: string | null }>(
+          `/api/content/${item.id}/wechat-clipboard`,
+          { method: "POST", body: JSON.stringify({ body: item.body }) },
+          90000
+        );
+        html = result.html;
+        notice = result.notice;
+        warning = result.warning;
+      } catch {
+        // 服务端接口不可用：纯前端兜底，把同源 /uploads 图读成 data URI。
+        const lines = (item.body || "").split("\n");
+        const first = lines[0] || "";
+        const isDuplicateTitle =
+          /^#{1,6}\s+/.test(first) &&
+          first.replace(/^#{1,6}\s+/, "").trim() === (item.title || "").trim();
+        const bodyMd = isDuplicateTitle
+          ? lines.slice(1).join("\n").replace(/^\s*\n/, "")
+          : item.body || "";
+        const hasImages = /!\[[^\]]*\]\([^)]*\)/.test(bodyMd);
+        const parts: string[] = [];
+        if (!hasImages && item.coverImageUrl) {
+          parts.push(renderArticleHtml(`![封面](${item.coverImageUrl})`));
+        }
+        parts.push(renderArticleHtml(bodyMd));
+        html = await inlineLocalImages(parts.join("\n"));
+        notice = "已复制排版，图片内嵌但微信不显示；请到「平台授权管理 → 公众号开放平台」配置 AppID / AppSecret";
+        warning = notice;
+      }
+
+      const rich = await writeRichClipboard(html, plain);
+      if (rich) {
+        setCopiedButton(buttonKey);
+        showCopyHint(warning || notice, warning ? 9000 : 2200, !!warning);
+        window.setTimeout(() => setCopiedButton(null), 1600);
+      } else {
+        await copyText(plain, buttonKey);
+        showCopyHint("浏览器不允许复制富文本，已复制纯文本（可改用「推送到草稿箱」）");
+      }
+    } finally {
+      setCopyingRich(false);
     }
   }
 
@@ -2913,6 +3032,114 @@ export default function PlatformClient() {
           : msg
       );
     }
+  }
+
+  /**
+   * 正文编辑框里粘贴 / 拖入图片：先在光标处落占位符并立即上传，
+   * 成功就地把占位符换成 Markdown 图片，失败则清掉占位符。
+   * 用占位符而不是「上传完再按旧下标插」，是为了上传期间用户继续打字也不错位。
+   */
+  async function insertBodyImages(files: File[]) {
+    const images = files.filter(
+      (f) => f.type.startsWith("image/") || /\.(jpe?g|png|webp)$/i.test(f.name || "")
+    );
+    if (!images.length) return;
+    if (images.length > 6) {
+      showCopyHint("一次最多插入 6 张图片。");
+      return;
+    }
+    if (images.some((f) => f.size > 10 * 1024 * 1024)) {
+      showCopyHint("单张图片不能超过 10MB。");
+      return;
+    }
+
+    const el = bodyEditRef.current;
+    const start = el?.selectionStart ?? editingBody.length;
+    const end = el?.selectionEnd ?? start;
+    const current = el?.value ?? editingBody;
+    const seq = ++pasteSeqRef.current;
+    const tokens = images.map((_, i) => `![图片上传中…](#pasting-${seq}-${i})`);
+    const block = `\n\n${tokens.join("\n\n")}\n\n`;
+
+    setEditingBody(current.slice(0, start) + block + current.slice(end));
+    setUploadingBodyImages((n) => n + images.length);
+    requestAnimationFrame(() => {
+      const ta = bodyEditRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.selectionStart = ta.selectionEnd = start + block.length;
+    });
+
+    const form = new FormData();
+    form.append("scope", "article");
+    images.forEach((f, i) => {
+      const ext = /\.jpe?g$/i.test(f.name || "")
+        ? "jpg"
+        : /\.webp$/i.test(f.name || "")
+          ? "webp"
+          : /\.png$/i.test(f.name || "")
+            ? "png"
+            : f.type === "image/jpeg"
+              ? "jpg"
+              : f.type === "image/webp"
+                ? "webp"
+                : "png";
+      const name = /\.(jpe?g|png|webp)$/i.test(f.name || "")
+        ? f.name
+        : `pasted-${Date.now()}-${i}.${ext}`;
+      form.append("file", new File([f], name, { type: f.type || `image/${ext === "jpg" ? "jpeg" : ext}` }));
+    });
+
+    try {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 30000);
+      let response: Response;
+      try {
+        // 不能用 api()：它强制 Content-Type: application/json，会破坏 multipart 边界。
+        response = await fetch("/api/uploads/images", { method: "POST", body: form, signal: controller.signal });
+      } finally {
+        window.clearTimeout(timer);
+      }
+      const payload = (await response.json().catch(() => null)) as
+        | { ok: boolean; data?: { urls?: string[] }; error?: string }
+        | null;
+      if (!response.ok || !payload?.ok || !payload.data?.urls?.length) {
+        throw new Error(payload?.error || `上传失败（HTTP ${response.status}）`);
+      }
+      const urls = payload.data.urls;
+      setEditingBody((prev) => {
+        let out = prev;
+        tokens.forEach((token, i) => {
+          out = out.replace(token, urls[i] ? `![图片](${urls[i]})` : "");
+        });
+        return out;
+      });
+      showCopyHint(`已插入 ${urls.length} 张图片，保存后正文中即可看到。`);
+    } catch (error) {
+      setEditingBody((prev) => tokens.reduce((acc, token) => acc.replace(token, ""), prev));
+      showCopyHint(`图片上传失败：${error instanceof Error ? error.message : "未知错误"}`);
+    } finally {
+      setUploadingBodyImages((n) => Math.max(0, n - images.length));
+    }
+  }
+
+  /** 纯文本粘贴走浏览器默认；只有剪贴板里带图片才接管。 */
+  function handleBodyPaste(event: ReactClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.clipboardData?.items || [])
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((f): f is File => !!f);
+    if (!files.length) return;
+    event.preventDefault();
+    void insertBodyImages(files);
+  }
+
+  function handleBodyDrop(event: ReactDragEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.dataTransfer?.files || []).filter((f) => f.type.startsWith("image/"));
+    if (!files.length) return;
+    event.preventDefault();
+    setBodyDragOver(false);
+    void insertBodyImages(files);
   }
 
   function startEditContent(target: "title" | "body") {
@@ -3207,6 +3434,70 @@ export default function PlatformClient() {
       showCopyHint(error instanceof Error ? error.message : "推送失败。");
     } finally {
       setPublishingFrontier(false);
+    }
+  }
+
+  /** 把当前图文存进微信公众号草稿箱（开放平台官方接口，服务端调用）。 */
+  async function publishToWechatDraft() {
+    if (!activeContent || publishingWechatDraft) return;
+    setPublishingWechatDraft(true);
+    setCopiedButton(null);
+    setCopyHint("");
+    try {
+      const data = await api<{ skipped?: boolean; message?: string; imageCount?: number }>(
+        `/api/content/${activeContent.id}/publish`,
+        { method: "POST", body: JSON.stringify({ channel: "wechat-draft" }) },
+        180000
+      );
+      showCopyHint(data.message || (data.skipped ? "这篇内容已存进草稿箱。" : "已存进公众号草稿箱。"));
+    } catch (error) {
+      showCopyHint(error instanceof Error ? error.message : "推送草稿箱失败。");
+    } finally {
+      setPublishingWechatDraft(false);
+    }
+  }
+
+  /** 按文章大意，在开头与各段前生成 3 张左右配图并写回正文。 */
+  async function generateIllustrations() {
+    if (!activeContent || illustrating) return;
+    setIllustrating(true);
+    setCopiedButton(null);
+    setCopyHint("");
+    try {
+      const data = await api<{ count: number }>(
+        `/api/content/${activeContent.id}/illustrate`,
+        { method: "POST", body: "{}" },
+        180000
+      );
+      await refreshContent();
+      showCopyHint(`已按段落大意生成 ${data.count} 张配图，并插入正文对应位置。`);
+    } catch (error) {
+      showCopyHint(error instanceof Error ? error.message : "生成配图失败。");
+    } finally {
+      setIllustrating(false);
+    }
+  }
+
+  /** 把自动识别出的重点词句写回 Markdown（幂等，已有 **加粗** 的行不动）。 */
+  async function applyArticleFormatting() {
+    if (!activeContent || contentSaving) return;
+    const formatted = applyAutoBold(activeContent.body);
+    if (formatted === activeContent.body) {
+      showCopyHint("重点词句已经加粗，无需重复排版。");
+      return;
+    }
+    setContentSaving(true);
+    try {
+      await api(`/api/content/${activeContent.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ body: formatted })
+      });
+      await refreshContent();
+      showCopyHint("排版已写入正文：重点词句加粗、标题按统一风格展示。");
+    } catch (error) {
+      showCopyHint(error instanceof Error ? error.message : "排版失败。");
+    } finally {
+      setContentSaving(false);
     }
   }
 
@@ -4149,6 +4440,14 @@ export default function PlatformClient() {
                     {publishingFrontier ? "推送中..." : "推送 AI最前沿"}
                   </button>
                   <button
+                    className="publish-site-button publish-wechat-draft-button"
+                    disabled={publishingWechatDraft}
+                    onClick={() => void publishToWechatDraft()}
+                    title="调用公众号开放平台接口，把这篇图文存进公众号草稿箱（正文配图自动上传微信图床，需先在「平台授权管理 → 公众号开放平台」配置 AppID / AppSecret 与 IP 白名单）"
+                  >
+                    {publishingWechatDraft ? "存草稿中..." : "推送到草稿箱"}
+                  </button>
+                  <button
                     className={copiedButton === "title" ? "copied-button toolbar-btn" : "toolbar-btn"}
                     onClick={() => copyText(activeContent.title, "title")}
                   >
@@ -4284,8 +4583,10 @@ export default function PlatformClient() {
                 <div className="detail-body-actions">
                   {editingContent === "body" ? (
                     <>
-                      <button onClick={saveContentEdit} disabled={contentSaving}>{contentSaving ? "保存中..." : "保存"}</button>
-                      <button className="ghost-button" onClick={cancelEditContent}>取消</button>
+                      <button onClick={saveContentEdit} disabled={contentSaving || uploadingBodyImages > 0}>
+                        {contentSaving ? "保存中..." : uploadingBodyImages > 0 ? "图片上传中..." : "保存"}
+                      </button>
+                      <button className="ghost-button" onClick={cancelEditContent} disabled={uploadingBodyImages > 0}>取消</button>
                     </>
                   ) : (
                     <>
@@ -4296,22 +4597,64 @@ export default function PlatformClient() {
                         {copiedButton === "body" ? "已复制" : "复制"}
                       </button>
                       <button onClick={() => startEditContent("body")}>编辑</button>
+                      <button
+                        className={copiedButton === "wechat-rich" ? "copied-button article-copy-wechat-button" : "article-copy-wechat-button"}
+                        onClick={() => void copyRichContent(activeContent, "wechat-rich")}
+                        disabled={copyingRich}
+                        title="复制带排版的富文本，Ctrl+V 粘进公众号编辑器：橙红竖线小标题、深靛蓝标题、重点加粗都会保留。要让图片也显示，需先在「平台授权管理 → 公众号开放平台」配置 AppID / AppSecret，复制时会自动上传微信图床（文章标题请在公众号顶部单独填写）"
+                      >
+                        {copyingRich ? "处理图片中..." : copiedButton === "wechat-rich" ? "已复制" : "复制到公众号"}
+                      </button>
+                      <button
+                        className="article-format-button"
+                        onClick={() => void applyArticleFormatting()}
+                        disabled={contentSaving}
+                        title="把自动识别出的重点词句写回正文加粗（预览与各发布渠道本来就已自动加粗，这一步是为了方便复制到别处）"
+                      >
+                        一键排版
+                      </button>
+                      <button
+                        className="article-illustrate-button"
+                        onClick={() => void generateIllustrations()}
+                        disabled={illustrating}
+                        title="理解整篇大意，在文章开头和各个大意段落前各生成一张配图，共 3 张左右"
+                      >
+                        {illustrating ? "配图生成中..." : "生成配图"}
+                      </button>
                     </>
                   )}
                 </div>
               </div>
               {editingContent === "body" ? (
-                <textarea
-                  className="content-edit-area"
-                  value={editingBody}
-                  onChange={(event) => setEditingBody(event.target.value)}
-                />
+                <>
+                  <textarea
+                    ref={bodyEditRef}
+                    className={`content-edit-area${bodyDragOver ? " drag-over" : ""}`}
+                    value={editingBody}
+                    onChange={(event) => setEditingBody(event.target.value)}
+                    onPaste={handleBodyPaste}
+                    onDrop={handleBodyDrop}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      setBodyDragOver(true);
+                    }}
+                    onDragLeave={() => setBodyDragOver(false)}
+                  />
+                  <p className="body-upload-hint" role="status">
+                    {uploadingBodyImages > 0
+                      ? `正在上传 ${uploadingBodyImages} 张图片…上传完成后会自动插入光标处。`
+                      : "可直接 Ctrl+V 粘贴截图，或把图片拖进编辑框（JPG / PNG / WebP，自动压到 1MB 内，便于推送公众号草稿箱）"}
+                  </p>
+                </>
               ) : (
-                <article className="article-body markdown-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(activeContent.body) }} />
+                <article
+                  className="article-body wechat-article"
+                  dangerouslySetInnerHTML={{ __html: renderArticleHtml(activeContent.body) }}
+                />
               )}
                 </>
               )}
-              {copyHint && <p className="copy-toast" role="status">{copyHint}</p>}
+              {copyHint && <p className={`copy-toast${copyHintWarning ? " is-warning" : ""}`} role="status">{copyHint}</p>}
             </section>
           ) : (
             <section className="library-scroll" ref={libraryScrollRef}>

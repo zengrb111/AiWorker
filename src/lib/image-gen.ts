@@ -446,6 +446,96 @@ export async function generateCoverImageWithFallback(
 }
 
 /**
+ * 文章段落配图：优先用免费 AI 生图；被限流/失败时画一张「有主题文字的章节题图」。
+ *
+ * 2026-11-12 实测：pollinations 对并发请求会返回 402（额度/速率限制），
+ * 旧链路退化成纯渐变空白图，用户看到的是「配了三张空白图」。
+ * 这里加有限重试；真拿不到图时至少给出带段落大意的题图，而不是空白。
+ */
+async function fetchArticleImageWithRetry(prompt: string, width: number, height: number): Promise<Buffer | null> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const seed = Math.floor(Math.random() * 1_000_000);
+      const url = buildPollinationsUrl(prompt, width, height, seed);
+      const res = await fetch(url, { signal: AbortSignal.timeout(35_000) });
+      if (res.ok) {
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > 2000) return buf;
+      } else {
+        console.warn(`[image-gen] 段落配图生图返回 ${res.status}（第 ${attempt + 1} 次）`);
+      }
+    } catch (error) {
+      console.warn("[image-gen] 段落配图生图异常：", error instanceof Error ? error.message : error);
+    }
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 1800 * (attempt + 1)));
+  }
+  return null;
+}
+
+/** 程序化「章节题图」：极简背景 + 段落大意文字 + 与正文一致的橙红竖线。 */
+function renderIllustrationCard(topic: string, index: number, width: number, height: number): Buffer {
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext("2d");
+  const palette = paletteOf(`${topic}-${index}`);
+  drawMinimalistBackground(ctx, width, height, palette);
+
+  let clean = topic.replace(/[·|→\s]+/g, " ").trim();
+  // 取到第一个句读或 22 字为止，避免题图上出现被拦腰截断的半句话。
+  const punct = clean.search(/[，。！？、；：,.!?]/);
+  clean = (punct >= 8 && punct <= 24 ? clean.slice(0, punct) : clean.slice(0, 22)) || "文章配图";
+  const pad = Math.round(width * 0.07);
+  ensureCoverFont();
+
+  // 顶部标签
+  const small = Math.round(width * 0.022);
+  ctx.font = `600 ${small}px "${COVER_FONT_FAMILY}", sans-serif`;
+  ctx.fillStyle = "#1d2a8c";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(`AI 配图  /  ${String(index + 1).padStart(2, "0")}`, pad, Math.round(height * 0.2));
+
+  // 橙红竖线（与正文标题规范一致）
+  const barX = pad;
+  const barY = Math.round(height * 0.32);
+  const barW = Math.max(6, Math.round(width * 0.006));
+  const fontSize = Math.round(width * 0.05);
+  const lineHeight = Math.round(fontSize * 1.45);
+  ctx.font = `bold ${fontSize}px "${COVER_FONT_FAMILY}", sans-serif`;
+  const lines = layoutTitle(ctx, clean, width - pad * 2 - barW * 3, 3);
+  const barH = lines.length * lineHeight;
+  ctx.fillStyle = "#e8562a";
+  roundRectPath(ctx, barX, barY, barW, barH, barW / 2);
+  ctx.fill();
+
+  // 段落大意文字
+  ctx.fillStyle = "#1f2937";
+  let baseline = barY + fontSize;
+  for (const line of lines) {
+    ctx.fillText(line, barX + barW * 3, baseline);
+    baseline += lineHeight;
+  }
+
+  // 底部说明
+  ctx.font = `400 ${Math.round(width * 0.019)}px "${COVER_FONT_FAMILY}", sans-serif`;
+  ctx.fillStyle = "rgba(71,85,105,0.72)";
+  ctx.fillText("根据文章段落大意生成", pad, height - pad * 0.7);
+  return canvas.toBuffer("image/png");
+}
+
+/** 生成一张文章配图，返回本地 /uploads 路径。绝不会返回空白无信息图。 */
+export async function generateArticleIllustration(
+  prompt: string,
+  topic: string,
+  index: number,
+  width = 1200,
+  height = 750
+): Promise<string> {
+  const fullPrompt = buildPromptFromContent(prompt, "");
+  const image = await fetchArticleImageWithRetry(fullPrompt, width, height);
+  if (image) return saveLocalImage(image);
+  return saveLocalImage(renderIllustrationCard(topic, index, width, height));
+}
+
+/**
  * 重绘一张配图（非主图或指定 prompt）：免费 pollinations 出图落本地，
  * 失败退化为程序化极简背景。
  */

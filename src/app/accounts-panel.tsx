@@ -20,7 +20,18 @@ type Account = {
   createdAt: string;
 };
 
-const PLATFORMS: Record<string, { name: string; desc: string; cookieGuide: string; badge: string; needsToken?: boolean }> = {
+const PLATFORMS: Record<string, { name: string; desc: string; cookieGuide: string; badge: string; needsToken?: boolean; needsApiKeys?: boolean }> = {
+  "wechat-mp": {
+    name: "公众号开放平台",
+    desc: "配置 AppID + AppSecret 后，内容库可一键把图文存进公众号草稿箱",
+    cookieGuide:
+      "在公众号后台「设置与开发 → 基本配置」拿 AppID 与 AppSecret（需已认证的订阅号/服务号）。\n" +
+      "🔴 必须把平台服务器 IP 加到同一页的「IP 白名单」，否则微信会报 40164。\n" +
+      "保存时会真实换一次 access_token 校验；若因白名单未生效而失败，密钥仍会保存，加完白名单直接可用。\n" +
+      "配置后内容库详情页出现「推送到草稿箱」按钮：正文图自动上传微信图床、封面上传永久素材，标题与重点加粗按统一风格排版。",
+    badge: "未授权",
+    needsApiKeys: true,
+  },
   aiworker: {
     name: "官网-AI员工",
     desc: "AI员工官网 AI最前沿频道（aiworker.aimemory.cafe），授权后可将资讯推送到该频道",
@@ -89,6 +100,8 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
   const [cookieInput, setCookieInput] = useState("");
   const [domainInput, setDomainInput] = useState("");
   const [tokenInput, setTokenInput] = useState("");
+  const [appIdInput, setAppIdInput] = useState("");
+  const [appSecretInput, setAppSecretInput] = useState("");
   const [binding, setBinding] = useState(false);
   const [bindMsg, setBindMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<{ id: string; timer: ReturnType<typeof setTimeout> } | null>(null);
@@ -118,8 +131,9 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
   async function submitBind() {
     if (!bindPlatform) return;
     const meta = PLATFORMS[bindPlatform];
-    const body =
-      meta?.needsToken
+    const body = meta?.needsApiKeys
+      ? JSON.stringify({ platform: bindPlatform, appId: appIdInput.trim(), appSecret: appSecretInput.trim() })
+      : meta?.needsToken
         ? JSON.stringify({ platform: bindPlatform, domain: domainInput, token: tokenInput })
         : JSON.stringify({ platform: bindPlatform, cookie: cookieInput });
     setBinding(true);
@@ -133,7 +147,7 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
       // 服务端异常时可能返回 HTML（如 <pre>missing parameter</pre>），直接 res.json() 会抛
       // "Unexpected token '<' ... is not valid JSON"，这里先取文本再解析，给出可读提示。
       const raw = await res.text();
-      let json: { ok: boolean; message?: string } | null = null;
+      let json: { ok: boolean; message?: string; warning?: string } | null = null;
       try {
         json = JSON.parse(raw);
       } catch {
@@ -150,15 +164,22 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
         setBindMsg({ ok: false, text: json.message || "绑定失败，请检查凭据是否完整。" });
         return;
       }
-      setBindMsg({ ok: true, text: meta?.needsToken ? "官网配置成功，凭据已加密保存。" : "绑定成功，平台凭据已加密保存。" });
+      setBindMsg({
+        ok: !json.warning,
+        text:
+          json.warning ||
+          (meta?.needsToken ? "官网配置成功，凭据已加密保存。" : meta?.needsApiKeys ? "公众号开放平台已配置，可到内容库推送草稿箱。" : "绑定成功，平台凭据已加密保存。")
+      });
       setCookieInput("");
       setDomainInput("");
       setTokenInput("");
+      setAppIdInput("");
+      setAppSecretInput("");
       setTimeout(() => {
         setBindPlatform(null);
         setBindMsg(null);
         void refresh();
-      }, 1200);
+      }, json.warning ? 6000 : 1200);
     } catch (err) {
       setBindMsg({ ok: false, text: err instanceof Error ? err.message : String(err) });
     } finally {
@@ -246,9 +267,11 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
                       setCookieInput("");
                       setDomainInput("");
                       setTokenInput("");
+                      setAppIdInput("");
+                      setAppSecretInput("");
                     }}
                   >
-                    {meta.needsToken ? "配置授权" : "授权绑定"}
+                    {meta.needsToken || meta.needsApiKeys ? "配置授权" : "授权绑定"}
                   </button>
                 )}
               </div>
@@ -262,7 +285,26 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
           <div className="acct-dialog" onClick={(e) => e.stopPropagation()}>
             <h3>{PLATFORMS[bindPlatform].name} 授权配置</h3>
             <p className="acct-guide">{PLATFORMS[bindPlatform].cookieGuide}</p>
-            {PLATFORMS[bindPlatform].needsToken ? (
+            {PLATFORMS[bindPlatform].needsApiKeys ? (
+              <>
+                <input
+                  className="acct-input"
+                  placeholder="AppID（wx 开头，如 wx1234567890abcdef）"
+                  value={appIdInput}
+                  onChange={(e) => setAppIdInput(e.target.value)}
+                  disabled={binding}
+                />
+                <input
+                  className="acct-input"
+                  type="password"
+                  autoComplete="off"
+                  placeholder="AppSecret（32 位以上）"
+                  value={appSecretInput}
+                  onChange={(e) => setAppSecretInput(e.target.value)}
+                  disabled={binding}
+                />
+              </>
+            ) : PLATFORMS[bindPlatform].needsToken ? (
               <>
                 <input
                   className="acct-input"
@@ -299,9 +341,11 @@ export default function AccountsPanel({ resetToken }: { resetToken: number }) {
                 onClick={() => void submitBind()}
                 disabled={
                   binding ||
-                  (PLATFORMS[bindPlatform].needsToken
-                    ? domainInput.trim().length < 4 || tokenInput.trim().length < 4
-                    : cookieInput.trim().length < 20)
+                  (PLATFORMS[bindPlatform].needsApiKeys
+                    ? appIdInput.trim().length < 10 || appSecretInput.trim().length < 20
+                    : PLATFORMS[bindPlatform].needsToken
+                      ? domainInput.trim().length < 4 || tokenInput.trim().length < 4
+                      : cookieInput.trim().length < 20)
                 }
               >
                 {binding ? "正在验证凭据…" : "验证并保存"}

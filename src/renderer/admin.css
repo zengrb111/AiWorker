@@ -1,0 +1,160 @@
+/*
+ * 运营后台独立样式。根 layout 会加载主站 styles.css，
+ * 因此这里所有规则都必须挂在 .op-admin-root 下，绝不能写裸 body/button/input，
+ * 否则会污染主站（主站 input / button 有全局规则）。
+ */
+.op-admin-root {
+  --op-ink: #1c2536;
+  --op-muted: #7a869c;
+  --op-line: #e6eaf2;
+  --op-primary: #2f5bea;
+  --op-bg: #f4f6fa;
+  min-height: 100vh;
+  background: var(--op-bg);
+  color: var(--op-ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+}
+.op-admin-root * { box-sizing: border-box; }
+.op-admin-root button { font: inherit; cursor: pointer; }
+.op-admin-root button:disabled { cursor: not-allowed; opacity: .55; }
+.op-admin-root input {
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--op-line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--op-ink);
+  font-size: 13px;
+  outline: none;
+}
+.op-admin-root input:focus { border-color: var(--op-primary); box-shadow: 0 0 0 3px rgba(47,91,234,.1); }
+.op-admin-root input::placeholder { color: #a9b2c3; }
+
+/* ---------- 登录 ---------- */
+.op-admin-login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: linear-gradient(135deg, #eef2ff 0%, #f7f9fc 55%, #eaf1ff 100%);
+}
+.op-admin-login-card {
+  width: 100%;
+  max-width: 400px;
+  padding: 38px 34px 28px;
+  border: 1px solid var(--op-line);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 24px 60px rgba(30, 50, 100, .12);
+  text-align: center;
+}
+.op-admin-login-mark {
+  width: 52px; height: 52px; margin: 0 auto 16px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 14px; background: var(--op-primary); color: #fff; font-size: 26px;
+}
+.op-admin-login-card h1 { margin: 0 0 6px; font-size: 20px; font-weight: 700; }
+.op-admin-login-card > p { margin: 0 0 26px; color: var(--op-muted); font-size: 13px; }
+.op-admin-field { display: block; text-align: left; margin-bottom: 16px; }
+.op-admin-field span { display: block; margin-bottom: 7px; font-size: 13px; color: #4a556b; }
+.op-admin-field input { width: 100%; }
+.op-admin-primary {
+  height: 40px; padding: 0 22px; border: 0; border-radius: 8px;
+  background: var(--op-primary); color: #fff; font-size: 14px; font-weight: 600;
+}
+.op-admin-login-card .op-admin-primary { width: 100%; margin-top: 8px; }
+.op-admin-ghost {
+  height: 38px; padding: 0 18px; border: 1px solid var(--op-line); border-radius: 8px;
+  background: #fff; color: #4a556b; font-size: 13px;
+}
+.op-admin-error {
+  margin: 6px 0 12px; padding: 9px 12px; border-radius: 8px;
+  background: #fff2f0; color: #c0392b; font-size: 13px; text-align: left;
+}
+.op-admin-login-foot { margin-top: 22px; color: #b3bccd; font-size: 11px; }
+
+/* ---------- 后台框架 ---------- */
+.op-admin-shell { display: flex; min-height: 100vh; }
+.op-admin-side {
+  width: 220px; flex: 0 0 220px;
+  display: flex; flex-direction: column;
+  background: #fff; border-right: 1px solid var(--op-line);
+}
+.op-admin-brand { display: flex; align-items: center; gap: 12px; padding: 22px 20px 26px; }
+.op-admin-brand-mark {
+  width: 36px; height: 36px; border-radius: 10px; background: var(--op-primary);
+  color: #fff; display: flex; align-items: center; justify-content: center; font-size: 19px;
+}
+.op-admin-brand strong { display: block; font-size: 15px; }
+.op-admin-brand small { display: block; margin-top: 2px; color: var(--op-muted); font-size: 11px; }
+.op-admin-menu-label { padding: 0 20px 8px; color: #a9b2c3; font-size: 11px; letter-spacing: .5px; }
+.op-admin-nav { padding: 0 12px; }
+.op-admin-nav-item {
+  display: block; padding: 10px 14px; border-radius: 8px;
+  color: #5a667c; font-size: 13px; text-decoration: none;
+}
+.op-admin-nav-item.active { background: #eef3ff; color: var(--op-primary); font-weight: 600; }
+.op-admin-side-foot { margin-top: auto; padding: 18px 20px; color: #b3bccd; font-size: 10px; }
+
+.op-admin-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.op-admin-topbar {
+  height: 62px; flex: 0 0 62px; padding: 0 28px;
+  display: flex; align-items: center; justify-content: space-between;
+  background: #fff; border-bottom: 1px solid var(--op-line);
+}
+.op-admin-crumb { color: var(--op-muted); font-size: 13px; }
+.op-admin-crumb span { margin: 0 8px; color: #cbd2df; }
+.op-admin-account { display: flex; align-items: center; gap: 16px; color: #5a667c; font-size: 13px; }
+.op-admin-account button { border: 0; background: transparent; color: var(--op-primary); font-size: 13px; }
+.op-admin-content { flex: 1; padding: 26px 28px 40px; }
+
+.op-admin-card {
+  background: #fff; border: 1px solid var(--op-line); border-radius: 12px;
+  box-shadow: 0 6px 24px rgba(30, 50, 100, .04); overflow: hidden;
+}
+.op-admin-card-head { padding: 22px 24px 0; }
+.op-admin-card-head h2 { margin: 0 0 5px; font-size: 17px; font-weight: 700; }
+.op-admin-card-head p { margin: 0; color: var(--op-muted); font-size: 12px; }
+.op-admin-filters {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  padding: 20px 24px 22px;
+}
+.op-admin-phone { width: 250px; }
+.op-admin-date-range { display: flex; align-items: center; gap: 8px; color: #5a667c; font-size: 13px; }
+.op-admin-date-range em { font-style: normal; color: #a9b2c3; }
+.op-admin-date-range input { width: 150px; }
+
+.op-admin-table-wrap { width: 100%; overflow-x: auto; }
+.op-admin-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.op-admin-table th {
+  padding: 12px 24px; background: #f8fafd; border-top: 1px solid var(--op-line);
+  border-bottom: 1px solid var(--op-line); color: #6b768c; font-weight: 600; text-align: left;
+}
+.op-admin-table td {
+  padding: 13px 24px; border-bottom: 1px solid #f0f2f7; color: #39445a;
+}
+.op-admin-table tbody tr:last-child td { border-bottom: 0; }
+.op-admin-table tbody tr:hover { background: #fafcff; }
+.op-admin-phone-cell { font-weight: 600; letter-spacing: .4px; }
+.op-admin-empty { text-align: center; color: var(--op-muted); padding: 34px 24px !important; }
+
+.op-admin-pager {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 24px; border-top: 1px solid var(--op-line); color: var(--op-muted); font-size: 12px;
+}
+.op-admin-pager > div { display: flex; gap: 8px; }
+.op-admin-pager button {
+  height: 32px; padding: 0 14px; border: 1px solid var(--op-line); border-radius: 7px;
+  background: #fff; color: #4a556b; font-size: 12px;
+}
+
+@media (max-width: 860px) {
+  .op-admin-side { width: 64px; flex-basis: 64px; }
+  .op-admin-brand strong, .op-admin-brand small, .op-admin-menu-label,
+  .op-admin-nav-item, .op-admin-side-foot { display: none; }
+  .op-admin-content { padding: 18px; }
+  .op-admin-filters { padding: 16px 18px; }
+  .op-admin-phone { width: 100%; }
+}

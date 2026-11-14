@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { generateCoverImage, coverPlatformOf } from "@/lib/image-gen";
 import { loadHealingCredential } from "@/lib/platform-sync";
 import { buildSummary } from "@/lib/hgwx-publish";
-import { renderMarkdown } from "@/lib/markdown";
+import { renderArticleHtml, absolutizeArticleImages } from "@/lib/article/wechat-style";
 
 /**
  * AI回忆录官网「心灵驿站」频道推送链路（aimemory.cafe）。
@@ -327,10 +327,11 @@ export async function publishContentToHealing(
       summary: isVideo
         ? buildSummary(item.body || "", 140) || "AI 回忆录 · 竖版短片"
         : buildSummary(item.body || "", 140),
-      // 正文保留格式：用与内容库详情页相同的 markdown→HTML 渲染（加粗 / 标题层级 / 列表），
-      // 而不是压成纯文本。频道详情页 healing.js 现已识别并直接 innerHTML 这段 HTML。
-      // renderMarkdown 会先转义源文本再做行内强调，来源是本平台 AI 生成内容，可信、无 XSS 风险。
-      content: renderMarkdown(item.body || ""),
+      // 正文保留格式：与内容库详情页 / 公众号草稿箱 / AI最前沿共用同一份公众号风格 HTML
+      // （橙红竖线 + 蓝色加粗标题、重点词句自动加粗、段落配图），官网 healing.js 直接 innerHTML。
+      // 渲染前先转义源文本，来源是本平台 AI 生成内容，可信、无 XSS 风险。
+      // 正文图地址必须是平台站的绝对 URL：/uploads/... 在 aimemory.cafe 域名下会 404。
+      content: renderArticleHtml(absolutizeArticleImages(item.body || "")),
       cover,
       images,
       category: healingCategory(item.category, options.category),

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { loadFrontierCredential } from "@/lib/platform-sync";
-import { buildSummary, mdToPlainText } from "@/lib/hgwx-publish";
+import { buildSummary } from "@/lib/hgwx-publish";
+import { renderArticleHtml, absolutizeArticleImages } from "@/lib/article/wechat-style";
 
 /**
  * AI员工官网「AI最前沿」频道推送链路（aiworker.aimemory.cafe）。
@@ -114,8 +115,9 @@ export async function publishContentToFrontier(
 
   try {
     const summary = buildSummary(item.body || "", 140);
-    // 详情页正文：Markdown → 空行分段纯文本；正文为空时回落 summary，保证详情页不空白。
-    const content = mdToPlainText(item.body || "") || summary;
+    // 详情页正文：与内容库 / 心灵驿站 / 公众号草稿箱共用同一份公众号风格 HTML。
+    // 官网 article.html 已支持识别 HTML 标签直出；正文为空时回落纯文本摘要，详情页不空白。
+    const content = renderArticleHtml(absolutizeArticleImages(item.body || "")) || summary;
     const payload = {
       date: options.date || todayStr(),
       tag: frontierTag(item.category, options.tag),

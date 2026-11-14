@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/session";
 import { encryptCredential, normalizeCookie } from "@/lib/platform-creds";
 import { PLATFORM_META, inferSiteKind, kickChannelsCollector, kickWechatCollector, verifyHealingCredential, verifyPlatformCredential, verifySiteCredential, verifyFrontierCredential } from "@/lib/platform-sync";
+import { verifyWechatMpCredential } from "@/lib/wechat-mp-draft";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,6 +42,57 @@ export async function POST(req: Request) {
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const body = await req.json().catch(() => null);
   const platform = String(body?.platform || "").trim();
+
+  // 公众号开放平台（草稿箱）：AppID + AppSecret，走官方接口而不是后台 Cookie。
+  if (platform === "wechat-mp") {
+    const appId = String(body?.appId || "").trim();
+    const appSecret = String(body?.appSecret || "").trim();
+    if (!appId || !appSecret) {
+      return NextResponse.json({ ok: false, message: "请填写 AppID 与 AppSecret" }, { status: 400 });
+    }
+    if (appId.length < 10 || appSecret.length < 20) {
+      return NextResponse.json(
+        { ok: false, message: "AppID / AppSecret 格式看起来不对（AppID 通常是 wx 开头的 18 位，AppSecret 为 32 位以上）" },
+        { status: 400 }
+      );
+    }
+    // 真实换一次 access_token 试试。失败（多为 IP 白名单）也照样保存，
+    // 否则用户得等白名单生效后再回来重填一遍密钥。
+    const verified = await verifyWechatMpCredential(appId, appSecret);
+    const account = await prisma.platformAccount.upsert({
+      where: { userId_platform: { userId: user.id, platform } },
+      update: {
+        displayName: "公众号开放平台",
+        externalId: appId,
+        credentialEnc: encryptCredential(JSON.stringify({ appId, appSecret })),
+        status: verified.ok ? "active" : "error",
+        statusMsg: verified.ok ? "配置成功（草稿箱可用）" : verified.message,
+        boundBy: user.phone || user.id,
+        lastVerifyAt: new Date()
+      },
+      create: {
+        userId: user.id,
+        platform,
+        displayName: "公众号开放平台",
+        externalId: appId,
+        credentialEnc: encryptCredential(JSON.stringify({ appId, appSecret })),
+        status: verified.ok ? "active" : "error",
+        statusMsg: verified.ok ? "配置成功（草稿箱可用）" : verified.message,
+        boundBy: user.phone || user.id,
+        lastVerifyAt: new Date()
+      }
+    });
+    return NextResponse.json({
+      ok: true,
+      warning: verified.ok ? undefined : verified.message,
+      account: {
+        id: account.id,
+        platform: account.platform,
+        displayName: account.displayName,
+        status: account.status
+      }
+    });
+  }
 
   if (platform === "site" || platform === "healing" || platform === "aiworker") {
     const domain = String(body?.domain || "").trim();

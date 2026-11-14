@@ -3345,6 +3345,15 @@ textarea:focus {
   pointer-events: none;
 }
 
+/* 需要用户操作的告警（如公众号图床没配）文字较长，胶囊圆角会挤成一团 */
+.copy-toast.is-warning {
+  border-radius: 14px;
+  background: rgba(122, 58, 20, 0.96);
+  font-weight: 500;
+  text-align: left;
+  padding: 12px 20px;
+}
+
 @keyframes copy-toast-in {
   from {
     opacity: 0;
@@ -7596,4 +7605,71 @@ a.pub-row-title:hover {
 @media (max-width: 640px) {
   .local-account-badge.floating { left: 10px; bottom: 10px; padding: 5px 10px 5px 5px; font-size: 11px; }
   .local-account-badge.floating .local-badge-avatar { width: 24px; height: 24px; flex-basis: 24px; }
+}
+
+/* ===== 公众号风格正文（详情页 / 复制富文本 / 草稿箱 / 两个官网共用一份内联样式 HTML）=====
+   容器只负责留白，不覆盖 HTML 自身的 inline style，保证「平台所见 = 发布所得」。 */
+.article-body.wechat-article {
+  display: block;
+  max-width: 780px;
+  padding: 20px 22px 32px;
+  gap: 0;
+}
+.article-body.wechat-article img { max-width: 100%; }
+.article-body.wechat-article section { max-width: 100%; }
+
+/* 「推送到草稿箱」按钮：微信绿，与三个官网渠道区分 */
+.publish-wechat-draft-button {
+  border-color: #07a85b;
+  color: #07a85b;
+}
+.publish-wechat-draft-button:hover:not(:disabled) {
+  background: #07a85b;
+  color: #fff;
+}
+
+/* 正文区的「一键排版」「生成配图」「复制到公众号」 */
+.detail-body-actions .article-format-button {
+  border-color: #e8562a;
+  color: #c9431d;
+}
+.detail-body-actions .article-format-button:hover:not(:disabled) {
+  background: #e8562a;
+  color: #fff;
+}
+.detail-body-actions .article-illustrate-button {
+  border-color: #1d2a8c;
+  color: #1d2a8c;
+}
+.detail-body-actions .article-illustrate-button:hover:not(:disabled) {
+  background: #1d2a8c;
+  color: #fff;
+}
+.detail-body-actions .article-copy-wechat-button {
+  border-color: #07a85b;
+  color: #078a4b;
+  font-weight: 600;
+}
+.detail-body-actions .article-copy-wechat-button:hover:not(:disabled),
+.detail-body-actions .article-copy-wechat-button.copied-button {
+  background: #07a85b;
+  color: #fff;
+}
+@media (max-width: 640px) {
+  .article-body.wechat-article { padding: 14px 14px 24px; }
+  .detail-body-actions { flex-wrap: wrap; }
+}
+
+/* 正文编辑框：粘贴 / 拖入图片 */
+.content-edit-area.drag-over {
+  border-color: #e8562a;
+  background: #fff8f4;
+  box-shadow: 0 0 0 3px rgba(232, 86, 42, .12);
+}
+.content-detail > .body-upload-hint {
+  grid-column: 1 / -1;
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #8a93a5;
 }
